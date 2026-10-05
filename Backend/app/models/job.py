@@ -8,7 +8,7 @@ from app.db.base import Base, production_fk, production_table_args
 class JobMaster(Base):
     __tablename__ = "job_master"
 
-    job_id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(BigInteger, primary_key=True, index=True)
     created_at = Column(DateTime, server_default=func.now())
 
     __table_args__ = (production_table_args(),)

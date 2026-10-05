@@ -30,14 +30,16 @@ The Vitrum Glass application is a production-planning ERP focused on glass bottl
   - Frontend served via Nginx in production image (`Dockerfile`, `nginx.conf`).
   - CI pipeline builds/tests frontend and backend and pushes container images to GHCR (`.github/workflows/ci.yml`).
 
-### Module 1 scope from actual structure
-Primary implemented Module 1 surface appears to be:
-- Frontend: `src/components/planning/*`, `src/components/machines/*`, auth/profile/layout, `context/ERPContext.tsx`, `services/planningRepository.ts`.
-- Backend: `Backend/app/api/production/*`, `Backend/app/api/auth.py`, models/schemas for jobs/machines/products/holidays/audit/users.
+### Implemented System Modules
+The active modules in the application include:
+- **Production Planning**: `src/components/planning/*`, `context/ERPContext.tsx`, `services/planningRepository.ts`, `Backend/app/api/production/jobs.py`. Features multi-machine calendar grids, automatic job cascading, cumulative quantities, auto-save, end-job modal, and drawer editing.
+- **Master Management**: `src/components/master-management/*` (`BottleMasterPanel`, `BottleExportPanel`, `HolidayMasterPanel`, `MachinesModule`). Features machine section speeds/weights, bottle configs, holiday exclusions, and Excel/PDF export.
+- **Quality Control**: `src/components/quality/ProductionQualityMonitor.tsx`, `src/services/qualityRepository.ts`, `Backend/app/api/production/quality_daily.py`, `Backend/app/api/production/quality_defects.py`. Features hourly checks, defect classifications, auto-saving, weight efficiency (% WT EFF), and daily production performance tracking.
+- **Authentication & RBAC**: `src/context/AuthContext.tsx`, `src/components/auth/LoginPage.tsx`, `Backend/app/api/auth.py`, `Backend/app/api/access.py`, `Backend/app/api/permissions.py`. Role-based permissions (`auth.module_master`, `auth.user_module_permissions`) guarding module-level reads and edits.
+- **Reports & Exporting**: Standardized branded company headers (`src/utils/reportHeader.ts`) across planning exports, bottle configuration reports, and quality performance sheets.
 
-Code that appears to be future/other modules:
-- `DashboardModule` and `SettingsModule` render empty containers.
-- Reports/Quality modules currently route to `ModulePlaceholder` (“Not Developed Yet”).
+Placeholders / Future Modules:
+- `DashboardModule` and `SettingsModule` currently render containers ready for upcoming analytics widgets.
 
 ## 2. Database Schema
 Source: SQLAlchemy models under `Backend/app/models/*.py`.
@@ -294,13 +296,13 @@ Source: `src/*`.
 - `components/planning/PlanningDrawer.tsx`: modal form for creating/editing jobs with machine+bottle+section selection, metrics preview, packaging allocation, pallet options; submits to `saveJob` in context.
 - `components/planning/EditMachineModal.tsx`: grid cell edit modal for bottle/start-time/packing/required quantity.
 - `components/planning/EndJobModal.tsx`: marks job completed and schedules next start with changeover delay.
-- `components/machines/MachinesModule.tsx`: machine, bottle/config, and holiday master panels.
-- `components/machines/BottleMasterPanel.tsx`: create bottle + upsert bottle configurations by machine sections.
-- `components/machines/MachineMasterPanel.tsx`: update machine max sections.
-- `components/machines/HolidayMasterPanel.tsx`: CRUD for holiday dates.
-- `components/profile/ProfileModule.tsx`: view user and change password.
-- `components/dashboard`, `components/settings`: minimal/placeholder.
-- `components/reports`, `components/quality`: explicit “Not Developed Yet” placeholders.
+- `components/master-management/MachinesModule.tsx`: container router for machine, bottle, and holiday masters.
+- `components/master-management/BottleMasterPanel.tsx`: create bottle, edit names, and manage machine-specific section speed/weight configurations.
+- `components/master-management/BottleExportPanel.tsx`: dedicated export panel for bottle configurations to Excel and PDF.
+- `components/master-management/HolidayMasterPanel.tsx`: calendar view and CRUD operations for factory holidays.
+- `components/quality/ProductionQualityMonitor.tsx`: comprehensive quality monitoring dashboard with hourly bottle entries, defect tracking, auto-save, weight efficiency (% WT EFF), and daily performance reporting.
+- `components/profile/ProfileModule.tsx`: view authenticated user profile, roles, and change password.
+- `components/dashboard`, `components/settings`: layout placeholders ready for upcoming widgets.
 
 ### End-to-end core data flows
 #### A) Create/edit a production job (drawer/context/repository/backend)
@@ -590,6 +592,119 @@ This starts:
 - `APP_URL` (root `.env.example`; app URL reference).
 
 ## Changelog
+
+### 2026-10-05 — Fix 500 Date Query Filter Error in Jobs Endpoint & Model Type Alignment
+- **Problem:**
+  - `GET /api/production/jobs/?from_date=2026-09-25&to_date=2026-10-25` failed with a 500 Internal Server Error on deployed environments running PostgreSQL with `psycopg3`:
+    ```
+    sqlalchemy.exc.ProgrammingError: (psycopg.errors.UndefinedFunction) operator does not exist: date >= character varying
+    WHERE production_job.plan_date >= $1::VARCHAR AND production_job.plan_date <= $2::VARCHAR
+    parameters: {'plan_date_1': '2026-09-25', 'plan_date_2': '2026-10-25'}
+    ```
+- **Root Cause:**
+  - Date query parameters `from_date` and `to_date` were defined as raw strings (`Optional[str] = None`) in `get_all_jobs` and directly compared in SQLAlchemy filters (`ProductionJob.plan_date >= from_date`). In `psycopg3` (used on Render via `psycopg[binary]`), string parameters are typed strictly as `VARCHAR` (`$1::VARCHAR`), and PostgreSQL has no built-in `date >= character varying` operator.
+- **Fix:**
+  - `Backend/app/api/production/jobs.py` (`get_all_jobs`):
+    - Changed `from_date` and `to_date` query parameter types from `Optional[str]` to `Optional[date]`, allowing FastAPI/Pydantic to automatically parse and validate ISO date strings (`YYYY-MM-DD`).
+    - Added defensive string coercion with `date.fromisoformat()` for any direct Python function invocations.
+    - Added input validation returning HTTP 422 for invalid date strings (instead of 500) and HTTP 422 if `from_date > to_date` (`"from_date must be less than or equal to to_date"`).
+    - Bound native Python `datetime.date` objects to the SQLAlchemy filter expressions (`ProductionJob.plan_date >= parsed_from`, `ProductionJob.plan_date <= parsed_to`), allowing `psycopg3` to pass native PostgreSQL `DATE` parameters (`$1::DATE`).
+  - `Backend/app/models/job.py` (`JobMaster`):
+    - Changed `JobMaster.job_id` from `Column(Integer, ...)` to `Column(BigInteger, ...)` to match the live PostgreSQL column type (`bigint NOT NULL`) and align with `ProductionJob.job_id` and `JobPackaging.job_id`.
+  - Backend Audit:
+    - Audited all routers and services across the entire backend (including quality, HPR, machine master, and auth). Confirmed that all other date-based queries parse strings into `datetime.date` or `datetime` objects before querying, leaving `get_all_jobs` as the sole unparsed date filter.
+- **Files Changed:**
+  - `Backend/app/api/production/jobs.py` (function `get_all_jobs`)
+  - `Backend/app/models/job.py` (model `JobMaster`)
+  - `DOCUMENTATION.md`
+- **API Behaviour:**
+  - Response format is completely unchanged: `ProductionJobResponse.plan_date` remains typed as `date`, serializing to standard `"YYYY-MM-DD"` ISO string format so the frontend planning grid, Excel export, and PDF export operate with zero changes.
+  - New validation responses: Malformed date strings return HTTP 422 Unprocessable Entity; inverted date ranges (`from_date > to_date`) return HTTP 422.
+- **Rule for Future Development:**
+  - Always parse and type date query parameters as `date` or `datetime` before using them in database filters. Never compare SQLAlchemy `Date` or `DateTime` columns against raw strings.
+- **Strict Scope Verification:**
+  - No frontend code was modified.
+  - No database or schema changes were made (no DDL, no migrations, no ALTER).
+  - Gob calculation was untouched.
+
+### 2026-10-02 — Weight Efficiency (% WT EFF), Shift Panel Removal & Auto-Migration
+- **What changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`: Added Weight Efficiency (% WT EFF) calculation and column to the quality inspection grid; removed the redundant manual shift panel to streamline inspector workflows.
+  - `Backend/app/main.py`: Added `_ensure_hourly_production_weight_efficiency_column()` to automatically detect and execute `ALTER TABLE hpr.hourly_production ADD COLUMN weight_efficiency NUMERIC(10, 2)` on database initialization if the column is absent on pre-existing RDS instances.
+  - `Backend/app/main.py`: Hardened the `/health` endpoint to eliminate plain-text credential leaks (`db_url`), implementing a non-blocking database ping (`SELECT 1`) returning `status: "healthy"` and `database: "connected"`.
+  - Hidden internal database entry IDs from operator view in the quality table.
+  - Added Daily Production Performance Report in Quality module with job ID synchronization fixes.
+- **Files changed:** `src/components/quality/ProductionQualityMonitor.tsx`, `Backend/app/main.py`, `src/services/qualityRepository.ts`
+- **Why:** Delivers real-time Weight Efficiency data during bottle inspection, automates schema safety across database deployments, and closes security exposure on public health endpoints.
+
+### 2026-09-30 — Planning Grid Tooltip Optimization & Calendar Date Header Refinement
+- **What changed:**
+  - `src/components/planning/ProductionPlanningPage.tsx`: Disabled heavy hover tooltips on the production planning grid cells to reduce DOM re-renders and boost rendering speed.
+  - Refined calendar header date formatting, font scaling, and color contrasting for better visibility on plant floor display screens.
+  - `src/components/master-management/BottleMasterPanel.tsx`: Improved responsive UI layout, button spacing, and grid alignment.
+- **Files changed:** `src/components/planning/ProductionPlanningPage.tsx`, `src/components/master-management/BottleMasterPanel.tsx`
+- **Why:** Eliminates browser frame drops and stutter when navigating large monthly planning registers.
+
+### 2026-09-29 — Auto-Save in Planning & Quality, Branded Company Report Headers & Database-Driven RBAC
+- **What changed:**
+  - `src/components/planning/ProductionPlanningPage.tsx`: Added auto-save with debounce and optimistic local state updates, automatically persisting machine schedule edits in the background.
+  - `src/components/quality/ProductionQualityMonitor.tsx`: Added auto-save for hourly production entries, defects, and carton counts.
+  - `src/utils/reportHeader.ts`: Built a centralized report header utility that injects company branding, legal name, address, and document timestamps across all PDF and Excel exports.
+  - `Backend/app/api/access.py` & `Backend/app/api/permissions.py`: Implemented database-driven role-based access control (RBAC). Endpoints enforce `require_module_read` and `require_module_edit` based on dynamic permissions in `auth.module_master` and `auth.user_module_permissions`.
+  - `Backend/app/models/auth.py`: Isolated auth models (`AuthUser`, `ModuleMaster`, `UserModulePermission`) onto a separate `AuthBase` DeclarativeBase so `Base.metadata.create_all()` never alters server-managed auth schema tables.
+- **Files changed:** `src/components/planning/ProductionPlanningPage.tsx`, `src/components/quality/ProductionQualityMonitor.tsx`, `src/utils/reportHeader.ts`, `src/utils/exportData.ts`, `Backend/app/api/access.py`, `Backend/app/api/permissions.py`, `Backend/app/models/auth.py`, `src/context/AuthContext.tsx`
+- **Why:** Prevents accidental data loss, creates standardized executive-ready PDF/Excel printouts, and enforces dynamic security boundaries across modules.
+
+### 2026-09-28 — Quality Module Operationalization & Bottle Configuration Fixes
+- **What changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`: Full operationalization of the Quality Control module with dynamic defect dropdowns, hourly inspection inputs, carton counts, and PostgreSQL `hpr.hourly_production` persistence.
+  - `Backend/app/api/production/quality_daily.py`: Added validation for hourly bottle configs and shift supervisor assignments.
+  - `src/components/master-management/BottleMasterPanel.tsx`: Resolved bottle selection dropdown lag and ensured section-specific weight and speed values persist correctly.
+- **Files changed:** `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/master-management/BottleMasterPanel.tsx`, `Backend/app/api/production/quality_daily.py`
+- **Why:** Delivers end-to-end quality inspection tracking directly integrated with the live manufacturing line.
+
+### 2026-09-26 — Dedicated Bottle Export Panel & Machine-Specific Bottle Configurations
+- **What changed:**
+  - `src/components/master-management/BottleExportPanel.tsx`: Added dedicated export panel supporting full Excel and PDF generation for all bottle specifications and machine section configurations.
+  - `src/components/master-management/BottleMasterPanel.tsx`: Enabled machine-specific bottle configurations (weight, speed, section settings) and resolved dropdown width clipping.
+  - Restructured architecture: Reorganized master panels into `src/components/master-management/` (`BottleMasterPanel`, `BottleExportPanel`, `HolidayMasterPanel`, `MachinesModule`).
+- **Files changed:** `src/components/master-management/BottleExportPanel.tsx`, `src/components/master-management/BottleMasterPanel.tsx`, `src/components/master-management/HolidayMasterPanel.tsx`, `src/components/master-management/MachinesModule.tsx`
+- **Why:** Allows production engineers to export bottle catalogs and calibrate machine speeds per individual physical section.
+
+### 2026-09-25 — Sliding Session Timeout, Average Draw Metrics & End Job Timing Fixes
+- **What changed:**
+  - `Backend/app/api/auth.py`: Implemented sliding idle session timeout (`SESSION_IDLE_TIMEOUT_DAYS = 30`), renewing session tokens on every authenticated request so active operators are never logged out mid-shift.
+  - `src/utils/exportData.ts`: Added Average Draw calculations to export summaries and print reports.
+  - `src/components/planning/EndJobModal.tsx`: Fixed completion time calculation and furnace draw estimation when terminating a job early or on schedule.
+- **Files changed:** `Backend/app/api/auth.py`, `src/utils/exportData.ts`, `src/components/planning/EndJobModal.tsx`
+- **Why:** Eliminates disruptive session timeouts during long plant shifts and provides accurate furnace tonnage draw metrics.
+
+### 2026-09-24 — User-Based Authentication, Cascading Job Time Shifts & Edit Locks
+- **What changed:**
+  - `Backend/app/api/auth.py`: Switched to database-backed user authentication against `auth.users`, supporting login via Employee ID, email, or registered phone number.
+  - `src/components/planning/ProductionPlanningPage.tsx`: Implemented forward-cascading schedule adjustments — updating an earlier job automatically cascades forward and shifts the start dates and times of subsequent scheduled jobs on that machine.
+  - Locked extended job segments from unauthorized direct edits; configured deletion cascade to update dependent sequence runs.
+- **Files changed:** `Backend/app/api/auth.py`, `src/components/planning/ProductionPlanningPage.tsx`, `src/services/planningRepository.ts`
+- **Why:** Guarantees chronological schedule integrity across machine runs when operational delays occur.
+
+### 2026-09-22 – 2026-09-23 — Planning UI Enhancements, Ctrl+S Shortcut & Dynamic CI Workflow
+- **What changed:**
+  - `src/components/planning/ProductionPlanningPage.tsx`: Added `Ctrl+S` keyboard shortcut for fast planning saves; added Cumulative Quantity column; updated weight and cut terminology.
+  - `src/components/planning/EndJobModal.tsx`: Set default completion time to 9:00 AM with minute-level adjustment steppers; disabled edit/end buttons during invalid states.
+  - `.github/workflows/ci.yml`: Dynamically resolved repository owner (`${{ steps.repo.outputs.owner }}`) to ensure automated container builds succeed on any GitHub fork or namespace.
+- **Files changed:** `src/components/planning/ProductionPlanningPage.tsx`, `src/components/planning/EndJobModal.tsx`, `.github/workflows/ci.yml`
+- **Why:** Improves daily ergonomics for production planners and ensures CI/CD pipeline portability.
+
+### 2026-09-17 – 2026-09-21 — Core Architecture: Bulk API Fetching, SQLite Index Fix & HPR Integration
+- **What changed:**
+  - `Backend/app/api/production/jobs.py`: Optimized API queries to fetch in bulk and return essential fields only, drastically reducing payload sizes and network latency.
+  - `Backend/app/models/job.py`: Fixed duplicate index on `ProductionJob.job_id` under SQLite.
+  - Set default job start time to 7:00 AM (shift start).
+  - Improved multi-day and month-boundary job extension handling.
+  - Connected quality backend (`hpr_job`, `hourly_production`, `shift_master`, `defect_master`).
+- **Files changed:** `Backend/app/api/production/jobs.py`, `Backend/app/models/job.py`, `src/services/planningRepository.ts`
+- **Why:** Eliminated UI lag during month switches, resolved database transaction conflicts, and integrated the quality reporting backend.
+
 ### 2026-09-16 — Quality Module: Add Backend job_id Support & Efficiency Bounds Protection
 - **What changed:**
   - `Backend/app/models/quality.py`:

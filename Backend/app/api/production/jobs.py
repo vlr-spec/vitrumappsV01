@@ -6,7 +6,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional
 from decimal import Decimal
-from datetime import timedelta, datetime
+from datetime import date, datetime, timedelta
 
 from app.db.session import get_db
 from app.models.job import JobMaster, ProductionJob, JobPackaging, MachineJobSequence, generate_next_job_id
@@ -23,8 +23,8 @@ router = APIRouter(prefix="/jobs", tags=["Production Jobs"])
 def get_all_jobs(
     db: Session = Depends(get_db),
     _user: AuthUser = Depends(require_module_read(MODULE_PRODUCTION_PLANNING)),
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
     machine_no: Optional[int] = None,
     limit: Optional[int] = None,
     order_by: Optional[str] = None,
@@ -32,11 +32,32 @@ def get_all_jobs(
     """
     Fetch all production jobs.
     """
+    # Defensive coercion if passed as str in direct function invocations
+    parsed_from = from_date
+    if isinstance(parsed_from, str):
+        try:
+            parsed_from = date.fromisoformat(parsed_from)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid from_date format. Expected YYYY-MM-DD.")
+
+    parsed_to = to_date
+    if isinstance(parsed_to, str):
+        try:
+            parsed_to = date.fromisoformat(parsed_to)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid to_date format. Expected YYYY-MM-DD.")
+
+    if parsed_from and parsed_to and parsed_from > parsed_to:
+        raise HTTPException(
+            status_code=422,
+            detail="from_date must be less than or equal to to_date",
+        )
+
     query = db.query(ProductionJob).options(selectinload(ProductionJob.packaging))
-    if from_date:
-        query = query.filter(ProductionJob.plan_date >= from_date)
-    if to_date:
-        query = query.filter(ProductionJob.plan_date <= to_date)
+    if parsed_from:
+        query = query.filter(ProductionJob.plan_date >= parsed_from)
+    if parsed_to:
+        query = query.filter(ProductionJob.plan_date <= parsed_to)
     if machine_no:
         query = query.filter(ProductionJob.machine_no == machine_no)
     if order_by == "desc":
