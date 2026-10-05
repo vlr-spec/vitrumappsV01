@@ -566,37 +566,41 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
 };
 
 /**
- * The hourly slots that hold the LAST entry of their own Job ID.
+ * The ONE hourly slot of this machine and day that is still current — the
+ * entry the "+" / "−" buttons belong to. Empty string when no bottle has been
+ * picked yet (every row is still a new-job row).
  *
- * A job runs across consecutive hours, so only its newest entry may be taken
- * further: "+" belongs to the last entry of the job, and every earlier entry of
- * that same job keeps its bottle locked. The last entry is resolved from the
- * real entries of each Job ID (PRODUCTION_TIMES is in production-shift order,
- * which is the chronological order of the day) and never from "is this the
- * last filled row", so an earlier entry can never keep a "+" or unlock itself
- * and gaps in the grid cannot promote the wrong row. The set is derived from
- * the loaded/saved rows on every render, so the rule holds after "+", Save,
- * autosave, refresh and date navigation without any extra bookkeeping.
+ * A machine runs one job at a time and a job runs across consecutive hours, so
+ * exactly one entry is current and the bottle/action area has two states:
  *
- * A row whose Job ID the backend has not issued yet (a bottle just picked, not
- * saved) is its own group, so it stays extendable exactly as before.
+ *  - an entry with no bottle yet starts a job: it keeps the bottle dropdown so
+ *    a bottle can be picked,
+ *  - once a bottle is picked the entry shows the bottle as plain text and the
+ *    "+" / "−" buttons instead,
+ *  - "+" copies that entry into the next hour with the same Job ID, so the
+ *    entry it was copied from becomes historical: plain bottle text, no
+ *    dropdown, no "+", no "−",
+ *  - when a later entry starts another job the earlier Job ID is closed for
+ *    good, so even its newest entry loses the buttons and can no longer be
+ *    extended.
+ *
+ * The current entry is therefore the newest entry that carries a bottle: it is
+ * the newest entry of the newest job, and every older filled entry belongs to
+ * a job that has already been extended or closed. It is resolved from the real
+ * entries and the chronological entry time (PRODUCTION_TIMES is in
+ * production-shift order, which is the chronological order of the day) and
+ * never from "the last row of the grid" or from an array index, so gaps in the
+ * grid cannot promote the wrong row and there can never be two "+" buttons for
+ * one job. Because it is derived from the loaded/saved rows on every render,
+ * the rule holds after "+", Save, autosave, refresh, date navigation and loads
+ * from the backend without any extra bookkeeping.
  */
-const jobLastEntryTimes = (rows: Record<string, QualityHourlyEntry | undefined>): Set<string> => {
-  const lastIdxByJob = new Map<string, number>();
-  const lastTimes = new Set<string>();
-  PRODUCTION_TIMES.forEach((slot, idx) => {
-    const entry = rows[slot.time];
-    if (!entry?.bottle_id) return;
-    const jobId = entry.job_id;
-    if (!jobId) {
-      lastTimes.add(slot.time);
-      return;
-    }
-    const prevIdx = lastIdxByJob.get(jobId);
-    if (prevIdx === undefined || idx > prevIdx) lastIdxByJob.set(jobId, idx);
+const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>): string => {
+  let activeTime = '';
+  PRODUCTION_TIMES.forEach((slot) => {
+    if (rows[slot.time]?.bottle_id) activeTime = slot.time;
   });
-  lastIdxByJob.forEach((idx) => lastTimes.add(PRODUCTION_TIMES[idx].time));
-  return lastTimes;
+  return activeTime;
 };
 
 // Memoized per-hourly-row <tr>. Props are referentially stable across parent
@@ -618,10 +622,10 @@ const QualityTimeRow = React.memo<{
   copyRowDown: (time: string) => void;
   removeBottle: (time: string) => void;
   canEdit: boolean;
-  /** True only for the newest entry of the row's own Job ID (see jobLastEntryTimes). */
-  isJobLastEntry: boolean;
-  /** True for an earlier entry of a job that has already been extended. */
-  bottleLocked: boolean;
+  /** True only for the current entry of the running job (see activeJobEntryTime). */
+  isActiveEntry: boolean;
+  /** Bottle name of this entry, shown as plain text once a bottle is picked. */
+  bottleName: string;
 }>(({
   time,
   shiftIdx,
@@ -638,14 +642,22 @@ const QualityTimeRow = React.memo<{
   copyRowDown,
   removeBottle,
   canEdit,
-  isJobLastEntry,
-  bottleLocked,
+  isActiveEntry,
+  bottleName,
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
   const rowAvg = calcRowAverage(entry, gobCount);
 
+  // Bottle/action area, two states only (see activeJobEntryTime): a row without
+  // a bottle is a new-job row and offers the bottle dropdown, a row with a
+  // bottle shows it as plain text and only the current entry of the running
+  // job carries the "+" / "−" buttons.
+  const hasBottle = !!entry?.bottle_id;
+  const isCurrentEntry = hasBottle && isActiveEntry;
+
   const selectedDefectNames = defectGroups.length > 0
+
     ? allDefectNames.filter((d) => (entry?.defect_ids ?? []).includes(d))
     : (entry?.defect_ids ?? []);
 
@@ -659,6 +671,15 @@ const QualityTimeRow = React.memo<{
   };
   const tdLast: React.CSSProperties = { ...td, borderRight: 'none' };
   const tdCenter: React.CSSProperties = { ...td, textAlign: 'center' };
+  // Greyed "−" of a row that carries no bottle (nothing to remove) or no edit
+  // permission — same look in both cases.
+  const mutedActionButton: React.CSSProperties = {
+    width: '24px', height: '24px', borderRadius: '5px',
+    border: '1px solid #e2e8f0', backgroundColor: '#f8fafc', color: '#cbd5e1',
+    fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'not-allowed',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 0, flexShrink: 0,
+  };
   const selectStyle: React.CSSProperties = {
     width: '100%',
     padding: '3px 4px',
@@ -706,53 +727,78 @@ const QualityTimeRow = React.memo<{
       <td style={{ ...td, padding: '4px 6px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-  <select
-    value={entry?.bottle_id ?? ''}
-    disabled={!canEdit || bottleLocked}
-    title={bottleLocked ? 'This job is still running in a later hour — the bottle of an earlier entry cannot be changed.' : undefined}
-    onChange={(e) => {
-      selectBottle(time, e.target.value);
-    }}
-    style={{
-      flex: 1,
-      minWidth: 0,
-      padding: '3px 5px',
-      fontSize: '12px',
-      fontWeight: entry?.bottle_id ? 500 : 400,
-      color: entry?.bottle_id ? C.textMain : '#94a3b8',
-      backgroundColor: 'transparent',
-      border: '1px solid transparent',
-      borderRadius: '4px',
-      cursor: canEdit && !bottleLocked ? 'pointer' : 'not-allowed',
-      outline: 'none',
-      textAlign: 'left',
-      opacity: canEdit ? 1 : 0.6,
-    }}
-    onFocus={(e) => { e.currentTarget.style.borderColor = '#2563eb'; }}
-    onBlur={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
-  >
-    <option value="">— Select bottle</option>
-    {bottles.map((b) => (
-      <option key={b.id} value={b.id}>{b.name}</option>
-    ))}
-  </select>
+            {hasBottle ? (
+              // Bottle already picked: plain text, never a dropdown. Its Job ID
+              // is fixed, so this row is only extended with "+" (same Job ID) or
+              // removed with "−" on the current entry.
+              <span
+                title={bottleName}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '3px 5px',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  color: C.textMain,
+                  textAlign: 'left',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  opacity: canEdit ? 1 : 0.6,
+                }}
+              >
+                {bottleName}
+              </span>
+            ) : (
+              // New-job row: the dropdown is how the job's bottle is picked.
+              <select
+                value={entry?.bottle_id ?? ''}
+                disabled={!canEdit}
+                onChange={(e) => {
+                  selectBottle(time, e.target.value);
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '3px 5px',
+                  fontSize: '12px',
+                  fontWeight: 400,
+                  color: '#94a3b8',
+                  backgroundColor: 'transparent',
+                  border: '1px solid transparent',
+                  borderRadius: '4px',
+                  cursor: canEdit ? 'pointer' : 'not-allowed',
+                  outline: 'none',
+                  textAlign: 'left',
+                  opacity: canEdit ? 1 : 0.6,
+                }}
+                onFocus={(e) => { e.currentTarget.style.borderColor = '#2563eb'; }}
+                onBlur={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
+              >
+                <option value="">— Select bottle</option>
+                {bottles.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
 
-  {entry?.job_id && (
-    <span
-      style={{
-        fontSize: '9px',
-        color: '#64748b',
-        fontWeight: 600,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      ({entry.job_id})
-    </span>
-  )}
-
-  {/* KEEP YOUR EXISTING + BUTTON AND - BUTTON CODE HERE */}
-</div>
-          {entry?.bottle_id && canEdit && isJobLastEntry && (
+            {entry?.job_id && (
+              <span
+                style={{
+                  fontSize: '9px',
+                  color: '#64748b',
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ({entry.job_id})
+              </span>
+            )}
+          </div>
+          {/* "+" extends the running job into the next hour and "−" removes the
+              bottle, so both belong to the current entry alone. A historical or
+              closed job entry has plain text and no buttons at all. */}
+          {isCurrentEntry && canEdit && (
             <button
               onClick={() => copyRowDown(time)}
               title="Copy this row to the next empty slot"
@@ -769,37 +815,41 @@ const QualityTimeRow = React.memo<{
               +
             </button>
           )}
-          {entry?.bottle_id && canEdit ? (
-            <button
-              onClick={() => removeBottle(time)}
-              title="Remove one bottle from this row"
-              style={{
-                width: '24px', height: '24px', borderRadius: '5px',
-                border: '1px solid #fecdd3', backgroundColor: '#fff1f2', color: '#be123c',
-                fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: 0, flexShrink: 0, transition: 'background-color 0.15s',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
-            >
-              −
-            </button>
-          ) : (
+          {isCurrentEntry ? (
+            canEdit ? (
+              <button
+                onClick={() => removeBottle(time)}
+                title="Remove one bottle from this row"
+                style={{
+                  width: '24px', height: '24px', borderRadius: '5px',
+                  border: '1px solid #fecdd3', backgroundColor: '#fff1f2', color: '#be123c',
+                  fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  padding: 0, flexShrink: 0, transition: 'background-color 0.15s',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
+              >
+                −
+              </button>
+            ) : (
+              <button
+                disabled
+                title="No edit permission for Quality Control"
+                style={mutedActionButton}
+              >
+                −
+              </button>
+            )
+          ) : !hasBottle ? (
             <button
               disabled
-              title={entry?.bottle_id ? 'No edit permission for Quality Control' : 'No bottle to remove'}
-              style={{
-                width: '24px', height: '24px', borderRadius: '5px',
-                border: '1px solid #e2e8f0', backgroundColor: '#f8fafc', color: '#cbd5e1',
-                fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'not-allowed',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: 0, flexShrink: 0,
-              }}
+              title="No bottle to remove"
+              style={mutedActionButton}
             >
               −
             </button>
-          )}
+          ) : null}
         </div>
       </td>
 
@@ -977,8 +1027,6 @@ export const QualityControlModule: React.FC = () => {
 
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
   const [autoSaveError, setAutoSaveError] = useState('');
-
-  const [pendingBottleChange, setPendingBottleChange] = useState<{ time: string; bottleId: string } | null>(null);
 
   const setAutoSaveStatusSafe = useCallback((next: AutoSaveStatus) => {
     if (mountedRef.current) setAutoSaveStatus(next);
@@ -1386,27 +1434,42 @@ export const QualityControlModule: React.FC = () => {
 
   const allDefectNames = useMemo(() => defectGroups.flatMap((g) => g.items), [defectGroups]);
 
-  // Slots holding the last entry of their own Job ID. Only those rows can be
-  // extended with "+", and only those rows may still change their bottle.
-  // Derived from the rows themselves, so it is correct for freshly extended
-  // jobs, autosaved job IDs, data reloaded from the backend and every date.
-  const lastEntryTimes = useMemo(() => jobLastEntryTimes(activeRows), [activeRows]);
+  // The single current entry of this machine and day: only it carries the
+  // "+" / "−" buttons, every other filled entry is a finished/closed job entry.
+  // Derived from the rows themselves, so it is correct for a freshly extended
+  // job, for autosaved Job IDs, for data reloaded from the backend and for
+  // every date.
+  const activeEntryTime = useMemo(() => activeJobEntryTime(activeRows), [activeRows]);
+
+  // Bottle name shown as plain text next to a picked bottle. Resolved from the
+  // full Bottle Master list (a bottle id is machine independent), so an entry
+  // whose bottle is no longer configured on this machine still shows its name.
+  const bottleNameById = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const b of bottles) byId.set(b.id, b.name);
+    return byId;
+  }, [bottles]);
 
   // Same rule for the handlers, evaluated against the live store so it is right
-  // even when a handler runs before the next render. An entry of a job that has
-  // already been extended to a later hour is locked: its bottle, bottle name
-  // and Job ID stay exactly as they are.
-  const isBottleLocked = useCallback((time: string): boolean => {
+  // even when a handler runs before the next render. A job that a later entry
+  // has extended — or that a later job has replaced — is closed: its bottle,
+  // bottle name and Job ID stay exactly as they are and it cannot be extended.
+  const isActiveEntryTime = useCallback((time: string): boolean => {
     const machineKey = String(activeMachine);
     const rows = productionStoreRef.current?.[dateKey]?.[machineKey] ?? {};
-    const entry = rows[time];
-    if (!entry?.job_id) return false;
-    return !jobLastEntryTimes(rows).has(time);
+    return time === activeJobEntryTime(rows);
   }, [dateKey, activeMachine]);
 
+  // Pick the bottle of a blank row, which starts the job. The bottle of a row
+  // that already carries one is fixed: that entry is only extended with "+"
+  // (same Job ID) or removed with "−" (a brand-new job is started instead).
   const selectBottle = useCallback((time: string, bottleId: string) => {
     if (!canEdit) return;
-    if (isBottleLocked(time)) return;
+    const machineKey = String(activeMachine);
+    const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
+    // A job entry never changes its bottle: it is either current (buttons only)
+    // or a historical/closed entry (read-only). Both are handled elsewhere.
+    if (existingEntry?.bottle_id) return;
     if (!bottleId) {
       patchEntry(time, {
         bottle_id: '',
@@ -1419,17 +1482,6 @@ export const QualityControlModule: React.FC = () => {
       return;
     }
     const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
-    const machineKey = String(activeMachine);
-    const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
-    const prevBottle = existingEntry?.bottle_id || '';
-
-    if (prevBottle && prevBottle !== bottleId && existingEntry?.job_id) {
-      setPendingBottleChange({ time, bottleId });
-      return;
-    }
-
-    const newJobId =
-      prevBottle === bottleId ? existingEntry?.job_id || '' : '';
 
     markTouched(dateKey, machineKey, time);
     queueAutoSave(dateKey);
@@ -1444,38 +1496,7 @@ export const QualityControlModule: React.FC = () => {
             ...(prev[dateKey]?.[machineKey] ?? {}),
             [time]: {
               ...base,
-              job_id: newJobId,
-              bottle_id: bottleId,
-            },
-          },
-        },
-      };
-    });
-}, [dateKey, activeMachine, patchEntry, canEdit, markTouched, queueAutoSave, isBottleLocked]);
-
-  const confirmBottleChange = useCallback(() => {
-    if (!pendingBottleChange) return;
-    const { time, bottleId } = pendingBottleChange;
-    setPendingBottleChange(null);
-    // The job may have been extended to a later hour while the confirmation was
-    // open: the row is locked now, so the bottle and its Job ID are left alone.
-    if (isBottleLocked(time)) return;
-    const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
-    const machineKey = String(activeMachine);
-    const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
-    markTouched(dateKey, machineKey, time);
-    queueAutoSave(dateKey);
-
-    setProductionStore((prev) => {
-      const base = prev[dateKey]?.[machineKey]?.[time] ?? blankEntry(time, slot?.shift_id ?? 1);
-      return {
-        ...prev,
-        [dateKey]: {
-          ...(prev[dateKey] ?? {}),
-          [machineKey]: {
-            ...(prev[dateKey]?.[machineKey] ?? {}),
-            [time]: {
-              ...base,
+              // A new job: no Job ID yet, the backend issues one on save.
               job_id: '',
               bottle_id: bottleId,
             },
@@ -1483,18 +1504,19 @@ export const QualityControlModule: React.FC = () => {
         },
       };
     });
-  }, [pendingBottleChange, dateKey, activeMachine, markTouched, queueAutoSave, isBottleLocked]);
+  }, [dateKey, activeMachine, patchEntry, canEdit, markTouched, queueAutoSave]);
 
-  const cancelBottleChange = useCallback(() => {
-    setPendingBottleChange(null);
-  }, []);
+  // Copy a filled row down to the next empty slot. Only the current entry of the
 
-  // Copy a filled row down to the next empty slot. The row's job_id is
-  // preserved (a copied row CONTINUES the same job). If all 24 slots of the
-  // day are full, the final 8 AM row extends the same job into the next day's
-  // first row — crossing the day boundary never starts a new job.
+  // running job may do this, so a job that a later entry has already extended —
+  // or that a later job has replaced — can never be extended again. The row's
+  // job_id is preserved (a copied row CONTINUES the same job) and the entry it
+  // was copied from immediately becomes a read-only previous entry. If all 24
+  // slots of the day are full, the final 8 AM row extends the same job into the
+  // next day's first row — crossing the day boundary never starts a new job.
   const copyRowDown = useCallback((time: string) => {
     if (!canEdit) return;
+    if (!isActiveEntryTime(time)) return;
     const idx = PRODUCTION_TIMES.findIndex((pt) => pt.time === time);
     // Queue the current date up front: the copy target (same day, or the next
     // day for the 8 AM row) is only known inside the updater below, and the
@@ -1558,9 +1580,13 @@ export const QualityControlModule: React.FC = () => {
       }
       return prev;
     });
-  }, [dateKey, activeMachine, canEdit, markTouched, queueAutoSave]);
+  }, [dateKey, activeMachine, canEdit, markTouched, queueAutoSave, isActiveEntryTime]);
 
+  // Remove the bottle of the current entry, which empties the row so it can
+  // start a new job. A historical or closed job entry is read-only: its bottle
+  // and Job ID can never be removed.
   const removeBottle = useCallback((time: string) => {
+    if (!isActiveEntryTime(time)) return;
     patchEntry(time, {
       bottle_id: '',
       weight_front: '',
@@ -1581,7 +1607,7 @@ export const QualityControlModule: React.FC = () => {
       remarks: '',
       job_id: '',
     });
-  }, [patchEntry]);
+  }, [patchEntry, isActiveEntryTime]);
 
   // ── Derived calculation helpers (shared by display, export, and save payload) ─
   const gobCountFor = useCallback((machineNo: number): number =>
@@ -2587,11 +2613,13 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 const shiftIdx = Math.floor(idx / 8);
                 const isFirstInShift = idx % 8 === 0;
                 const entry = activeRows[time];
-                // A job's newest entry is the only one that can be extended and
-                // the only one whose bottle may still change; every earlier entry
-                // of the same Job ID loses its "+" and has its bottle locked.
-                const isJobLastEntry = lastEntryTimes.has(time);
-                const bottleLocked = !!entry?.job_id && !isJobLastEntry;
+                // Only the current entry of the running job carries the "+" and
+                // "−" buttons; every earlier entry of that job — and every entry
+                // of a job a later entry has replaced — is read-only plain text.
+                const isActiveEntry = time === activeEntryTime;
+                const bottleName = entry?.bottle_id
+                  ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
+                  : '';
 
                 return (
                   <QualityTimeRow
@@ -2611,8 +2639,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                     copyRowDown={copyRowDown}
                     removeBottle={removeBottle}
                     canEdit={canEdit}
-                    isJobLastEntry={isJobLastEntry}
-                    bottleLocked={bottleLocked}
+                    isActiveEntry={isActiveEntry}
+                    bottleName={bottleName}
                   />
                 );
               })}
@@ -2715,54 +2743,6 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       <QualityReport date={navDate} />
 
       <Toaster position="bottom-right" richColors />
-
-      {pendingBottleChange && (
-        <div
-          style={{
-            position: 'fixed', inset: 0, zIndex: 9999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            backgroundColor: 'rgba(0,0,0,0.4)',
-          }}
-          onClick={cancelBottleChange}
-        >
-          <div
-            style={{
-              backgroundColor: '#ffffff', borderRadius: '10px', padding: '24px',
-              maxWidth: '400px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 style={{ margin: '0 0 12px', fontSize: '16px', fontWeight: 700, color: '#1e293b' }}>
-              Change Bottle
-            </h3>
-            <p style={{ margin: '0 0 20px', fontSize: '14px', color: '#475569', lineHeight: 1.5 }}>
-              You are changing the current job. This will create a new Job ID. Do you want to continue?
-            </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={cancelBottleChange}
-                style={{
-                  padding: '8px 16px', fontSize: '13px', fontWeight: 600,
-                  color: '#475569', backgroundColor: '#f1f5f9', border: 'none',
-                  borderRadius: '6px', cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmBottleChange}
-                style={{
-                  padding: '8px 16px', fontSize: '13px', fontWeight: 600,
-                  color: '#ffffff', backgroundColor: '#2563eb', border: 'none',
-                  borderRadius: '6px', cursor: 'pointer',
-                }}
-              >
-                Yes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
