@@ -9,6 +9,7 @@ import { COMPANY_NAME, getReportHeaderLines } from '../../utils/reportHeader';
 import { calculateTheoreticalBottles } from '../../utils/calculations';
 import QualityReport from './QualityReport';
 import AllMachineReport from './AllMachineReport';
+import DailyMcSpeedWeightReport from './DailyMcSpeedWeightReport';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shift master — mirrors the production.shift_master table
@@ -2339,6 +2340,27 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             );
           })}
           <button
+            onClick={() => setActiveMachine(5)}
+            style={{
+              padding: '7px 18px',
+              margin: '8px 4px',
+              fontSize: '13px',
+              fontWeight: activeMachine === 5 ? 600 : 400,
+              color: activeMachine === 5 ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 5 ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 5 ? '#2563eb' : C.border}`,
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+              outline: 'none',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            Daily Report
+          </button>
+          <button
             onClick={() => setActiveMachine(0)}
             style={{
               padding: '7px 18px',
@@ -2357,9 +2379,9 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             onMouseEnter={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
             onMouseLeave={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            All Machine
+            Monthly Report
           </button>
-          {reportId && activeMachine !== 0 && (
+          {reportId && activeMachine >= 1 && activeMachine <= 4 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px', margin: '4px 0' }}>
               <span style={{ fontSize: '11px', fontWeight: 600, color: '#2563eb', letterSpacing: '0.02em' }}>
                 Report ID: R{String(reportId).padStart(3, '0')}
@@ -2445,7 +2467,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           </div>
         </div>
 
-        {activeMachine !== 0 && (
+        {activeMachine >= 1 && activeMachine <= 4 && (
         <>
         {/* Table */}
         <div style={{ overflowX: 'auto' }}>
@@ -2720,7 +2742,9 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         </div>
       )}
 
-      {activeMachine !== 0 && <QualityReport date={navDate} />}
+      {activeMachine >= 1 && activeMachine <= 4 && <QualityReport date={navDate} />}
+
+      {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
 
       {activeMachine === 0 && <AllMachineReport date={navDate} />}
 
