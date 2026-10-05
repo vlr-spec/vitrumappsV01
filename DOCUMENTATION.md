@@ -611,11 +611,13 @@ This starts:
     - Bound native Python `datetime.date` objects to the SQLAlchemy filter expressions (`ProductionJob.plan_date >= parsed_from`, `ProductionJob.plan_date <= parsed_to`), allowing `psycopg3` to pass native PostgreSQL `DATE` parameters (`$1::DATE`).
   - `Backend/app/models/job.py` (`JobMaster`):
     - Changed `JobMaster.job_id` from `Column(Integer, ...)` to `Column(BigInteger, ...)` to match the live PostgreSQL column type (`bigint NOT NULL`) and align with `ProductionJob.job_id` and `JobPackaging.job_id`.
-  - Backend Audit:
+  - Backend Audit & CI Dependency Fix:
     - Audited all routers and services across the entire backend (including quality, HPR, machine master, and auth). Confirmed that all other date-based queries parse strings into `datetime.date` or `datetime` objects before querying, leaving `get_all_jobs` as the sole unparsed date filter.
+    - Added `httpx==0.27.0` to `Backend/requirements.txt`. FastAPI's `TestClient` (via `starlette.testclient`, used in `Backend/tests/test_jobs_date_filter.py`) requires `httpx`. Resolved CI test collection failure on GitHub Actions where `httpx` was absent during `pip install -r Backend/requirements.txt`.
 - **Files Changed:**
   - `Backend/app/api/production/jobs.py` (function `get_all_jobs`)
   - `Backend/app/models/job.py` (model `JobMaster`)
+  - `Backend/requirements.txt`
   - `DOCUMENTATION.md`
 - **API Behaviour:**
   - Response format is completely unchanged: `ProductionJobResponse.plan_date` remains typed as `date`, serializing to standard `"YYYY-MM-DD"` ISO string format so the frontend planning grid, Excel export, and PDF export operate with zero changes.
