@@ -8,6 +8,7 @@ import { qualityRepository, QualityHourlyEntry, QualityShiftMap, QualityDayLoad,
 import { COMPANY_NAME, getReportHeaderLines } from '../../utils/reportHeader';
 import { calculateTheoreticalBottles } from '../../utils/calculations';
 import QualityReport from './QualityReport';
+import AllMachineReport from './AllMachineReport';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shift master — mirrors the production.shift_master table
@@ -2495,7 +2496,28 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               </button>
             );
           })}
-          {reportId && (
+          <button
+            onClick={() => setActiveMachine(0)}
+            style={{
+              padding: '7px 18px',
+              margin: '8px 4px',
+              fontSize: '13px',
+              fontWeight: activeMachine === 0 ? 600 : 400,
+              color: activeMachine === 0 ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 0 ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 0 ? '#2563eb' : C.border}`,
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+              outline: 'none',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            All Machine
+          </button>
+          {reportId && activeMachine !== 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px', margin: '4px 0' }}>
               <span style={{ fontSize: '11px', fontWeight: 600, color: '#2563eb', letterSpacing: '0.02em' }}>
                 Report ID: R{String(reportId).padStart(3, '0')}
@@ -2579,6 +2601,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           </div>
         </div>
 
+        {activeMachine !== 0 && (
+        <>
         {/* Table */}
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
@@ -2735,12 +2759,13 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             </button>
           )}
         </div>
+        </>
+        )}
       </div>
 
-      {/* Daily Production Performance Report — existing QualityReport component,
-          rendered directly below the Quality/HPR hourly table card. It receives
-          navDate so both sections always share the same selected date. */}
-      <QualityReport date={navDate} />
+      {activeMachine !== 0 && <QualityReport date={navDate} />}
+
+      {activeMachine === 0 && <AllMachineReport date={navDate} />}
 
       <Toaster position="bottom-right" richColors />
     </div>
