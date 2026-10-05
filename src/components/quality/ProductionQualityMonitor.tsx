@@ -80,27 +80,12 @@ const C = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Auto-save — every edit is persisted to the database without pressing Save
+// Manual save only — no auto-save in the Quality Module. Data reaches the
+// database exclusively through the confirmed Save button action below.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Quiet period after the last keystroke / click before the changed rows are
- * written. Long enough to collapse a burst of typing in one cell into a single
- * request, short enough that the database is current within a second or two of
- * the operator stopping.
- */
-const AUTO_SAVE_DEBOUNCE_MS = 1200;
-
-/** How long a "Saved" / "Save failed" chip stays on screen before resetting. */
-const AUTO_SAVE_STATUS_RESET_MS = 4000;
-
-/** Backoff schedule (ms) for retrying a failed auto-save. Idempotent: the
- *  backend upserts by (report_id, machine_no, time), so a retry can never
- *  create a duplicate row. */
-const AUTO_SAVE_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 30000];
-
-/** Lifecycle of the auto-save indicator shown in the save bar. */
-type AutoSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
+/** Lifecycle of the manual-save indicator shown in the save bar. */
+type ManualSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 /**
  * The only fields a save response is allowed to change on an existing row.
@@ -109,9 +94,8 @@ type AutoSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error';
  */
 const MERGED_ROW_FIELDS = ['entry_id', 'report_id', 'job_id', 'bottle_id'] as const;
 
-const AUTO_SAVE_STATUS_VIEW: Record<AutoSaveStatus, { label: string; color: string }> = {
+const MANUAL_SAVE_STATUS_VIEW: Record<ManualSaveStatus, { label: string; color: string }> = {
   idle: { label: '', color: '#94a3b8' },
-  pending: { label: 'Unsaved changes', color: '#b45309' },
   saving: { label: 'Saving...', color: '#2563eb' },
   saved: { label: 'Saved', color: '#15803d' },
   error: { label: 'Save failed', color: '#b91c1c' },
@@ -593,7 +577,7 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
  * never from "the last row of the grid" or from an array index, so gaps in the
  * grid cannot promote the wrong row and there can never be two "+" buttons for
  * one job. Because it is derived from the loaded/saved rows on every render,
- * the rule holds after "+", Save, autosave, refresh, date navigation and loads
+ * the rule holds after "+", Save, refresh, date navigation and loads
  * from the backend without any extra bookkeeping.
  */
 const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>): string => {
@@ -752,11 +736,15 @@ const QualityTimeRow = React.memo<{
               </span>
             ) : (
               // New-job row: the dropdown is how the job's bottle is picked.
+              // The pick is confirmed first, so the previous bottle stays
+              // displayed until the user clicks Yes.
               <select
                 value={entry?.bottle_id ?? ''}
                 disabled={!canEdit}
                 onChange={(e) => {
-                  selectBottle(time, e.target.value);
+                  const next = e.target.value;
+                  e.target.value = entry?.bottle_id ?? '';
+                  selectBottle(time, next);
                 }}
                 style={{
                   flex: 1,
@@ -995,7 +983,7 @@ export const QualityControlModule: React.FC = () => {
   // Each mark is stamped with a monotonically increasing sequence number: a
   // save can then clear exactly the marks it persisted and leave marks that
   // were written again while the request was in flight, so an edit made
-  // mid-request can never be dropped from the next auto-save.
+  // mid-request can never be dropped from the next manual save.
   const touchedTimes = useRef<Record<string, Record<string, Record<string, number>>>>({});
   const touchSeq = useRef(0);
 
@@ -1009,29 +997,21 @@ export const QualityControlModule: React.FC = () => {
     shiftStoreRef.current = shiftStore;
   }, [shiftStore]);
 
-  // ── Auto-save bookkeeping ────────────────────────────────────────────────
-  // Dates with rows (or shift assignments) that still have to reach the
-  // database. Membership is ref-only so queueing never re-renders the grid.
-  const dirtyDatesRef = useRef<Set<string>>(new Set());
-  const dirtyShiftsRef = useRef<Set<string>>(new Set());
-  const autoSaveTimerRef = useRef<number | null>(null);
-  const retryTimerRef = useRef<number | null>(null);
-  const retryAttemptRef = useRef(0);
-  const statusResetTimerRef = useRef<number | null>(null);
-  const mountedRef = useRef(true);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  // ── Manual-save status ───────────────────────────────────────────────────
+  // No auto-save: edits only mark rows touched in memory. The database is
+  // written exclusively by the confirmed Save button action.
+  const [saveStatus, setSaveStatus] = useState<ManualSaveStatus>('idle');
+  const [saveError, setSaveError] = useState('');
+  const [showSaveConfirm, setShowSaveConfirm] = useState(false);
 
-  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle');
-  const [autoSaveError, setAutoSaveError] = useState('');
-
-  const setAutoSaveStatusSafe = useCallback((next: AutoSaveStatus) => {
-    if (mountedRef.current) setAutoSaveStatus(next);
-  }, []);
+  // ── Bottle/job-change confirmation ─────────────────────────────────────
+  // A bottle pick (or bottle removal) starts/clears a JOB, so it is staged
+  // here and applied only after the user clicks Yes. Until then the store —
+  // the source of truth — is untouched, so No keeps the previous bottle/JOB.
+  type PendingJobChange =
+    | { kind: 'select'; time: string; bottleId: string }
+    | { kind: 'remove'; time: string };
+  const [pendingJobChange, setPendingJobChange] = useState<PendingJobChange | null>(null);
 
   // Guards Save against concurrent/duplicate submissions.
   const savingRef = useRef(false);
@@ -1184,15 +1164,8 @@ export const QualityControlModule: React.FC = () => {
     job_id: '',
   });
 
-  // ── Auto-save plumbing ───────────────────────────────────────────────────
-
-  /** Latest `runSave`, so timers always invoke the current closure. */
-  const runSaveRef = useRef<
-    (
-      dates: string[],
-      options: { touchedOnly: boolean; silent: boolean; reason: 'auto' | 'manual' | 'retry' | 'unload' }
-    ) => Promise<void>
-  >(async () => {});
+  // ── Manual-save plumbing ─────────────────────────────────────────────────
+  // Edits only touch in-memory state. Nothing here writes to the backend.
 
   /**
    * Marks one cell dirty and stamps it with a fresh sequence number. Only
@@ -1204,131 +1177,6 @@ export const QualityControlModule: React.FC = () => {
     const byMachine = byDate[machineKey] ?? (byDate[machineKey] = {});
     byMachine[time] = ++touchSeq.current;
   }, []);
-
-  /** Number of cells currently marked dirty for a date. */
-  const pendingCellCount = useCallback((date: string): number => {
-    const byMachine = touchedTimes.current[date];
-    if (!byMachine) return 0;
-    let count = 0;
-    for (const byTime of Object.values(byMachine)) count += Object.keys(byTime).length;
-    return count;
-  }, []);
-
-  const clearAutoSaveTimer = useCallback(() => {
-    if (autoSaveTimerRef.current !== null) {
-      window.clearTimeout(autoSaveTimerRef.current);
-      autoSaveTimerRef.current = null;
-    }
-  }, []);
-
-  const clearRetryTimer = useCallback(() => {
-    if (retryTimerRef.current !== null) {
-      window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-  }, []);
-
-  const clearStatusResetTimer = useCallback(() => {
-    if (statusResetTimerRef.current !== null) {
-      window.clearTimeout(statusResetTimerRef.current);
-      statusResetTimerRef.current = null;
-    }
-  }, []);
-
-  /**
-   * Requests a debounced auto-save for one date. Every mutation funnels through
-   * here, so a burst of keystrokes collapses into exactly one request and the
-   * grid itself never re-renders because of save bookkeeping (refs only).
-   */
-  const queueAutoSave = useCallback((date: string, isShiftChange = false) => {
-    dirtyDatesRef.current.add(date);
-    if (isShiftChange) dirtyShiftsRef.current.add(date);
-    setAutoSaveStatusSafe('pending');
-    // A fresh edit supersedes any armed backoff: the payload is about to
-    // change, so the retry budget starts again from the next failure.
-    retryAttemptRef.current = 0;
-    clearRetryTimer();
-    clearStatusResetTimer();
-    clearAutoSaveTimer();
-    autoSaveTimerRef.current = window.setTimeout(() => {
-      autoSaveTimerRef.current = null;
-      void runSaveRef.current([date], { touchedOnly: true, silent: true, reason: 'auto' });
-    }, AUTO_SAVE_DEBOUNCE_MS);
-  }, [clearAutoSaveTimer, clearRetryTimer, clearStatusResetTimer, setAutoSaveStatusSafe]);
-
-  // Every dirty date — including the continuation dates a "+" row can spill
-  // into — is flushed together, so an auto-save never persists a day while its
-  // cross-midnight neighbour is still only in memory.
-  const drainDirtyDates = useCallback((): string[] => {
-    const dates = new Set<string>(dirtyDatesRef.current);
-    for (const auxKey of Object.keys(continuationDates.current)) dates.add(auxKey);
-    return [...dates].filter((d) => pendingCellCount(d) > 0 || dirtyShiftsRef.current.has(d));
-  }, [pendingCellCount]);
-
-  /**
-   * Retries the dirty set with a growing backoff. The save endpoint upserts by
-   * (report_id, machine_no, time) and returns the committed rows, so replaying
-   * the identical payload updates the same records — a retry can never create a
-   * duplicate entry. After the last delay the indicator stays on "Save failed"
-   * and the Save button remains available as the manual escape hatch.
-   */
-  const scheduleRetry = useCallback(() => {
-    const attempt = retryAttemptRef.current;
-    if (attempt >= AUTO_SAVE_RETRY_DELAYS_MS.length) {
-      setAutoSaveStatusSafe('error');
-      return;
-    }
-    const delay = AUTO_SAVE_RETRY_DELAYS_MS[attempt];
-    retryAttemptRef.current = attempt + 1;
-    setAutoSaveStatusSafe('error');
-    clearRetryTimer();
-    retryTimerRef.current = window.setTimeout(() => {
-      retryTimerRef.current = null;
-      const remaining = drainDirtyDates();
-      if (remaining.length === 0) {
-        retryAttemptRef.current = 0;
-        return;
-      }
-      void runSaveRef.current(remaining, { touchedOnly: true, silent: true, reason: 'retry' });
-    }, delay);
-  }, [clearRetryTimer, drainDirtyDates, setAutoSaveStatusSafe]);
-
-  // Best-effort safety net for a closing/backgrounded tab: flush immediately
-  // instead of waiting out the debounce window. The request is sent with
-  // `keepalive` so the browser lets it finish even while the page goes away.
-  useEffect(() => {
-    const flushNow = () => {
-      const remaining = drainDirtyDates();
-      if (remaining.length === 0) return;
-      clearAutoSaveTimer();
-      void runSaveRef.current(remaining, { touchedOnly: true, silent: true, reason: 'unload' });
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') flushNow();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('pagehide', flushNow);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('pagehide', flushNow);
-    };
-  }, [drainDirtyDates, clearAutoSaveTimer]);
-
-  // Unmount must not leave a pending debounce behind: flush whatever is dirty
-  // one last time (the request may not complete, but nothing is silently lost).
-  useEffect(
-    () => () => {
-      if (autoSaveTimerRef.current !== null) {
-        window.clearTimeout(autoSaveTimerRef.current);
-        autoSaveTimerRef.current = null;
-        const dates = [...dirtyDatesRef.current];
-        if (dates.length > 0) {
-          void runSaveRef.current(dates, { touchedOnly: true, silent: true, reason: 'unload' });
-        }
-      }
-    },
-    []
-  );
 
   // Memoized view of the active machine's hourly rows for the selected date.
   // The table body and summary read from this stable map, so editing one row
@@ -1351,7 +1199,7 @@ export const QualityControlModule: React.FC = () => {
     const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
     const mStr = String(activeMachine);
     markTouched(dateKey, mStr, time);
-    queueAutoSave(dateKey);
+    // Manual save only: no automatic backend write here.
     setProductionStore((prev) => {
       const existing = prev[dateKey]?.[mStr]?.[time] ?? blankEntry(time, slot?.shift_id ?? 1);
       return {
@@ -1365,7 +1213,7 @@ export const QualityControlModule: React.FC = () => {
         },
       };
     });
-  }, [dateKey, activeMachine, canEdit, markTouched, queueAutoSave]);
+  }, [dateKey, activeMachine, canEdit, markTouched]);
 
   // ── Shift assignments ────────────────────────────────────────────────────
   const getShiftAssignment = (shiftId: number) =>
@@ -1373,7 +1221,7 @@ export const QualityControlModule: React.FC = () => {
 
   const patchShiftAssignment = (shiftId: number, patch: { supervisor?: string; executive?: string }) => {
     if (!canEdit) return;
-    queueAutoSave(dateKey, true);
+    // Manual save only: shift edits stay in memory until Save is confirmed.
     setShiftStore((prev) => ({
       ...prev,
       [dateKey]: {
@@ -1438,7 +1286,7 @@ export const QualityControlModule: React.FC = () => {
   // The single current entry of this machine and day: only it carries the
   // "+" / "−" buttons, every other filled entry is a finished/closed job entry.
   // Derived from the rows themselves, so it is correct for a freshly extended
-  // job, for autosaved Job IDs, for data reloaded from the backend and for
+  // job, for saved Job IDs, for data reloaded from the backend and for
   // every date.
   const activeEntryTime = useMemo(() => activeJobEntryTime(activeRows), [activeRows]);
 
@@ -1461,31 +1309,15 @@ export const QualityControlModule: React.FC = () => {
     return time === activeJobEntryTime(rows);
   }, [dateKey, activeMachine]);
 
-  // Pick the bottle of a blank row, which starts the job. The bottle of a row
-  // that already carries one is fixed: that entry is only extended with "+"
-  // (same Job ID) or removed with "−" (a brand-new job is started instead).
-  const selectBottle = useCallback((time: string, bottleId: string) => {
+  // Applies a confirmed bottle pick using the existing job-change logic
+  // unchanged: a new job starts with no Job ID; the backend issues one on save.
+  const applySelectBottle = useCallback((time: string, bottleId: string) => {
     if (!canEdit) return;
     const machineKey = String(activeMachine);
-    const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
-    // A job entry never changes its bottle: it is either current (buttons only)
-    // or a historical/closed entry (read-only). Both are handled elsewhere.
-    if (existingEntry?.bottle_id) return;
-    if (!bottleId) {
-      patchEntry(time, {
-        bottle_id: '',
-        weight_front: '',
-        weight_middle: '',
-        weight_rear: '',
-        speed_per_min: '',
-        job_id: '',
-      });
-      return;
-    }
     const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
 
     markTouched(dateKey, machineKey, time);
-    queueAutoSave(dateKey);
+    // Manual save only: no automatic backend write here.
 
     setProductionStore((prev) => {
       const base = prev[dateKey]?.[machineKey]?.[time] ?? blankEntry(time, slot?.shift_id ?? 1);
@@ -1505,7 +1337,33 @@ export const QualityControlModule: React.FC = () => {
         },
       };
     });
-  }, [dateKey, activeMachine, patchEntry, canEdit, markTouched, queueAutoSave]);
+  }, [dateKey, activeMachine, canEdit, markTouched]);
+
+  // Pick the bottle of a blank row, which starts the job. The bottle of a row
+  // that already carries one is fixed: that entry is only extended with "+"
+  // (same Job ID) or removed with "−" (a brand-new job is started instead).
+  // A non-empty pick changes the JOB, so it is staged for confirmation and
+  // applied only after the user clicks Yes — never before.
+  const selectBottle = useCallback((time: string, bottleId: string) => {
+    if (!canEdit) return;
+    const machineKey = String(activeMachine);
+    const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
+    // A job entry never changes its bottle: it is either current (buttons only)
+    // or a historical/closed entry (read-only). Both are handled elsewhere.
+    if (existingEntry?.bottle_id) return;
+    if (!bottleId) {
+      patchEntry(time, {
+        bottle_id: '',
+        weight_front: '',
+        weight_middle: '',
+        weight_rear: '',
+        speed_per_min: '',
+        job_id: '',
+      });
+      return;
+    }
+    setPendingJobChange({ kind: 'select', time, bottleId });
+  }, [dateKey, activeMachine, patchEntry, canEdit]);
 
   // Copy a filled row down to the next empty slot. Only the current entry of the
 
@@ -1519,17 +1377,13 @@ export const QualityControlModule: React.FC = () => {
     if (!canEdit) return;
     if (!isActiveEntryTime(time)) return;
     const idx = PRODUCTION_TIMES.findIndex((pt) => pt.time === time);
-    // Queue the current date up front: the copy target (same day, or the next
-    // day for the 8 AM row) is only known inside the updater below, and the
-    // next day's row is always flushed together with this date anyway.
-    queueAutoSave(dateKey);
+    // Manual save only: the extended row stays in memory until Save is confirmed.
     setProductionStore((prev) => {
       const machineKey = String(activeMachine);
       const source = prev[dateKey]?.[machineKey]?.[time];
       if (!source?.bottle_id) return prev;
       const markRow = (date: string, mKey: string, tKey: string) => {
         markTouched(date, mKey, tKey);
-        dirtyDatesRef.current.add(date);
       };
       for (let i = idx + 1; i < PRODUCTION_TIMES.length; i++) {
         const nextTime = PRODUCTION_TIMES[i].time;
@@ -1581,13 +1435,10 @@ export const QualityControlModule: React.FC = () => {
       }
       return prev;
     });
-  }, [dateKey, activeMachine, canEdit, markTouched, queueAutoSave, isActiveEntryTime]);
+  }, [dateKey, activeMachine, canEdit, markTouched, isActiveEntryTime]);
 
-  // Remove the bottle of the current entry, which empties the row so it can
-  // start a new job. A historical or closed job entry is read-only: its bottle
-  // and Job ID can never be removed.
-  const removeBottle = useCallback((time: string) => {
-    if (!isActiveEntryTime(time)) return;
+  // Applies a confirmed bottle removal using the existing logic unchanged.
+  const applyRemoveBottle = useCallback((time: string) => {
     patchEntry(time, {
       bottle_id: '',
       weight_front: '',
@@ -1608,7 +1459,34 @@ export const QualityControlModule: React.FC = () => {
       remarks: '',
       job_id: '',
     });
-  }, [patchEntry, isActiveEntryTime]);
+  }, [patchEntry]);
+
+  // Remove the bottle of the current entry, which empties the row so it can
+  // start a new job. A historical or closed job entry is read-only: its bottle
+  // and Job ID can never be removed. Clearing changes the JOB, so it is
+  // staged for confirmation and applied only after the user clicks Yes.
+  const removeBottle = useCallback((time: string) => {
+    if (!canEdit) return;
+    if (!isActiveEntryTime(time)) return;
+    setPendingJobChange({ kind: 'remove', time });
+  }, [canEdit, isActiveEntryTime]);
+
+  /** User clicked Yes: apply the staged bottle/job change. */
+  const confirmJobChange = useCallback(() => {
+    const pending = pendingJobChange;
+    setPendingJobChange(null);
+    if (!pending) return;
+    if (pending.kind === 'select') {
+      applySelectBottle(pending.time, pending.bottleId);
+    } else {
+      applyRemoveBottle(pending.time);
+    }
+  }, [pendingJobChange, applySelectBottle, applyRemoveBottle]);
+
+  /** User clicked No: discard the staged change, keeping the previous bottle/JOB. */
+  const cancelJobChange = useCallback(() => {
+    setPendingJobChange(null);
+  }, []);
 
   // ── Derived calculation helpers (shared by display, export, and save payload) ─
   const gobCountFor = useCallback((machineNo: number): number =>
@@ -1702,11 +1580,7 @@ export const QualityControlModule: React.FC = () => {
   // Builds the smallest correct payload: only rows edited in this session and
   // rows that carry real data are included — never the pre-loaded empty 24-slot
   // grid. Touched-but-cleared rows are still sent so the backend clears values
-  // that were previously saved.
-  //
-  // `touchedOnly` is used by the auto-save path: it narrows the payload to the
-  // cells the operator actually changed, so a background save never rewrites
-  // the rest of the day (and never touches another machine's rows).
+  // that were previously saved. Only the manual Save action calls this.
   const buildSavePayload = (
     date: string,
     store: Record<string, Record<string, Record<string, QualityHourlyEntry>>>,
@@ -1741,30 +1615,24 @@ export const QualityControlModule: React.FC = () => {
   };
 
   /**
-   * Single write path for the whole module. The Save button, the debounced
-   * auto-save and the retry loop all go through it, so a background write is
-   * byte-for-byte the same operation as a manual one.
+   * Single write path for the whole module. Only the confirmed Save button
+   * action reaches here — no edit, extend, refresh or lifecycle hook calls it
+   * automatically.
    */
-  const runSave = async (
-    dates: string[],
-    options: { touchedOnly: boolean; silent: boolean; reason: 'auto' | 'manual' | 'retry' | 'unload' }
-  ): Promise<void> => {
+  const runSave = async (dates: string[]): Promise<void> => {
     if (!canEdit) {
-      if (options.reason === 'manual') toast.error('You do not have permission to edit quality data.');
+      toast.error('You do not have permission to edit quality data.');
       return;
     }
-    // A save is already running. Whatever is still dirty is picked up when that
-    // run finishes (it re-checks the dirty set in its `finally`), so this call
-    // simply joins the in-flight write instead of issuing a duplicate request.
+    // Guard against concurrent/duplicate submissions.
     if (savingRef.current) return;
     savingRef.current = true;
+    // Show "Saving..." immediately so the status paints even when the request
+    // takes a while. React flushes these updates before the awaited request
+    // below yields back.
     setSaving(true);
-    if (options.reason !== 'manual') {
-      clearStatusResetTimer();
-      setAutoSaveStatusSafe('saving');
-    }
-    // Declared out here so the post-save scheduling below can see whether this
-    // run persisted everything it tried to.
+    setSaveStatus('saving');
+    setSaveError('');
     let failed = 0;
 
     try {
@@ -1782,11 +1650,9 @@ export const QualityControlModule: React.FC = () => {
         // database ids back into the store, and a later date in this loop must
         // build its payload from that merged state.
         const store = productionStoreRef.current;
-        const shiftedDirty = dirtyShiftsRef.current.has(date);
-        const payload = buildSavePayload(date, store, touchedTimes.current[date], options.touchedOnly);
-        // Only ship the shift rows when this run is meant to persist them:
-        // an hourly-only auto-save must not rewrite the assignments.
-        const shifts = options.touchedOnly && !shiftedDirty ? {} : (shiftStoreRef.current[date] ?? {});
+        const payload = buildSavePayload(date, store, touchedTimes.current[date], false);
+        // Manual save persists the full day state including shift assignments.
+        const shifts = shiftStoreRef.current[date] ?? {};
         if (Object.keys(store[date] ?? {}).length === 0 && Object.keys(shifts).length === 0) continue;
         if (Object.keys(payload).length === 0 && Object.keys(shifts).length === 0) continue;
         // Remember which sequence numbers this request is about to persist so
@@ -1799,9 +1665,7 @@ export const QualityControlModule: React.FC = () => {
             if (seq) (sentSeqs[mStr] ??= {})[time] = seq;
           }
         }
-        const result = await qualityRepository.save(date, payload, shifts, {
-          keepalive: options.reason === 'unload',
-        });
+        const result = await qualityRepository.save(date, payload, shifts);
         attempted = true;
         if (!result.ok) {
           // Never swallow the reason: the rows for this date were NOT saved.
@@ -1912,8 +1776,8 @@ export const QualityControlModule: React.FC = () => {
         }
         // These rows are now persisted. Clear ONLY the marks this request
         // carried: a cell edited again while the request was in flight has a
-        // newer sequence number, so it stays dirty and is written by the very
-        // next auto-save. Clearing the whole date instead would silently drop
+        // newer sequence number, so it stays marked and is included in the next
+        // manual save. Clearing the whole date instead would silently drop
         // that edit when the page is refreshed.
         const byDateTouched = touchedTimes.current[date];
         if (byDateTouched) {
@@ -1925,10 +1789,6 @@ export const QualityControlModule: React.FC = () => {
             }
           }
         }
-        // A shift-only edit leaves no touched cells, so this flag is cleared
-        // unconditionally: reaching here means the day was persisted.
-        dirtyShiftsRef.current.delete(date);
-        if (pendingCellCount(date) === 0) dirtyDatesRef.current.delete(date);
         setSavedFlags((prev) => ({ ...prev, [date]: true }));
       }
 
@@ -1936,63 +1796,45 @@ export const QualityControlModule: React.FC = () => {
         const message = lastError
           ? `Save failed — ${lastError}`
           : 'Save failed — changes were not persisted. Check your connection and try again.';
-        setAutoSaveError(message);
-        if (options.silent) toast.error(`${message} Retrying automatically.`);
-        else toast.error(message);
-        scheduleRetry();
+        setSaveError(message);
+        setSaveStatus('error');
+        toast.error(message);
       } else if (savedAny) {
-        retryAttemptRef.current = 0;
-        setAutoSaveError('');
-        setAutoSaveStatusSafe('saved');
-        if (!options.silent) toast.success(`Saved production quality data for ${dateLabel}`);
+        setSaveError('');
+        setSaveStatus('saved');
+        toast.success(`Saved production quality data for ${dateLabel}`);
       } else if (attempted) {
-        setAutoSaveStatusSafe('error');
+        setSaveStatus('error');
         toast.error('Save failed — changes were not persisted. Check your connection and try again.');
       } else {
-        // Nothing was left to write — the operator cleared a cell back to empty
-        // inside the debounce window, so there is no pending change to report.
-        setAutoSaveError('');
-        setAutoSaveStatusSafe('idle');
+        // Nothing was left to write — the grid holds no meaningful rows.
+        setSaveError('');
+        setSaveStatus('idle');
       }
     } finally {
       savingRef.current = false;
       setSaving(false);
     }
-
-    // Anything that became dirty while the request was in flight is flushed now
-    // so a burst of edits never needs a second manual save. A failed run never
-    // reschedules here: the backoff loop below owns the retries, and adding a
-    // second schedule on top of it would hammer an unreachable server.
-    if (failed === 0 && options.reason !== 'unload' && retryTimerRef.current === null && dirtyDatesRef.current.size > 0) {
-      const remaining = drainDirtyDates();
-      if (remaining.length > 0) {
-        clearAutoSaveTimer();
-        autoSaveTimerRef.current = window.setTimeout(() => {
-          autoSaveTimerRef.current = null;
-          void runSaveRef.current(remaining, { touchedOnly: true, silent: true, reason: 'auto' });
-        }, AUTO_SAVE_DEBOUNCE_MS);
-        setAutoSaveStatusSafe('pending');
-      }
-    }
-
-    // Fade the indicator back to its resting state once a write has landed and
-    // nothing new has been typed in the meantime.
-    if (dirtyDatesRef.current.size === 0 && retryTimerRef.current === null) {
-      clearStatusResetTimer();
-      statusResetTimerRef.current = window.setTimeout(() => {
-        statusResetTimerRef.current = null;
-        if (dirtyDatesRef.current.size === 0) setAutoSaveStatusSafe('idle');
-      }, AUTO_SAVE_STATUS_RESET_MS);
-    }
+    // No automatic retry and no status auto-reset: "Saved" stays visible until
+    // the next manual save, and failures stay on "Save failed" until retried
+    // manually via the Save button.
   };
 
-  /** Re-arms runSaveRef so timers always reach the newest closure. */
-  useEffect(() => {
-    runSaveRef.current = runSave;
-  });
-
+  /** Save button entry point: ask for confirmation first, save only on Yes. */
   const handleSave = () => {
-    void runSaveRef.current([dateKey], { touchedOnly: false, silent: false, reason: 'manual' });
+    if (savingRef.current) return;
+    setShowSaveConfirm(true);
+  };
+
+  /** User confirmed the save dialog with Yes: close it and write to the backend. */
+  const confirmSave = () => {
+    setShowSaveConfirm(false);
+    void runSave([dateKey]);
+  };
+
+  /** User cancelled the save dialog with No: keep the current data unchanged. */
+  const cancelSave = () => {
+    setShowSaveConfirm(false);
   };
 
   const handleExport = () => {
@@ -2526,23 +2368,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           )}
           <div style={{ flex: 1 }} />
 
-          {/* Date navigation */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '0 6px' }}>
-            <button
-              onClick={() => shiftDate(-1)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 11px',
-                fontSize: '12px', fontWeight: 500, color: C.textMuted, backgroundColor: 'transparent',
-                border: `1px solid ${C.border}`, borderRadius: '6px', cursor: 'pointer',
-                whiteSpace: 'nowrap', transition: 'background-color 0.15s',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-            >
-              <span style={{ fontSize: '14px', lineHeight: 1 }}>‹</span> Previous Day
-            </button>
-
-            {/* Date filter — pick any date directly (shared by HRP + Daily Report) */}
+          {/* Date filter — pick any date directly (shared by HRP + Daily Report) */}
             <label
               style={{
                 display: 'flex', alignItems: 'center', gap: '5px', padding: '3px 8px',
@@ -2567,6 +2393,24 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 }}
               />
             </label>
+
+          {/* Date navigation */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '0 6px' }}>
+            <button
+              onClick={() => shiftDate(-1)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 11px',
+                fontSize: '12px', fontWeight: 500, color: C.textMuted, backgroundColor: 'transparent',
+                border: `1px solid ${C.border}`, borderRadius: '6px', cursor: 'pointer',
+                whiteSpace: 'nowrap', transition: 'background-color 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+            >
+              <span style={{ fontSize: '14px', lineHeight: 1 }}>‹</span> Previous Day
+            </button>
+
+            
 
             <button
               onClick={() => setNavDate(new Date())}
@@ -2715,25 +2559,25 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           </table>
         </div>
 
-        {/* Auto-save status + Save button */}
+        {/* Manual-save status + Save button */}
         <div className="no-print" style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '12px', padding: '10px 14px', borderTop: `1px solid ${C.border}`, backgroundColor: '#fafafa' }}>
-          {autoSaveStatus !== 'idle' ? (
+          {saveStatus !== 'idle' ? (
             <span
-              title={autoSaveStatus === 'error' && autoSaveError ? autoSaveError : undefined}
+              title={saveStatus === 'error' && saveError ? saveError : undefined}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: '6px',
-                fontSize: '11.5px', color: AUTO_SAVE_STATUS_VIEW[autoSaveStatus].color, fontWeight: 600,
+                fontSize: '11.5px', color: MANUAL_SAVE_STATUS_VIEW[saveStatus].color, fontWeight: 600,
               }}
             >
               <span
                 aria-hidden
                 style={{
                   width: '7px', height: '7px', borderRadius: '50%',
-                  backgroundColor: AUTO_SAVE_STATUS_VIEW[autoSaveStatus].color,
-                  opacity: autoSaveStatus === 'saving' ? 0.45 : 1,
+                  backgroundColor: MANUAL_SAVE_STATUS_VIEW[saveStatus].color,
+                  opacity: saveStatus === 'saving' ? 0.45 : 1,
                 }}
               />
-              {AUTO_SAVE_STATUS_VIEW[autoSaveStatus].label}
+              {MANUAL_SAVE_STATUS_VIEW[saveStatus].label}
             </span>
           ) : (
             savedFlags[dateKey] && (
@@ -2762,6 +2606,119 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         </>
         )}
       </div>
+
+      {pendingJobChange && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.45)', zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '16px',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm job change"
+            style={{
+              backgroundColor: '#ffffff', borderRadius: '10px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.2)',
+              border: '1px solid #e2e8f0',
+              width: '100%', maxWidth: '380px',
+              padding: '20px',
+            }}
+          >
+            <div style={{ fontSize: '14px', fontWeight: 700, color: '#1e293b', marginBottom: '8px' }}>
+              Confirm job change
+            </div>
+            <div style={{ fontSize: '13px', color: '#475569', marginBottom: '18px' }}>
+              Are you sure you want to change the JOB?
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={cancelJobChange}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
+                  color: '#475569', backgroundColor: '#ffffff',
+                  border: '1px solid #cbd5e1', borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                No
+              </button>
+              <button
+                onClick={confirmJobChange}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 600,
+                  color: '#ffffff', backgroundColor: '#2563eb',
+                  border: 'none', borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSaveConfirm && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.45)', zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '16px',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm save"
+            style={{
+              backgroundColor: '#ffffff', borderRadius: '10px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.2)',
+              border: '1px solid #e2e8f0',
+              width: '100%', maxWidth: '380px',
+              padding: '20px',
+            }}
+          >
+            <div style={{ fontSize: '14px', fontWeight: 700, color: '#1e293b', marginBottom: '8px' }}>
+              Confirm save
+            </div>
+            <div style={{ fontSize: '13px', color: '#475569', marginBottom: '18px' }}>
+              Are you sure you want to save the data?
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={cancelSave}
+                disabled={saving}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
+                  color: '#475569', backgroundColor: '#ffffff',
+                  border: '1px solid #cbd5e1', borderRadius: '6px',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                }}
+              >
+                No
+              </button>
+              <button
+                onClick={confirmSave}
+                disabled={saving}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 600,
+                  color: '#ffffff', backgroundColor: '#2563eb',
+                  border: 'none', borderRadius: '6px',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {activeMachine !== 0 && <QualityReport date={navDate} />}
 
