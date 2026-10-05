@@ -41,11 +41,11 @@ const GROUP_STYLE: Record<string, { color: string; bg: string; border: string }>
 // Packing options + 24 hourly slots keyed to shift_id
 // ═══════════════════════════════════════════════════════════════════════════
 const PACKING_OPTIONS = [
-  'ST - Shrink Tray',
-  'SN - Shrink Naked',
-  'SB - Shrink Box',
-  'BT - Bottom Tray',
-  'Pallet Packing',
+  'ST',
+  'SN',
+  'SB',
+  'BT',
+  'PP',
 ];
 
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
@@ -118,12 +118,21 @@ const AUTO_SAVE_STATUS_VIEW: Record<AutoSaveStatus, { label: string; color: stri
 
 // ─── NumInput ──────────────────────────────────────────────────────────────
 const NumInput: React.FC<{ value: string; onChange: (v: string) => void; disabled?: boolean }> = ({ value, onChange, disabled = false }) => {
+  // ArrowUp / ArrowDown are the native step keys of <input type="number">: the
+  // browser silently changes the value (and fires onChange) with no typing at
+  // all. A production cell must only ever change by typing, so both keys are
+  // swallowed here and the value is left exactly as entered.
+  const blockArrowStep = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.preventDefault();
+  };
+
   return (
     <input
       type="number"
       min="0"
       value={value}
       disabled={disabled}
+      onKeyDown={blockArrowStep}
       onChange={(e) => onChange(e.target.value)}
       style={{
         width: '100%',
@@ -461,7 +470,7 @@ const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[])
             border: '1px solid #e2e8f0',
             borderRadius: '6px',
             boxShadow: '0 6px 20px rgba(0,0,0,0.1)',
-            minWidth: '180px',
+            minWidth: '90px',
             overflow: 'hidden',
           }}
         >
@@ -473,7 +482,7 @@ const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[])
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '7px',
+                  gap: '10px',
                   padding: '6px 10px',
                   fontSize: '12px',
                   color: '#1e293b',
@@ -556,6 +565,40 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
   return (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
 };
 
+/**
+ * The hourly slots that hold the LAST entry of their own Job ID.
+ *
+ * A job runs across consecutive hours, so only its newest entry may be taken
+ * further: "+" belongs to the last entry of the job, and every earlier entry of
+ * that same job keeps its bottle locked. The last entry is resolved from the
+ * real entries of each Job ID (PRODUCTION_TIMES is in production-shift order,
+ * which is the chronological order of the day) and never from "is this the
+ * last filled row", so an earlier entry can never keep a "+" or unlock itself
+ * and gaps in the grid cannot promote the wrong row. The set is derived from
+ * the loaded/saved rows on every render, so the rule holds after "+", Save,
+ * autosave, refresh and date navigation without any extra bookkeeping.
+ *
+ * A row whose Job ID the backend has not issued yet (a bottle just picked, not
+ * saved) is its own group, so it stays extendable exactly as before.
+ */
+const jobLastEntryTimes = (rows: Record<string, QualityHourlyEntry | undefined>): Set<string> => {
+  const lastIdxByJob = new Map<string, number>();
+  const lastTimes = new Set<string>();
+  PRODUCTION_TIMES.forEach((slot, idx) => {
+    const entry = rows[slot.time];
+    if (!entry?.bottle_id) return;
+    const jobId = entry.job_id;
+    if (!jobId) {
+      lastTimes.add(slot.time);
+      return;
+    }
+    const prevIdx = lastIdxByJob.get(jobId);
+    if (prevIdx === undefined || idx > prevIdx) lastIdxByJob.set(jobId, idx);
+  });
+  lastIdxByJob.forEach((idx) => lastTimes.add(PRODUCTION_TIMES[idx].time));
+  return lastTimes;
+};
+
 // Memoized per-hourly-row <tr>. Props are referentially stable across parent
 // renders (handlers are useCallback'd, availableSections/allDefectNames are
 // cached), so typing in one row only re-renders that row instead of all 24.
@@ -575,6 +618,10 @@ const QualityTimeRow = React.memo<{
   copyRowDown: (time: string) => void;
   removeBottle: (time: string) => void;
   canEdit: boolean;
+  /** True only for the newest entry of the row's own Job ID (see jobLastEntryTimes). */
+  isJobLastEntry: boolean;
+  /** True for an earlier entry of a job that has already been extended. */
+  bottleLocked: boolean;
 }>(({
   time,
   shiftIdx,
@@ -591,6 +638,8 @@ const QualityTimeRow = React.memo<{
   copyRowDown,
   removeBottle,
   canEdit,
+  isJobLastEntry,
+  bottleLocked,
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
@@ -659,7 +708,8 @@ const QualityTimeRow = React.memo<{
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
   <select
     value={entry?.bottle_id ?? ''}
-    disabled={!canEdit}
+    disabled={!canEdit || bottleLocked}
+    title={bottleLocked ? 'This job is still running in a later hour — the bottle of an earlier entry cannot be changed.' : undefined}
     onChange={(e) => {
       selectBottle(time, e.target.value);
     }}
@@ -673,7 +723,7 @@ const QualityTimeRow = React.memo<{
       backgroundColor: 'transparent',
       border: '1px solid transparent',
       borderRadius: '4px',
-      cursor: canEdit ? 'pointer' : 'not-allowed',
+      cursor: canEdit && !bottleLocked ? 'pointer' : 'not-allowed',
       outline: 'none',
       textAlign: 'left',
       opacity: canEdit ? 1 : 0.6,
@@ -702,7 +752,7 @@ const QualityTimeRow = React.memo<{
 
   {/* KEEP YOUR EXISTING + BUTTON AND - BUTTON CODE HERE */}
 </div>
-          {entry?.bottle_id && canEdit && (
+          {entry?.bottle_id && canEdit && isJobLastEntry && (
             <button
               onClick={() => copyRowDown(time)}
               title="Copy this row to the next empty slot"
@@ -825,7 +875,7 @@ const QualityTimeRow = React.memo<{
           value={entry?.remarks ?? ''}
           disabled={!canEdit}
           onChange={(e) => patchEntry(time, { remarks: e.target.value })}
-          placeholder={canEdit ? 'Enter remarks...' : ''}
+          placeholder={canEdit ? 'Remarks' : ''}
           style={{
             width: '100%', border: '1px solid transparent', borderRadius: '4px',
             padding: '4px 6px', fontSize: '12px', color: '#475569',
@@ -1336,8 +1386,27 @@ export const QualityControlModule: React.FC = () => {
 
   const allDefectNames = useMemo(() => defectGroups.flatMap((g) => g.items), [defectGroups]);
 
+  // Slots holding the last entry of their own Job ID. Only those rows can be
+  // extended with "+", and only those rows may still change their bottle.
+  // Derived from the rows themselves, so it is correct for freshly extended
+  // jobs, autosaved job IDs, data reloaded from the backend and every date.
+  const lastEntryTimes = useMemo(() => jobLastEntryTimes(activeRows), [activeRows]);
+
+  // Same rule for the handlers, evaluated against the live store so it is right
+  // even when a handler runs before the next render. An entry of a job that has
+  // already been extended to a later hour is locked: its bottle, bottle name
+  // and Job ID stay exactly as they are.
+  const isBottleLocked = useCallback((time: string): boolean => {
+    const machineKey = String(activeMachine);
+    const rows = productionStoreRef.current?.[dateKey]?.[machineKey] ?? {};
+    const entry = rows[time];
+    if (!entry?.job_id) return false;
+    return !jobLastEntryTimes(rows).has(time);
+  }, [dateKey, activeMachine]);
+
   const selectBottle = useCallback((time: string, bottleId: string) => {
     if (!canEdit) return;
+    if (isBottleLocked(time)) return;
     if (!bottleId) {
       patchEntry(time, {
         bottle_id: '',
@@ -1382,12 +1451,15 @@ export const QualityControlModule: React.FC = () => {
         },
       };
     });
-  }, [dateKey, activeMachine, patchEntry, canEdit, markTouched, queueAutoSave]);
+}, [dateKey, activeMachine, patchEntry, canEdit, markTouched, queueAutoSave, isBottleLocked]);
 
   const confirmBottleChange = useCallback(() => {
     if (!pendingBottleChange) return;
     const { time, bottleId } = pendingBottleChange;
     setPendingBottleChange(null);
+    // The job may have been extended to a later hour while the confirmation was
+    // open: the row is locked now, so the bottle and its Job ID are left alone.
+    if (isBottleLocked(time)) return;
     const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
     const machineKey = String(activeMachine);
     const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
@@ -1411,7 +1483,7 @@ export const QualityControlModule: React.FC = () => {
         },
       };
     });
-  }, [pendingBottleChange, dateKey, activeMachine, markTouched, queueAutoSave]);
+  }, [pendingBottleChange, dateKey, activeMachine, markTouched, queueAutoSave, isBottleLocked]);
 
   const cancelBottleChange = useCallback(() => {
     setPendingBottleChange(null);
@@ -2515,6 +2587,11 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 const shiftIdx = Math.floor(idx / 8);
                 const isFirstInShift = idx % 8 === 0;
                 const entry = activeRows[time];
+                // A job's newest entry is the only one that can be extended and
+                // the only one whose bottle may still change; every earlier entry
+                // of the same Job ID loses its "+" and has its bottle locked.
+                const isJobLastEntry = lastEntryTimes.has(time);
+                const bottleLocked = !!entry?.job_id && !isJobLastEntry;
 
                 return (
                   <QualityTimeRow
@@ -2534,6 +2611,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                     copyRowDown={copyRowDown}
                     removeBottle={removeBottle}
                     canEdit={canEdit}
+                    isJobLastEntry={isJobLastEntry}
+                    bottleLocked={bottleLocked}
                   />
                 );
               })}
