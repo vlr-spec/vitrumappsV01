@@ -612,6 +612,12 @@ const QualityTimeRow = React.memo<{
   isActiveEntry: boolean;
   /** Bottle name of this entry, shown as plain text once a bottle is picked. */
   bottleName: string;
+  /** Row lock (Machine 1–4 tables only): when true the production fields of
+   *  this hourly row are read-only. Independent for every hourly row. */
+  locked: boolean;
+  /** Flips this row's lock. Stable across renders so memoization still skips
+   *  untouched rows; the row passes its own time + entry back. */
+  toggleRowLock: (time: string, entry?: QualityHourlyEntry) => void;
 }>(({
   time,
   shiftIdx,
@@ -630,6 +636,8 @@ const QualityTimeRow = React.memo<{
   canEdit,
   isActiveEntry,
   bottleName,
+  locked,
+  toggleRowLock,
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
@@ -641,6 +649,13 @@ const QualityTimeRow = React.memo<{
   // job carries the "+" / "−" buttons.
   const hasBottle = !!entry?.bottle_id;
   const isCurrentEntry = hasBottle && isActiveEntry;
+
+  // Row lock (Machine 1–4 tables only): when the row's checkbox is checked,
+  // the production fields of THIS row become read-only. Bottle selection and
+  // the "+" / "−" job buttons are intentionally not locked — only the fields
+  // listed in the lock requirement. Avg / Bottles in Nos. / QTY EFF% are
+  // display-only values with no editor, so they are inherently read-only.
+  const fieldsDisabled = !canEdit || locked;
 
   const selectedDefectNames = defectGroups.length > 0
 
@@ -700,6 +715,17 @@ const QualityTimeRow = React.memo<{
           </div>
         </td>
       )}
+
+      <td style={{ ...tdCenter, width: '34px', padding: '4px 2px' }}>
+        <input
+          type="checkbox"
+          checked={locked}
+          disabled={!canEdit}
+          onChange={() => toggleRowLock(time, entry)}
+          title={locked ? 'Unlock this row' : 'Lock this row'}
+          style={{ accentColor: '#2563eb', width: '14px', height: '14px', cursor: canEdit ? 'pointer' : 'not-allowed', verticalAlign: 'middle' }}
+        />
+      </td>
 
       <td style={{ ...tdCenter, fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
         {entry?.entry_id && (
@@ -844,15 +870,15 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 2px', width: '50px' }}>
-        <NumInput value={entry?.weight_front ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { weight_front: v })} />
+        <NumInput value={entry?.weight_front ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { weight_front: v })} />
       </td>
       {hasM && (
         <td style={{ ...tdCenter, padding: '4px 2px', width: '50px' }}>
-          <NumInput value={entry?.weight_middle ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { weight_middle: v })} />
+          <NumInput value={entry?.weight_middle ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { weight_middle: v })} />
         </td>
       )}
       <td style={{ ...tdCenter, padding: '4px 2px', width: '50px' }}>
-        <NumInput value={entry?.weight_rear ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { weight_rear: v })} />
+        <NumInput value={entry?.weight_rear ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { weight_rear: v })} />
       </td>
 
       <td style={{ ...tdCenter, fontSize: '12px', fontWeight: rowAvg ? 600 : 400, color: rowAvg ? '#1e293b' : '#94a3b8' }}>
@@ -860,23 +886,23 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.speed_per_min ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { speed_per_min: v })} />
+        <NumInput value={entry?.speed_per_min ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { speed_per_min: v })} />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 6px' }}>
         <PackingMultiSelect
           selected={entry?.packing_category ?? []}
-          disabled={!canEdit}
+          disabled={fieldsDisabled}
           onChange={(v) => patchEntry(time, { packing_category: v })}
         />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.packing_size ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { packing_size: v })} />
+        <NumInput value={entry?.packing_size ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { packing_size: v })} />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.cartons ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { cartons: v })} />
+        <NumInput value={entry?.cartons ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { cartons: v })} />
       </td>
 
       <td style={{ ...tdCenter, fontWeight: 500 }}>
@@ -888,21 +914,21 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.sqc ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { sqc: v })} />
+        <NumInput value={entry?.sqc ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { sqc: v })} />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.qc_hold != null ? String(entry.qc_hold) : '0'} disabled={!canEdit} onChange={(v) => patchEntry(time, { qc_hold: v === '' ? 0 : Number(v) })} />
+        <NumInput value={entry?.qc_hold != null ? String(entry.qc_hold) : '0'} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { qc_hold: v === '' ? 0 : Number(v) })} />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.num ?? ''} disabled={!canEdit} onChange={(v) => patchEntry(time, { num: v })} />
+        <NumInput value={entry?.num ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { num: v })} />
       </td>
 
       <td style={{ ...td, minWidth: '200px', padding: '4px 8px' }}>
         <DefectDropdown
           selected={selectedDefectNames}
-          disabled={!canEdit}
+          disabled={fieldsDisabled}
           onChange={(names) => patchEntry(time, { defect_ids: names })}
           defectGroups={defectGroups}
           isLoading={loadingDefects}
@@ -913,15 +939,15 @@ const QualityTimeRow = React.memo<{
         <input
           type="text"
           value={entry?.remarks ?? ''}
-          disabled={!canEdit}
+          disabled={fieldsDisabled}
           onChange={(e) => patchEntry(time, { remarks: e.target.value })}
-          placeholder={canEdit ? 'Remarks' : ''}
+          placeholder={fieldsDisabled ? '' : 'Remarks'}
           style={{
             width: '100%', border: '1px solid transparent', borderRadius: '4px',
             padding: '4px 6px', fontSize: '12px', color: '#475569',
             backgroundColor: 'transparent', outline: 'none',
             transition: 'border-color 0.15s, background-color 0.15s',
-            cursor: canEdit ? 'text' : 'not-allowed',
+            cursor: fieldsDisabled ? 'not-allowed' : 'text',
           }}
           onFocus={(e) => {
             e.currentTarget.style.borderColor = '#2563eb';
@@ -1293,6 +1319,27 @@ export const QualityControlModule: React.FC = () => {
   // job, for saved Job IDs, for data reloaded from the backend and for
   // every date.
   const activeEntryTime = useMemo(() => activeJobEntryTime(activeRows), [activeRows]);
+
+  // ── Row lock (Machine 1–4 tables only) ─────────────────────────────────
+  // Per-hourly-row edit lock. Keyed by the row's unique entry_id when the row
+  // has one (saved rows), falling back to the date + machine + time slot for
+  // rows not yet saved — never by time alone. Each hourly row owns its own
+  // key, so locking one row can never lock any other row. Nothing outside the
+  // Machine 1–4 tables reads this state (All Machine / reports untouched).
+  const [lockedRows, setLockedRows] = useState<Record<string, boolean>>({});
+
+  const rowLockKey = useCallback((time: string, entry?: QualityHourlyEntry): string => {
+    const eid = entry?.entry_id ? String(entry.entry_id) : '';
+    return eid
+      ? `eid:${dateKey}:M${activeMachine}:${eid}`
+      : `slot:${dateKey}:M${activeMachine}:${time}`;
+  }, [dateKey, activeMachine]);
+
+  const toggleRowLock = useCallback((time: string, entry?: QualityHourlyEntry) => {
+    if (!canEdit) return;
+    const key = rowLockKey(time, entry);
+    setLockedRows((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, [canEdit, rowLockKey]);
 
   // Bottle name shown as plain text next to a picked bottle. Resolved from the
   // full Bottle Master list (a bottle id is machine independent), so an entry
@@ -2520,6 +2567,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th rowSpan={2} style={{ ...thStyle(), width: '38px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
+                <th rowSpan={2} title="Lock / unlock row" style={{ ...thStyle(), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px' }}></th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Time</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
@@ -2528,8 +2576,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Nos.'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>QTY EFF%</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
@@ -2555,6 +2603,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 const bottleName = entry?.bottle_id
                   ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
                   : '';
+                const rowLocked = !!lockedRows[rowLockKey(time, entry)];
 
                 return (
                   <QualityTimeRow
@@ -2576,13 +2625,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                     canEdit={canEdit}
                     isActiveEntry={isActiveEntry}
                     bottleName={bottleName}
+                    locked={rowLocked}
+                    toggleRowLock={toggleRowLock}
                   />
                 );
               })}
 
               {/* Day Avg / Summary row */}
               <tr style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td colSpan={3} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
+                <td colSpan={4} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
                   Day Avg / Summary
                 </td>
                 <td style={{ padding: '8px 6px', textAlign: 'center', fontWeight: 700, fontSize: '12px', color: '#1e293b', borderRight: `1px solid ${C.border}` }}>
