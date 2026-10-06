@@ -413,26 +413,27 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
             borderBottom: `1px solid ${C.border}`,
           }}
         >
+
+          <div
+            style={{
+              borderRadius: '4px',
+              padding: '5px 12px',
+              fontSize: '12.5px',
+              fontWeight: 700,
+              color: '#1e293b',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            DATE :- {dateDd}/{dateMm}/{dateYyyy}
+          </div>
+
           <div style={{ flex: 1, textAlign: 'center' }}>
             <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#1e293b' }}>
               Daily M/C Speed and Weight Report
             </h2>
           </div>
 
-          <div
-            style={{
-              border: '1px solid #cbd5e1',
-              borderRadius: '4px',
-              padding: '5px 12px',
-              fontSize: '12.5px',
-              fontWeight: 700,
-              color: '#1e293b',
-              backgroundColor: C.white,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            DATE :- {dateDd}/{dateMm}/{dateYyyy}
-          </div>
+
 
           <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button

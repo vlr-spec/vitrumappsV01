@@ -1,6 +1,5 @@
 # pyrefly: ignore [missing-import]
 import logging
-import re
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select
@@ -128,6 +127,19 @@ def _entry_units(entry: HourlyProduction) -> int:
         return int(packing) * int(cartons)
     bottles = entry.bottles_in_nos or 0
     return int(bottles) if bottles > 0 else 0
+
+
+def _quality_job_id(machine_no: int, production_date: date) -> str:
+    """Build the Quality Module Job ID for a brand-new job.
+
+    Format: ``V{MachineNumber}-{DDMMYYYY}`` (e.g. machine 1 on 06/10/2026
+    becomes ``V1-06102026``). The machine number comes from the job's own
+    machine and the date is the production/report date the Quality Module
+    already uses for that job. A continuing job (hourly entries, extended
+    entries, next-day continuation) keeps its existing ID — this helper is
+    only called when no reusable ID exists.
+    """
+    return f"V{int(machine_no)}-{production_date.strftime('%d%m%Y')}"
 
 
 def get_default_shape(date_str: str) -> QualityDailyResponse:
@@ -635,16 +647,11 @@ def save_daily_quality(
                         old_job_snapshot[current_9am_key] = (prev_entry.job_id, prev_entry.bottle_id)
 
         # Step 4.5: Compute canonical job_id and upsert HPR Job rows
-        # Seed the next available sequence number once per save_daily_quality call across all machines/runs
-        # Note: Known small race-condition risk in concurrent environments; acceptable for current scale.
-        all_jobs = db.query(HprJob.job_id).all()
-        max_seq = 0
-        for (jid,) in all_jobs:
-            if jid:
-                m = re.match(r"^J(\d+)$", jid)
-                if m:
-                    max_seq = max(max_seq, int(m.group(1)))
-        next_new_seq = max_seq + 1
+        # Brand-new jobs use the machine-wise date-based format
+        # V{MachineNumber}-{DDMMYYYY} (see _quality_job_id). Continuing jobs
+        # keep their existing ID via old_job_snapshot / payload reuse below,
+        # so a job stays identical across hourly entries, extensions and
+        # production-day continuations. No sequential J-counter is used.
 
         for machine_str, m_dict in payload.hourly.items():
             machine_no = int(machine_str)
@@ -719,13 +726,17 @@ def save_daily_quality(
                         if item.get("payload_job_id")
                     ]
                     unique_payload_jids = list(dict.fromkeys(payload_jids))
-                    if len(unique_payload_jids) == 1 and unique_payload_jids[0].startswith("J"):
+                    if len(unique_payload_jids) == 1 and (
+                        unique_payload_jids[0].startswith("V") or unique_payload_jids[0].startswith("J")
+                    ):
                         canonical_job_id = unique_payload_jids[0]
                     else:
-                        # 4b. Brand-new run: generate next sequential job_id using the request-scoped counter.
-                        # Format matches 'J{:03d}' (e.g. J001, J002).
-                        canonical_job_id = f"J{next_new_seq:03d}"
-                        next_new_seq += 1
+                        # 4b. Brand-new run: machine-wise date-based job_id.
+                        # Format is 'V{MachineNumber}-{DDMMYYYY}'
+                        # (e.g. V1-06102026). The date is this save's
+                        # production/report date; continuation runs reuse the
+                        # existing ID above and never reach this branch.
+                        canonical_job_id = _quality_job_id(machine_no, p_date)
 
                 # 5. Overwrite job_id on every ORM entry in this run
                 for item in run:
@@ -760,7 +771,7 @@ def save_daily_quality(
             # uq_production_job_one_running_per_machine (machine_no) WHERE
             # status = 'RUNNING', so the database allows only ONE running job per
             # machine. A run that starts on a machine whose previous job was never
-            # closed (e.g. J001 from an earlier day) would be rejected outright,
+            # closed (e.g. V1-05102026 from an earlier day) would be rejected outright,
             # and because everything commits together the WHOLE day's data would
             # be rolled back. Close the stale job first, and flush that close so
             # it reaches the database before the new row is inserted.

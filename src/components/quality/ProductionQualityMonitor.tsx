@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Printer, Download, CalendarDays } from 'lucide-react';
+import { Printer, Download, CalendarDays, ChevronUp, ChevronDown } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth, MODULES } from '../../context/AuthContext';
@@ -945,6 +945,9 @@ export const QualityControlModule: React.FC = () => {
 
   const [activeMachine, setActiveMachine] = useState(1);
   const [navDate, setNavDate] = useState<Date>(() => new Date());
+  // Collapses the stable navigation bar (same Hide/Show pattern as the
+  // planning module's Filters card). Layout only — no data logic affected.
+  const [showNavbar, setShowNavbar] = useState(true);
 
   const isToday = toIso(navDate) === toIso(new Date());
   const dateKey = toIso(navDate);
@@ -2159,13 +2162,33 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
   };
 
   return (
-    <div className="print-container p-4 md:p-5 max-w-[1920px] mx-auto animate-in fade-in duration-200">
+    <div
+      className="print-container p-4 md:p-5 max-w-[1920px] mx-auto animate-in fade-in duration-200"
+      style={{
+        // Stable app-like shell: header + navbar are fixed-size siblings and
+        // only the content area below scrolls, so switching Machine 1-4 /
+        // Daily / Monthly never moves the navigation.
+        display: 'flex',
+        flexDirection: 'column',
+        height: 'calc(100dvh - 64px - 48px)',
+        minHeight: '520px',
+        width: '100%',
+        minWidth: 0,
+        boxSizing: 'border-box',
+      }}
+    >
       <style>{`
+        .qm-navbar-scroll::-webkit-scrollbar { height: 6px; }
+        .qm-navbar-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .qm-navbar-scroll > button, .qm-navbar-scroll > label, .qm-navbar-scroll > div { flex-shrink: 0; }
+        .qm-content-scroll { scrollbar-gutter: stable; }
         @media print {
           @page { size: landscape; margin: 0.15in; }
           body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-          .print-container { padding: 0 !important; max-width: none !important; animation: none !important; }
+          .print-container { padding: 0 !important; max-width: none !important; animation: none !important; display: block !important; height: auto !important; min-height: 0 !important; }
           .no-print { display: none !important; }
+          .qm-navbar-stable { position: static !important; }
+          .qm-content-scroll { overflow: visible !important; flex: none !important; min-height: 0 !important; max-height: none !important; }
           .print-header { display: block !important; }
           .print-header { margin-bottom: 3px !important; padding-bottom: 3px !important; }
           .print-header h2 { font-size: 11px !important; margin: 0 !important; }
@@ -2195,8 +2218,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           Date: {dateLabel}
         </p>
       </div>
-      {/* Page title row */}
-      <div className="no-print" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+      {/* Page title row — stable Quality Module header (never scrolls away) */}
+      <div className="no-print" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' }}>
         <div>
           <h1 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#1e293b', letterSpacing: '-0.01em' }}>
             Hourly Production Monitor
@@ -2213,6 +2236,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            type="button"
+            onClick={() => setShowNavbar((v) => !v)}
+            className="flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium text-[#6B7280] border border-[#E5E7EB] rounded bg-white hover:bg-[#F8FAFC] transition-colors"
+            title={showNavbar ? 'Hide navigation bar' : 'Show navigation bar'}
+          >
+            {showNavbar ? 'Hide Navbar' : 'Show Navbar'}
+            {showNavbar ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
           <button
             onClick={handlePrint}
             style={{
@@ -2308,10 +2340,11 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         })}
       </div> */}
 
-      {/* White card */}
-      <div style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
-        {/* Machine tabs + date navigation */}
-        <div className="no-print" style={{ display: 'flex', alignItems: 'center', borderBottom: `1px solid ${C.border}`, padding: '0 8px', backgroundColor: '#f8fafc', gap: '2px' }}>
+      {/* Stable navigation bar — fixed-size sibling, never affected by content height */}
+      {showNavbar && (
+      <div className="no-print qm-navbar-stable" style={{ flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
+        {/* Machine tabs + date navigation (constant height regardless of selection) */}
+        <div className="no-print qm-navbar-scroll" style={{ display: 'flex', alignItems: 'center', padding: '0 8px', backgroundColor: '#f8fafc', gap: '2px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', minHeight: '57px', flexWrap: 'nowrap', overflowX: 'auto', overflowY: 'hidden' }}>
           {DB_MACHINE_MASTER.map((m) => {
             const active = activeMachine === m.machine_no;
             return (
@@ -2381,14 +2414,21 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           >
             Monthly Report
           </button>
-          {reportId && activeMachine >= 1 && activeMachine <= 4 && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px', margin: '4px 0' }}>
-              <span style={{ fontSize: '11px', fontWeight: 600, color: '#2563eb', letterSpacing: '0.02em' }}>
-                Report ID: R{String(reportId).padStart(3, '0')}
-              </span>
-            </div>
-          )}
-          <div style={{ flex: 1 }} />
+          {/* Report ID — always reserves identical space so the navbar never shifts */}
+          <div
+            aria-hidden={!reportId || activeMachine < 1 || activeMachine > 4}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 10px',
+              backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px',
+              margin: '4px 0', flexShrink: 0, minWidth: '118px', justifyContent: 'center',
+              visibility: reportId && activeMachine >= 1 && activeMachine <= 4 ? 'visible' : 'hidden',
+            }}
+          >
+            <span style={{ fontSize: '11px', fontWeight: 600, color: '#2563eb', letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
+              Report ID: R{String(reportId || '000').padStart(3, '0')}
+            </span>
+          </div>
+          <div style={{ flex: '1 0 auto', minWidth: '8px' }} />
 
           {/* Date filter — pick any date directly (shared by HRP + Daily Report) */}
             <label
@@ -2466,11 +2506,16 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             </button>
           </div>
         </div>
+      </div>
+      )}
+
+      {/* Scrollable / dynamic content area — only this region changes size/scrolls */}
+      <div className="qm-content-scroll" style={{ flex: 1, minHeight: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', overflow: 'auto', marginTop: showNavbar ? '12px' : '0', display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
 
         {activeMachine >= 1 && activeMachine <= 4 && (
-        <>
+        <div style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden', flexShrink: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
         {/* Table */}
-        <div style={{ overflowX: 'auto' }}>
+        <div style={{ overflowX: 'auto', minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
@@ -2625,8 +2670,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             </button>
           )}
         </div>
-        </>
+        </div>
         )}
+
+        {activeMachine >= 1 && activeMachine <= 4 && <QualityReport date={navDate} />}
+
+        {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
+
+        {activeMachine === 0 && <AllMachineReport date={navDate} />}
+
       </div>
 
       {pendingJobChange && (
@@ -2657,17 +2709,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               Are you sure you want to change the JOB?
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={cancelJobChange}
-                style={{
-                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
-                  color: '#475569', backgroundColor: '#ffffff',
-                  border: '1px solid #cbd5e1', borderRadius: '6px',
-                  cursor: 'pointer',
-                }}
-              >
-                No
-              </button>
+
               <button
                 onClick={confirmJobChange}
                 style={{
@@ -2679,6 +2721,18 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               >
                 Yes
               </button>
+              <button
+                onClick={cancelJobChange}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
+                  color: '#475569', backgroundColor: '#ffffff',
+                  border: '1px solid #cbd5e1', borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                No
+              </button>
+              
             </div>
           </div>
         </div>
@@ -2712,18 +2766,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               Are you sure you want to save the data?
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={cancelSave}
-                disabled={saving}
-                style={{
-                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
-                  color: '#475569', backgroundColor: '#ffffff',
-                  border: '1px solid #cbd5e1', borderRadius: '6px',
-                  cursor: saving ? 'not-allowed' : 'pointer',
-                }}
-              >
-                No
-              </button>
+
               <button
                 onClick={confirmSave}
                 disabled={saving}
@@ -2737,16 +2780,23 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               >
                 Yes
               </button>
+              <button
+                onClick={cancelSave}
+                disabled={saving}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
+                  color: '#475569', backgroundColor: '#ffffff',
+                  border: '1px solid #cbd5e1', borderRadius: '6px',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                }}
+              >
+                No
+              </button>
+              
             </div>
           </div>
         </div>
       )}
-
-      {activeMachine >= 1 && activeMachine <= 4 && <QualityReport date={navDate} />}
-
-      {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
-
-      {activeMachine === 0 && <AllMachineReport date={navDate} />}
 
       <Toaster position="bottom-right" richColors />
     </div>
