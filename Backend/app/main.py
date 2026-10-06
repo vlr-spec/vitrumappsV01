@@ -125,11 +125,4 @@ def on_startup() -> None:
 
 @app.get("/health")
 def health_check():
-    """
-    AWS Load Balancers will ping this endpoint continuously. 
-    """
-    return {
-        "status": "healthy", 
-        "service": "vitrumglass-api",
-        "db_url": settings.DATABASE_URL  # Removing this in production!
-    }
+    return {"status": "healthy", "service": "vitrumglass-api"}

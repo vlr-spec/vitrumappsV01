@@ -1,4 +1,4 @@
-﻿import re
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
