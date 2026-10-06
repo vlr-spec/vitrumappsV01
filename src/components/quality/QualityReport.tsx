@@ -719,18 +719,18 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
     const source: JobSourceRow[] = jobRowsOk
       ? jobRows.flatMap((row) => {
-          const startDate = new Date(row.job_start_time);
-          if (Number.isNaN(startDate.getTime())) return [];
-          return [{
-            machineNo: row.machine_no,
-            jobId: row.job_id,
-            bottleId: row.bottle_id == null ? '' : String(row.bottle_id),
-            startDate,
-            startSort: overnightShift(startDate),
-            units: Math.max(0, Math.round(row.production_units ?? 0)),
-            remark: (row.remarks ?? '').trim(),
-          }];
-        })
+        const startDate = new Date(row.job_start_time);
+        if (Number.isNaN(startDate.getTime())) return [];
+        return [{
+          machineNo: row.machine_no,
+          jobId: row.job_id,
+          bottleId: row.bottle_id == null ? '' : String(row.bottle_id),
+          startDate,
+          startSort: overnightShift(startDate),
+          units: Math.max(0, Math.round(row.production_units ?? 0)),
+          remark: (row.remarks ?? '').trim(),
+        }];
+      })
       : deriveJobSourcesFromDay(dayHourly, dateKey);
 
     return source
@@ -811,9 +811,16 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
           overflow: 'hidden',
         }}
+
+
       >
+
+
         {/* Header: title · shared report date (date controls live in the HRP bar above) */}
         <div
+
+
+
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -823,26 +830,29 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
             borderBottom: `1px solid ${C.border}`,
           }}
         >
+
+
+          <div
+            style={{
+              borderRadius: '4px',
+              padding: '5px 12px',
+              fontSize: '12.5px',
+              fontWeight: 700,
+              color: '#1e293b',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            DATE :- {dateDd}/{dateMm}/{dateYyyy}
+          </div>
+
+
           <div style={{ flex: 1, textAlign: 'center' }}>
             <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#1e293b' }}>
               Daily Production Performance Report
             </h2>
           </div>
 
-          <div
-            style={{
-              border: '1px solid #cbd5e1',
-              borderRadius: '4px',
-              padding: '5px 12px',
-              fontSize: '12.5px',
-              fontWeight: 700,
-              color: '#1e293b',
-              backgroundColor: C.white,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            DATE :- {dateDd}/{dateMm}/{dateYyyy}
-          </div>
+
 
           {/* Print / Refresh — screen only; never part of the printed report. */}
           <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
