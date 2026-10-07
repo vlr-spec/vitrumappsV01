@@ -57,6 +57,14 @@ class QualityHourlyEntrySchema(BaseModel):
     remarks: Optional[str] = None
     defect_ids: List[str] = []
     job_id: Optional[str] = None
+    # Logical grouping identifier for manual-split time segments (e.g. "SG001").
+    # Echoed/persisted only — never influences job, scheduling or calculation logic.
+    split_group_id: Optional[str] = None
+    # Row lock status of this hourly row (hourly_production.is_locked).
+    # Read-only through this schema: the daily save never writes it (only the
+    # dedicated lock endpoint does), so a client cannot unlock a row by simply
+    # echoing is_locked = false in a save payload.
+    is_locked: Optional[bool] = False
 
     @field_validator(
         "bottle_id",
@@ -100,11 +108,36 @@ class QualityDailyRequest(BaseModel):
     production_date: str
     hourly: Dict[str, Dict[str, QualityHourlyEntrySchema]]
     shift_assignments: Dict[str, QualityShiftAssignmentSchema]
+    # Explicitly deleted manual split rows (machine -> list of time labels).
+    # Hourly rows are never deleted; splits are minute-granularity rows that the
+    # frontend removes locally and the backend drops here so the delete persists
+    # after Save/Refresh/reload and the next hour's original period is restored.
+    deleted_splits: Optional[Dict[str, List[str]]] = None
 
 class QualityDailyResponse(BaseModel):
     hourly: Dict[str, Dict[str, QualityHourlyEntrySchema]]
     shift_assignments: Dict[str, QualityShiftAssignmentSchema]
     continuation: Optional[Dict[str, Dict[str, QualityHourlyEntrySchema]]] = None
+
+class QualityRowLockRequest(BaseModel):
+    """Lock/unlock exactly ONE hourly row (POST /api/production/quality/daily/lock/).
+
+    This is the only API allowed to write hourly_production.is_locked, and it
+    touches nothing else on the row: one request persists one checkbox. The
+    row is addressed the same way the grid identifies it — production date +
+    machine + time-of-day label — so no entry_id has to be known by the client.
+    """
+    production_date: str
+    machine_no: int
+    production_time: str
+    is_locked: bool
+
+class QualityRowLockResponse(BaseModel):
+    """Confirmation of the persisted lock state for the one row requested."""
+    entry_id: Optional[Union[int, str]] = None
+    machine_no: int
+    production_time: str
+    is_locked: bool
 
 class QualityJobRowSchema(BaseModel):
     """One machine + Job ID row of the job-wise production summary.

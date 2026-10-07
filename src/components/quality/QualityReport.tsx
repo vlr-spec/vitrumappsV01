@@ -173,9 +173,84 @@ const releaseReportForPrint = (hidden: HTMLElement[]): void => {
 const entryBottle = (e: QualityHourlyEntry | undefined): string => String(e?.bottle_id ?? '').trim();
 const entryJob = (e: QualityHourlyEntry | undefined): string => String(e?.job_id ?? '').trim();
 
+// ─── Manual-split time segments ──────────────────────────────────────────
+// Split rows live under minute-granularity labels (e.g. "2:30 PM") and are
+// separate time segments of the hour they divide — never extra production
+// time. Durations come from production-timeline ordering over the full display
+// key set (all 24 hourly labels plus the splits actually present), so one
+// split hour's segments always sum to exactly 1 hour. With no splits every
+// duration is 1 and every figure below is bit-identical to before. The split
+// group id itself is grouping/history only and is never read here.
+const parseReportLabelToMinutes = (label: string): number | null => {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(label);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mins = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (h < 1 || h > 12 || mins < 0 || mins > 59) return null;
+  if (ap === 'AM') {
+    if (h === 12) h = 0;
+  } else if (h !== 12) {
+    h += 12;
+  }
+  return h * 60 + mins;
+};
+
+/** Minutes since the 9 AM production-day start (9 AM = 0 … 8:59 AM next day). */
+const toReportTimelineMinutes = (label: string): number | null => {
+  const mins = parseReportLabelToMinutes(label);
+  if (mins === null) return null;
+  const nineAM = 9 * 60;
+  return mins < nineAM ? mins + 24 * 60 - nineAM : mins - nineAM;
+};
+
+/** All keys in production-timeline order: the 24 hourly labels plus any split labels present. */
+const getReportOrderedKeys = (byTime: Record<string, QualityHourlyEntry | undefined>): string[] => {
+  const keys = new Set<string>(PRODUCTION_TIMES.map((pt) => pt.time));
+  for (const k of Object.keys(byTime ?? {})) keys.add(k);
+  const list = [...keys];
+  list.sort((a, b) => {
+    const ta = toReportTimelineMinutes(a);
+    const tb = toReportTimelineMinutes(b);
+    if (ta === null && tb === null) return a.localeCompare(b);
+    if (ta === null) return 1;
+    if (tb === null) return -1;
+    return ta - tb;
+  });
+  return list;
+};
+
+/** Actual production duration in hours of one key: (own − previous) / 60, else 1. */
+const durationHoursForReportKey = (orderedKeys: string[], key: string): number => {
+  const idx = orderedKeys.indexOf(key);
+  if (idx <= 0) return 1;
+  const tPrev = toReportTimelineMinutes(orderedKeys[idx - 1]);
+  const tOwn = toReportTimelineMinutes(key);
+  if (tPrev === null || tOwn === null) return 1;
+  const diff = tOwn - tPrev;
+  if (diff <= 0 || diff > 12 * 60) return 1;
+  return diff / 60;
+};
+
+/** Shift of one key: hourly slots keep their own; splits inherit their parent hour's shift. */
+const shiftIdForReportKey = (key: string): number => {
+  const direct = PRODUCTION_TIMES.find((pt) => pt.time === key);
+  if (direct) return direct.shift_id;
+  const tOwn = toReportTimelineMinutes(key);
+  let shiftId = 1;
+  for (const pt of PRODUCTION_TIMES) {
+    const tPt = toReportTimelineMinutes(pt.time);
+    if (tPt !== null && tOwn !== null && tPt <= tOwn) shiftId = pt.shift_id;
+    else break;
+  }
+  return shiftId;
+};
+
 interface HourPoint {
   slot: { time: string; shift_id: number };
   entry: QualityHourlyEntry;
+  /** Actual production duration in hours (1 for hourly rows, fractional for split segments). */
+  durationHours: number;
 }
 
 /** One continuous machine + bottle/job period inside a single production date. */
@@ -227,10 +302,13 @@ const runKeysFor = (points: HourPoint[]): string[] => {
  * implementation order the report requires:
  *
  *   1. FILTER to the selected 24-hour reporting window first — only the 24
- *      canonical HRP slot labels of this report date are read; records under
- *      any other time label, and every previous/future-day record the backend
+ *      canonical HRP slot labels of this report date plus any manual-split
+ *      segment labels actually stored for it are read; records under any other
+ *      time label, and every previous/future-day record the backend
  *      never returns for this `production_date`, are not part of the sequence
- *      at all. This is the same window the Hourly Production Monitor renders.
+ *      at all. Split segments are separate time segments of the hour they
+ *      divide (their durations sum to exactly that hour), so daily/monthly
+ *      totals stay consistent and no production is ever duplicated.
  *   2. DETECT bottle/job changes across those window records only.
  *   3. CREATE one run per continuous bottle segment (empty hours never break
  *      a run because they are not part of the sequence).
@@ -243,11 +321,16 @@ const splitMachineRuns = (
   machineNo: number,
   byTime: Record<string, QualityHourlyEntry>
 ): JobRun[] => {
+  const ordered = getReportOrderedKeys(byTime);
   const points: HourPoint[] = [];
-  for (const slot of PRODUCTION_TIMES) {
-    const entry = byTime[slot.time];
+  for (const key of ordered) {
+    const entry = byTime[key];
     if (!hasMeaningfulData(entry)) continue;
-    points.push({ slot, entry: entry as QualityHourlyEntry });
+    points.push({
+      slot: { time: key, shift_id: shiftIdForReportKey(key) },
+      entry: entry as QualityHourlyEntry,
+      durationHours: durationHoursForReportKey(ordered, key),
+    });
   }
 
   // No records at all for this machine: keep the machine on the report with a
@@ -391,13 +474,19 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
   const out: JobSourceRow[] = [];
   for (const machineNo of MACHINE_NOS) {
     const byTime = dayHourly[String(machineNo)] ?? {};
-    // Window order (9:00 AM → 8:00 AM) is the physical order of the day.
+    // Window order (9:00 AM → 8:00 AM) is the physical order of the day,
+    // including manual-split segments as separate time segments.
+    const ordered = getReportOrderedKeys(byTime);
     const points: HourPoint[] = [];
-    for (const slot of PRODUCTION_TIMES) {
-      const entry = byTime[slot.time];
+    for (const key of ordered) {
+      const entry = byTime[key];
       if (!hasMeaningfulData(entry)) continue;
       if (!entryJob(entry)) continue;
-      points.push({ slot, entry: entry as QualityHourlyEntry });
+      points.push({
+        slot: { time: key, shift_id: shiftIdForReportKey(key) },
+        entry: entry as QualityHourlyEntry,
+        durationHours: durationHoursForReportKey(ordered, key),
+      });
     }
 
     let i = 0;
@@ -600,19 +689,21 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         let speedSum = 0;
         let speedHours = 0;
 
-        for (const { slot, entry } of run.points) {
+        for (const { slot, entry, durationHours } of run.points) {
           const units = hourlyUnits(entry);
           const speed = parseNum(entry.speed_per_min);
           const weight = hourlyWeight(entry, gob);
           const idx = slot.shift_id - 1;
           if (idx < 0 || idx > 2) continue;
 
-          // As Per Speed (theoretical) production for the slot — the shared
+          // As Per Speed (theoretical) production for the segment — the shared
           // formula Speed/min × 60 × Machine Gob × Duration/Hours, with this
-          // machine's own gob count and the slot's one-hour duration. Over a
-          // full 24-slot day at one speed this is exactly
-          // Speed × Machine Gob × 60 × 24 (calculateProductionMetrics).
-          const theoretical = calculateTheoreticalBottles(speed, gob, 1);
+          // machine's own gob count and the segment's actual duration (1 for
+          // hourly rows, fractional for split segments). Over a full 24-slot
+          // day at one speed this is exactly
+          // Speed × Machine Gob × 60 × 24 (calculateProductionMetrics), and a
+          // split hour's segments sum to exactly the unsplit hour.
+          const theoretical = calculateTheoreticalBottles(speed, gob, durationHours);
 
           shiftUnits[idx] += units;
           shiftTheoretical[idx] += theoretical;
@@ -620,16 +711,16 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           theoreticalTotal += theoretical;
 
           if (weight !== null) {
-            weightSum += weight;
-            weightHours += 1;
+            weightSum += weight * durationHours;
+            weightHours += durationHours;
             if (units > 0) {
               weightedWeight += units * weight;
               weightedUnits += units;
             }
           }
           if (speed > 0) {
-            speedSum += speed;
-            speedHours += 1;
+            speedSum += speed * durationHours;
+            speedHours += durationHours;
           }
         }
 

@@ -4,6 +4,17 @@ from sqlalchemy import Column, Integer, SmallInteger, BigInteger, String, Numeri
 from sqlalchemy.orm import relationship
 from app.db.base import Base, hpr_fk, hpr_table_args, production_fk
 
+
+def _autoinc_bigint():
+    # SQLite only auto-increments an exact INTEGER PRIMARY KEY (a rowid
+    # alias); a BIGINT PRIMARY KEY is not one, so every INSERT fails with
+    # "NOT NULL constraint failed" — that would block the Quality Module's
+    # own report/entry/shift-assignment creation on the default SQLite URL.
+    # with_variant keeps BIGINT on every other dialect (PostgreSQL DDL and
+    # behaviour are untouched) and switches only SQLite to INTEGER.
+    return BigInteger().with_variant(Integer, "sqlite")
+
+
 class DefectMaster(Base):
     __tablename__ = "defect_master"
 
@@ -22,7 +33,7 @@ class DefectMaster(Base):
 class HourlyProductionReport(Base):
     __tablename__ = "hourly_production_report"
 
-    report_id = Column(BigInteger, primary_key=True, index=True)
+    report_id = Column(_autoinc_bigint(), primary_key=True, index=True)
     production_date = Column(Date, nullable=False, unique=True)
 
     __table_args__ = (hpr_table_args(),)
@@ -42,8 +53,10 @@ class ShiftMaster(Base):
 class ShiftAssignment(Base):
     __tablename__ = "shift_assignment"
 
-    assignment_id = Column(BigInteger, primary_key=True, index=True)
-    report_id = Column(BigInteger, ForeignKey(hpr_fk("hourly_production_report.report_id")), nullable=False)
+    assignment_id = Column(_autoinc_bigint(), primary_key=True, index=True)
+    report_id = Column(
+        _autoinc_bigint(), ForeignKey(hpr_fk("hourly_production_report.report_id")), nullable=False
+    )
     shift_id = Column(SmallInteger, ForeignKey(hpr_fk("shift_master.shift_id")), nullable=False)
     supervisor = Column(String(255), nullable=True)
     executive = Column(String(255), nullable=True)
@@ -57,8 +70,10 @@ class ShiftAssignment(Base):
 class HourlyProduction(Base):
     __tablename__ = "hourly_production"
 
-    entry_id = Column(BigInteger, primary_key=True, index=True)
-    report_id = Column(BigInteger, ForeignKey(hpr_fk("hourly_production_report.report_id")), nullable=False)
+    entry_id = Column(_autoinc_bigint(), primary_key=True, index=True)
+    report_id = Column(
+        _autoinc_bigint(), ForeignKey(hpr_fk("hourly_production_report.report_id")), nullable=False
+    )
     machine_no = Column(Integer, ForeignKey(production_fk("machine_master.machine_no")), nullable=False)
     shift_id = Column(SmallInteger, ForeignKey(hpr_fk("shift_master.shift_id")), nullable=False)
     production_time = Column(DateTime, nullable=False)
@@ -91,6 +106,18 @@ class HourlyProduction(Base):
     # A row that does not belong to a job yet must therefore be stored as "",
     # never NULL, or every row for the day is lost to a rolled-back transaction.
     job_id = Column(String(20), nullable=False)
+    # Row lock. TRUE freezes the row: every write API rejects updates and
+    # deletes of a locked row with "This row is locked and cannot be edited."
+    # Only the dedicated lock endpoint flips this flag, so the database stays
+    # the source of truth even when a client bypasses the frontend checkbox.
+    is_locked = Column(Boolean, nullable=False, default=False)
+    # Logical grouping of time segments created by one manual split
+    # (e.g. a 2:00-3:00 PM hour split at 2:30 PM yields a 2:00-2:30 PM row and
+    # a 2:30-3:00 PM row carrying the same split_group_id such as "SG001").
+    # Grouping/history only: every segment keeps its own unique entry_id and
+    # its own row, and no calculation or report may use this column — reports
+    # sum the separate time segments exactly as before.
+    split_group_id = Column(String(40), nullable=True)
 
     defects = relationship("DefectMaster", secondary=lambda: HourlyProductionDefect.__table__, lazy="selectin")
 
@@ -103,7 +130,9 @@ class HourlyProduction(Base):
 class HourlyProductionDefect(Base):
     __tablename__ = "hourly_production_defect"
 
-    entry_id = Column(BigInteger, ForeignKey(hpr_fk("hourly_production.entry_id")), primary_key=True)
+    entry_id = Column(
+        _autoinc_bigint(), ForeignKey(hpr_fk("hourly_production.entry_id")), primary_key=True
+    )
     defect_id = Column(BigInteger, ForeignKey(hpr_fk("defect_master.defect_id")), primary_key=True)
 
     __table_args__ = (hpr_table_args(),)

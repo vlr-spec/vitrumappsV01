@@ -111,9 +111,95 @@ const bottleNameFor = (bottleId: string, bottles: { id: string; name: string }[]
 const entryBottle = (e: QualityHourlyEntry | undefined): string => String(e?.bottle_id ?? '').trim();
 const entryJob = (e: QualityHourlyEntry | undefined): string => String(e?.job_id ?? '').trim();
 
+// ─── Manual-split time segments ──────────────────────────────────────────
+// Split rows live under minute-granularity labels (e.g. "2:30 PM") and are
+// separate time segments of the hour they divide — never extra production
+// time. Durations come from production-timeline ordering over the full display
+// key set (all 24 hourly labels plus the splits actually present), so one
+// split hour's segments always sum to exactly 1 hour. With no splits every
+// duration is 1 and every figure below is bit-identical to before. The split
+// group id itself is grouping/history only and is never read here.
+const parseReportLabelToMinutes = (label: string): number | null => {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(label);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mins = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (h < 1 || h > 12 || mins < 0 || mins > 59) return null;
+  if (ap === 'AM') {
+    if (h === 12) h = 0;
+  } else if (h !== 12) {
+    h += 12;
+  }
+  return h * 60 + mins;
+};
+
+/** Minutes since the 9 AM production-day start (9 AM = 0 … 8:59 AM next day). */
+const toReportTimelineMinutes = (label: string): number | null => {
+  const mins = parseReportLabelToMinutes(label);
+  if (mins === null) return null;
+  const nineAM = 9 * 60;
+  return mins < nineAM ? mins + 24 * 60 - nineAM : mins - nineAM;
+};
+
+/** All keys in production-timeline order: the 24 hourly labels plus any split labels present. */
+const getReportOrderedKeys = (byTime: Record<string, QualityHourlyEntry | undefined>): string[] => {
+  const keys = new Set<string>(PRODUCTION_TIMES.map((pt) => pt.time));
+  for (const k of Object.keys(byTime ?? {})) keys.add(k);
+  const list = [...keys];
+  list.sort((a, b) => {
+    const ta = toReportTimelineMinutes(a);
+    const tb = toReportTimelineMinutes(b);
+    if (ta === null && tb === null) return a.localeCompare(b);
+    if (ta === null) return 1;
+    if (tb === null) return -1;
+    return ta - tb;
+  });
+  return list;
+};
+
+/** Actual production duration in hours of one key: (own − previous) / 60, else 1. */
+const durationHoursForReportKey = (orderedKeys: string[], key: string): number => {
+  const idx = orderedKeys.indexOf(key);
+  if (idx <= 0) return 1;
+  const tPrev = toReportTimelineMinutes(orderedKeys[idx - 1]);
+  const tOwn = toReportTimelineMinutes(key);
+  if (tPrev === null || tOwn === null) return 1;
+  const diff = tOwn - tPrev;
+  if (diff <= 0 || diff > 12 * 60) return 1;
+  return diff / 60;
+};
+
+/** Shift of one key: hourly slots keep their own; splits inherit their parent hour's shift. */
+const shiftIdForReportKey = (key: string): number => {
+  const direct = PRODUCTION_TIMES.find((pt) => pt.time === key);
+  if (direct) return direct.shift_id;
+  const tOwn = toReportTimelineMinutes(key);
+  let shiftId = 1;
+  for (const pt of PRODUCTION_TIMES) {
+    const tPt = toReportTimelineMinutes(pt.time);
+    if (tPt !== null && tOwn !== null && tPt <= tOwn) shiftId = pt.shift_id;
+    else break;
+  }
+  return shiftId;
+};
+
+/** "2:00 PM" + "2:30 PM" → "2:00–2:30 PM" (suffix collapsed when shared). */
+const formatSplitRangeLabel = (parent: string, split: string): string => {
+  const pm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(parent);
+  const sm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(split);
+  if (!pm || !sm) return split;
+  if (pm[2].toUpperCase() === sm[2].toUpperCase()) {
+    return `${pm[1]}–${sm[1]} ${sm[2].toUpperCase()}`;
+  }
+  return `${pm[1]} ${pm[2].toUpperCase()}–${sm[1]} ${sm[2].toUpperCase()}`;
+};
+
 interface HourPoint {
   slot: { time: string; shift_id: number };
   entry: QualityHourlyEntry;
+  /** Actual production duration in hours (1 for hourly rows, fractional for split segments). */
+  durationHours: number;
 }
 
 interface JobRun {
@@ -148,11 +234,16 @@ const splitMachineRuns = (
   machineNo: number,
   byTime: Record<string, QualityHourlyEntry>
 ): JobRun[] => {
+  const ordered = getReportOrderedKeys(byTime);
   const points: HourPoint[] = [];
-  for (const slot of PRODUCTION_TIMES) {
-    const entry = byTime[slot.time];
+  for (const key of ordered) {
+    const entry = byTime[key];
     if (!hasMeaningfulData(entry)) continue;
-    points.push({ slot, entry: entry as QualityHourlyEntry });
+    points.push({
+      slot: { time: key, shift_id: shiftIdForReportKey(key) },
+      entry: entry as QualityHourlyEntry,
+      durationHours: durationHoursForReportKey(ordered, key),
+    });
   }
   if (points.length === 0) {
     return [{ machineNo, runIndex: 0, bottleId: '', jobId: '', runKey: '', points: [] }];
@@ -312,17 +403,17 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
         let sSum = 0;
         let sCount = 0;
         const times = new Set<string>();
-        for (const { slot, entry } of run.points) {
+        for (const { slot, entry, durationHours } of run.points) {
           times.add(slot.time);
           const w = hourlyWeight(entry, gob);
           if (w !== null) {
-            wSum += w;
-            wCount += 1;
+            wSum += w * durationHours;
+            wCount += durationHours;
           }
           const s = hourlySpeed(entry);
           if (s !== null) {
-            sSum += s;
-            sCount += 1;
+            sSum += s * durationHours;
+            sCount += durationHours;
           }
         }
         out.push({
@@ -347,6 +438,43 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
   }, [machines]);
 
   const hasData = columns.some((c) => c.times.size > 0);
+
+  // Grid rows: the 24 hourly labels plus any manual-split segments actually
+  // stored for this date (shown as their period range, e.g. "2:00–2:30 PM"),
+  // in display order (8:00 AM → 7:00 AM). With no splits this is exactly
+  // DISPLAY_TIMES.
+  const gridRows = useMemo<{ key: string; label: string }[]>(() => {
+    const splitKeys = new Set<string>();
+    for (const n of MACHINE_NOS) {
+      const byTime = dayHourly[String(n)] ?? {};
+      for (const k of Object.keys(byTime)) {
+        if (!DISPLAY_TIMES.some((s) => s.time === k) && parseReportLabelToMinutes(k) !== null) {
+          splitKeys.add(k);
+        }
+      }
+    }
+    if (splitKeys.size === 0) return DISPLAY_TIMES.map((s) => ({ key: s.time, label: s.time }));
+    // Display timeline: minutes since 8:00 AM (the first displayed row).
+    const toDisplayMinutes = (label: string): number | null => {
+      const mins = parseReportLabelToMinutes(label);
+      if (mins === null) return null;
+      const eightAM = 8 * 60;
+      return mins < eightAM ? mins + 24 * 60 - eightAM : mins - eightAM;
+    };
+    const all = [...DISPLAY_TIMES.map((s) => s.time), ...splitKeys];
+    all.sort((a, b) => {
+      const ta = toDisplayMinutes(a);
+      const tb = toDisplayMinutes(b);
+      if (ta === null && tb === null) return a.localeCompare(b);
+      if (ta === null) return 1;
+      if (tb === null) return -1;
+      return ta - tb;
+    });
+    return all.map((key, i) => ({
+      key,
+      label: splitKeys.has(key) && i > 0 ? formatSplitRangeLabel(all[i - 1], key) : key,
+    }));
+  }, [dayHourly]);
 
   const thStyle = (last = false): React.CSSProperties => ({
     padding: '7px 6px',
@@ -540,17 +668,17 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
               </tr>
             </thead>
             <tbody>
-              {DISPLAY_TIMES.map((slot) => {
+              {gridRows.map((row) => {
                 const byTimeCache: Record<string, QualityHourlyEntry | undefined> = {};
                 for (const n of MACHINE_NOS) {
-                  byTimeCache[String(n)] = dayHourly[String(n)]?.[slot.time];
+                  byTimeCache[String(n)] = dayHourly[String(n)]?.[row.key];
                 }
                 return (
-                  <tr key={slot.time}>
-                    <td style={{ ...td, fontWeight: 600 }}>{slot.time}</td>
+                  <tr key={row.key}>
+                    <td style={{ ...td, fontWeight: 600 }}>{row.label}</td>
                     {columns.map((c, i) => {
                       const isLastCol = i === columns.length - 1;
-                      const inRun = c.times.has(slot.time);
+                      const inRun = c.times.has(row.key);
                       const entry = inRun ? byTimeCache[String(c.machineNo)] : undefined;
                       const w = inRun ? hourlyWeight(entry, gobByMachine[c.machineNo]) : null;
                       const s = inRun ? hourlySpeed(entry) : null;

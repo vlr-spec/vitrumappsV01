@@ -68,8 +68,181 @@ const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
 const SHIFT_LABELS = ['Shift 1', 'Shift 2', 'Shift 3'];
 const SHIFT_ROW_BG = ['#f4f8ff', '#f3fdf6', '#fffdf2'];
 const SHIFT_CELL_BG = ['#eaf2ff', '#e8faf0', '#fffce8'];
-const SHIFT_CELL_COLOR = ['#3b72cc', '#2d8a58', '#b07c1a'];
+// Subtle highlight shared by every row of one split group (the split segment
+// plus its grouped hourly row). Distinct from all shift pastels and the
+// QC-hold alert color.
+const SPLIT_GROUP_BG = '#ffffde';const SHIFT_CELL_COLOR = ['#3b72cc', '#2d8a58', '#b07c1a'];
 const SHIFT_BORDERS = ['#c7daff', '#b6efd1', '#f0dfa0'];
+
+// ─── Manual Split Row helpers ────────────────────────────────────────────
+// A split divides the interval [parentTime, nextHourlyTime) at a user-picked
+// minute (e.g. parent "10:00 AM", split "10:25 AM"). The split row is stored
+// under its own end-time key ("10:25 AM" — the same canonical label format
+// the backend already round-trips) and displayed as a range ("10:00–10:25 AM").
+// The next hourly row keeps its label ("11:00 AM"); only its actual period
+// shrinks from 10:00–11:00 to 10:25–11:00. Periods are derived from ordering:
+// each row's period_start is the previous displayed row's time and
+// period_end is its own time, so deleting the split restores the original
+// period automatically and duration = end − start drives the efficiency calc.
+const PRODUCTION_TIME_SET: Set<string> = new Set(PRODUCTION_TIMES.map((pt) => pt.time));
+
+const parseTimeLabelToMinutes = (label: string): number | null => {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(label);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const mins = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (h < 1 || h > 12 || mins < 0 || mins > 59) return null;
+  if (ap === 'AM') {
+    if (h === 12) h = 0;
+  } else {
+    if (h !== 12) h += 12;
+  }
+  return h * 60 + mins;
+};
+
+/** Minutes since the 9 AM production-day start (9 AM = 0 … 8:59 AM next day). */
+const toTimelineMinutes = (label: string): number | null => {
+  const mins = parseTimeLabelToMinutes(label);
+  if (mins === null) return null;
+  const nineAM = 9 * 60;
+  return mins < nineAM ? mins + 24 * 60 - nineAM : mins - nineAM;
+};
+
+const formatMinutesToLabel = (minsSinceMidnight: number): string => {
+  const norm = ((minsSinceMidnight % 1440) + 1440) % 1440;
+  const h24 = Math.floor(norm / 60);
+  const mm = norm % 60;
+  const ap = h24 < 12 ? 'AM' : 'PM';
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${String(mm).padStart(2, '0')} ${ap}`;
+};
+
+/** "8:00 AM" + "9:00 AM" → "8:00 - 9:00 AM"; "11:00 AM" + "12:00 PM" → "11:00 AM - 12:00 PM" (suffix collapsed when shared). */
+const formatIntervalDisplayLabel = (start: string, end: string): string => {
+  const sm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(start);
+  const em = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(end);
+  if (!sm || !em) return end;
+  if (sm[2].toUpperCase() === em[2].toUpperCase()) {
+    return `${sm[1]} - ${em[1]} ${em[2].toUpperCase()}`;
+  }
+  return `${sm[1]} ${sm[2].toUpperCase()} - ${em[1]} ${em[2].toUpperCase()}`;
+};
+
+/** "10:00 AM" + "10:25 AM" → "10:00 - 10:25 AM" (suffix collapsed when shared). */
+const formatSplitDisplayLabel = (parent: string, split: string): string => {
+  return formatIntervalDisplayLabel(parent, split);
+};
+
+/** Full production interval for one display row: previous displayed time → own time (first row = own − 1h). Prefers the entry's actual stored period when present. */
+const getIntervalDisplayForKey = (
+  orderedKeys: string[],
+  key: string,
+  entry?: QualityHourlyEntry,
+): string => {
+  const idx = orderedKeys.indexOf(key);
+  let start: string | undefined = entry?.period_start || undefined;
+  if (!start) {
+    if (idx > 0) {
+      start = orderedKeys[idx - 1];
+    } else {
+      const tOwn = parseTimeLabelToMinutes(key);
+      start = tOwn !== null ? formatMinutesToLabel(tOwn - 60) : key;
+    }
+  }
+  const end: string = entry?.period_end || key;
+  if (start === end) {
+    const tOwn = parseTimeLabelToMinutes(end);
+    if (tOwn !== null) start = formatMinutesToLabel(tOwn - 60);
+  }
+  return formatIntervalDisplayLabel(start, end);
+};
+
+const getNextHourlyTime = (parentTime: string): string | null => {
+  const idx = PRODUCTION_TIMES.findIndex((pt) => pt.time === parentTime);
+  if (idx < 0 || idx >= PRODUCTION_TIMES.length - 1) return null;
+  return PRODUCTION_TIMES[idx + 1].time;
+};
+
+const isSplitKey = (key: string): boolean => !PRODUCTION_TIME_SET.has(key);
+
+/** All display keys in chronological (production-timeline) order. */
+const getOrderedDisplayKeys = (rows: Record<string, QualityHourlyEntry | undefined>): string[] => {
+  const keys = new Set<string>(PRODUCTION_TIMES.map((pt) => pt.time));
+  for (const k of Object.keys(rows ?? {})) keys.add(k);
+  const list = [...keys];
+  list.sort((a, b) => {
+    const ta = toTimelineMinutes(a);
+    const tb = toTimelineMinutes(b);
+    if (ta === null && tb === null) return a.localeCompare(b);
+    if (ta === null) return 1;
+    if (tb === null) return -1;
+    return ta - tb;
+  });
+  return list;
+};
+
+/** Duration in hours of one display row: (own − previous) / 60, else 1. */
+const getDurationHoursForKey = (orderedKeys: string[], key: string): number => {
+  const idx = orderedKeys.indexOf(key);
+  if (idx <= 0) return 1;
+  const prev = orderedKeys[idx - 1];
+  const tPrev = toTimelineMinutes(prev);
+  const tOwn = toTimelineMinutes(key);
+  if (tPrev === null || tOwn === null) return 1;
+  const diff = tOwn - tPrev;
+  if (diff <= 0 || diff > 12 * 60) return 1;
+  return diff / 60;
+};
+
+/**
+ * Duration from a row's own stored period (period_end − period_start).
+ * Falls back to the ordering-derived value when the stored period is absent
+ * or unparsable, so hourly rows without splits keep their exact existing result.
+ */
+const durationHoursFromEntry = (
+  entry: QualityHourlyEntry | undefined,
+  fallbackHours: number,
+): number => {
+  const s = entry?.period_start ? toTimelineMinutes(entry.period_start) : null;
+  const e = entry?.period_end ? toTimelineMinutes(entry.period_end) : null;
+  if (s !== null && e !== null) {
+    const diff = e - s;
+    if (diff > 0 && diff <= 12 * 60) return diff / 60;
+  }
+  return fallbackHours;
+};
+
+/**
+ * Writes explicit period_start / period_end onto every row of one machine map
+ * from chronological ordering (previous displayed time → own time; the day's
+ * first row spans the hour ending at its own time). Returns a new map, reusing
+ * unchanged row objects so memoized rows skip re-rendering. Deleting a split
+ * therefore restores the next hourly row's original period automatically.
+ */
+const stampSplitPeriods = (
+  byTime: Record<string, QualityHourlyEntry>,
+): Record<string, QualityHourlyEntry> => {
+  const keys = getOrderedDisplayKeys(byTime);
+  const out: Record<string, QualityHourlyEntry> = {};
+  keys.forEach((k, i) => {
+    const e = byTime[k];
+    if (!e) return;
+    let start: string;
+    if (i <= 0) {
+      const tOwn = parseTimeLabelToMinutes(k);
+      start = tOwn !== null ? formatMinutesToLabel(tOwn - 60) : k;
+    } else {
+      start = keys[i - 1];
+    }
+    if (e.period_start === start && e.period_end === k) {
+      out[k] = e;
+    } else {
+      out[k] = { ...e, period_start: start, period_end: k };
+    }
+  });
+  return out;
+};
 
 const C = {
   border: '#e2e8f0',
@@ -92,8 +265,10 @@ type ManualSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
  * The only fields a save response is allowed to change on an existing row.
  * Used to detect "nothing actually changed" so an unchanged row keeps its
  * object identity and the memoized row component does not re-render.
+ * split_group_id is included so a group attached at save time (the hourly row
+ * following a split inherits its split's group) is merged back verbatim.
  */
-const MERGED_ROW_FIELDS = ['entry_id', 'report_id', 'job_id', 'bottle_id'] as const;
+const MERGED_ROW_FIELDS = ['entry_id', 'report_id', 'job_id', 'bottle_id', 'split_group_id'] as const;
 
 const MANUAL_SAVE_STATUS_VIEW: Record<ManualSaveStatus, { label: string; color: string }> = {
   idle: { label: '', color: '#94a3b8' },
@@ -525,13 +700,15 @@ const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
 /**
  * Efficiency % of an hourly row = actual bottles (packing size × cartons)
  * ÷ that row's theoretical "As Per Speed" bottles × 100, where the theoretical
- * quantity uses the machine's own Gob count (see calculateTheoreticalBottles).
+ * quantity uses the machine's own Gob count (see calculateTheoreticalBottles)
+ * scaled by the row's actual period duration. Hourly rows keep duration 1
+ * (unchanged result); split-affected rows use (period_end − period_start).
  */
-const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0): string => {
+const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1): string => {
   if (!e?.bottle_id || !e.packing_size || !e.cartons) return '';
   const bottlesN = parseInt(e.packing_size) * parseInt(e.cartons);
   const speed = parseFloat(e.speed_per_min);
-  const theoretical = calculateTheoreticalBottles(speed, gobCount);
+  const theoretical = calculateTheoreticalBottles(speed, gobCount, durationHours > 0 ? durationHours : 1);
   if (!bottlesN || theoretical <= 0) return '';
   return ((bottlesN / theoretical) * 100).toFixed(1);
 };
@@ -582,10 +759,12 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
  * from the backend without any extra bookkeeping.
  */
 const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>): string => {
+  // Chronological (production-timeline) order so split rows participate
+  // without changing the result when no splits exist.
   let activeTime = '';
-  PRODUCTION_TIMES.forEach((slot) => {
-    if (rows[slot.time]?.bottle_id) activeTime = slot.time;
-  });
+  for (const key of getOrderedDisplayKeys(rows)) {
+    if (rows[key]?.bottle_id) activeTime = key;
+  }
   return activeTime;
 };
 
@@ -594,6 +773,24 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
 // cached), so typing in one row only re-renders that row instead of all 24.
 const QualityTimeRow = React.memo<{
   time: string;
+  /** Text shown in the Time column (full interval, e.g. "9:00 - 10:00 AM" or "3:00 - 3:34 PM"). */
+  displayTime?: string;
+  /** True for a manually inserted split row (key not in PRODUCTION_TIMES). */
+  isSplitRow?: boolean;
+  /** False for the last hourly slot (no next hour to split into). */
+  canSplit?: boolean;
+  /** Dynamic shift-block height (8 + splits in the block). */
+  rowSpan?: number;
+  /** Actual production duration in hours (1 for hourly, fractional for splits). */
+  durationHours?: number;
+  /** Actual period_start label (previous displayed row's time). */
+  periodStart?: string;
+  /** Actual period_end label (own time). */
+  periodEnd?: string;
+  /** Opens the manual split-time selector for this hourly row. */
+  onSplit?: (time: string) => void;
+  /** Deletes this split row and restores the original period. */
+  onDeleteSplit?: (time: string) => void;
   shiftIdx: number;
   isFirstInShift: boolean;
   entry?: QualityHourlyEntry;
@@ -620,6 +817,15 @@ const QualityTimeRow = React.memo<{
   toggleRowLock: (time: string, entry?: QualityHourlyEntry) => void;
 }>(({
   time,
+  displayTime,
+  isSplitRow = false,
+  canSplit = false,
+  rowSpan = 8,
+  durationHours = 1,
+  periodStart,
+  periodEnd,
+  onSplit,
+  onDeleteSplit,
   shiftIdx,
   isFirstInShift,
   entry,
@@ -641,7 +847,22 @@ const QualityTimeRow = React.memo<{
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
+  // Split-group highlight: every row carrying a split_group_id (the split
+  // segment and its grouped hourly row alike) shares one subtle background. It
+  // is driven by the persisted group id, so it survives save/refresh/reload
+  // and disappears automatically when the split (and its group) is deleted.
+  // QC-hold red keeps priority as the alert state. Entry ID, Job ID,
+  // calculations, scheduling and all reports are untouched by this.
+  const isSplitGrouped = !!(entry?.split_group_id ?? '').trim();
+  const baseBg = hasHold ? rowBg : isSplitGrouped ? SPLIT_GROUP_BG : isSplitRow ? '#f8fbff' : rowBg;
   const rowAvg = calcRowAverage(entry, gobCount);
+  // Hover states: row hover only drives the background highlight, while the
+  // manual Split button is gated strictly on the Time column hover — no Split
+  // button is rendered permanently and hovering other cells never shows one.
+  const [hovered, setHovered] = React.useState(false);
+  const [timeHovered, setTimeHovered] = React.useState(false);
+  void periodStart;
+  void periodEnd;
 
   // Bottle/action area, two states only (see activeJobEntryTime): a row without
   // a bottle is a new-job row and offers the bottle dropdown, a row with a
@@ -651,10 +872,13 @@ const QualityTimeRow = React.memo<{
   const isCurrentEntry = hasBottle && isActiveEntry;
 
   // Row lock (Machine 1–4 tables only): when the row's checkbox is checked,
-  // the production fields of THIS row become read-only. Bottle selection and
-  // the "+" / "−" job buttons are intentionally not locked — only the fields
-  // listed in the lock requirement. Avg / Bottles in Nos. / QTY EFF% are
-  // display-only values with no editor, so they are inherently read-only.
+  // this row is read-only. Every editable field — the bottle dropdown, the
+  // production fields, the defects and the "−" / split-delete buttons — is
+  // disabled; only the lock checkbox itself stays usable so the row can be
+  // unlocked again, and "+" is kept because it writes the NEXT row, not this
+  // one. Avg / Bottles in Nos. / QTY EFF% are display-only values with no
+  // editor, so they are inherently read-only. The backend enforces the same
+  // lock independently, so a disabled field is a convenience, not the guard.
   const fieldsDisabled = !canEdit || locked;
 
   const selectedDefectNames = defectGroups.length > 0
@@ -704,12 +928,12 @@ const QualityTimeRow = React.memo<{
   return (
     <tr
       key={time}
-      style={{ backgroundColor: rowBg }}
-      onMouseEnter={(e) => { if (!hasHold) e.currentTarget.style.backgroundColor = '#ecf1ff'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = rowBg; }}
+      style={{ backgroundColor: baseBg }}
+      onMouseEnter={(e) => { setHovered(true); if (!hasHold) e.currentTarget.style.backgroundColor = '#ecf1ff'; }}
+      onMouseLeave={(e) => { setHovered(false); e.currentTarget.style.backgroundColor = baseBg; }}
     >
       {isFirstInShift && (
-        <td rowSpan={8} style={{ textAlign: 'center', verticalAlign: 'middle', borderRight: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, width: '38px', backgroundColor: SHIFT_CELL_BG[shiftIdx], padding: '0' }}>
+        <td rowSpan={rowSpan} style={{ textAlign: 'center', verticalAlign: 'middle', borderRight: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, width: '38px', backgroundColor: SHIFT_CELL_BG[shiftIdx], padding: '0' }}>
           <div style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)', fontSize: '10.5px', fontWeight: 700, color: SHIFT_CELL_COLOR[shiftIdx], letterSpacing: '0.08em', textTransform: 'uppercase', userSelect: 'none' }}>
             {SHIFT_LABELS[shiftIdx]}
           </div>
@@ -727,13 +951,75 @@ const QualityTimeRow = React.memo<{
         />
       </td>
 
-      <td style={{ ...tdCenter, fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
+      <td
+        style={{ ...tdCenter, fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
+        onMouseEnter={() => setTimeHovered(true)}
+        onMouseLeave={() => setTimeHovered(false)}
+      >
         {entry?.entry_id && (
           <span style={{ color: '#2563eb', fontWeight: 600, marginRight: '6px', fontSize: '11px' }}>
             {/* E{String(entry.entry_id).padStart(3, '0')} */}
           </span>
         )}
-        {time}
+        <span>{displayTime ?? time}</span>
+        {entry?.split_group_id && (
+          <span
+            title={`Split group ${entry.split_group_id} — time segments created from the same split (each keeps its own entry)`}
+            style={{ color: '#8a6d1b', fontWeight: 600, marginLeft: '6px', fontSize: '10.5px' }}
+          >
+            {/* · {entry.split_group_id} */}
+          </span>
+        )}
+        {/* Manual Split: shown ONLY while the cursor is on this Time column —
+            never permanently on every row and never when hovering other cells.
+            Split rows show a delete control instead so the original period can
+            be restored. */}
+        {!isSplitRow && canSplit && canEdit && timeHovered && onSplit && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onSplit(time); }}
+            title={`Split ${time}`}
+            style={{
+              marginLeft: '6px',
+              padding: '1px 7px',
+              fontSize: '10.5px',
+              fontWeight: 600,
+              color: '#2563eb',
+              backgroundColor: '#eff6ff',
+              border: '1px solid #bfdbfe',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              verticalAlign: 'middle',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#dbeafe'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
+          >
+            Split
+          </button>
+        )}
+        {isSplitRow && canEdit && !locked && timeHovered && onDeleteSplit && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDeleteSplit(time); }}
+            title={`Delete split ${displayTime ?? time} and restore the original period`}
+            style={{
+              marginLeft: '6px',
+              padding: '0px 6px',
+              fontSize: '11px',
+              fontWeight: 700,
+              color: '#be123c',
+              backgroundColor: '#fff1f2',
+              border: '1px solid #fecdd3',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              verticalAlign: 'middle',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
+          >
+            ×
+          </button>
+        )}
       </td>
 
       <td style={{ ...td, padding: '4px 6px' }}>
@@ -767,7 +1053,8 @@ const QualityTimeRow = React.memo<{
               // displayed until the user clicks Yes.
               <select
                 value={entry?.bottle_id ?? ''}
-                disabled={!canEdit}
+                disabled={!canEdit || locked}
+                title={!canEdit ? undefined : locked ? 'This row is locked and cannot be edited.' : undefined}
                 onChange={(e) => {
                   const next = e.target.value;
                   e.target.value = entry?.bottle_id ?? '';
@@ -783,10 +1070,10 @@ const QualityTimeRow = React.memo<{
                   backgroundColor: 'transparent',
                   border: '1px solid transparent',
                   borderRadius: '4px',
-                  cursor: canEdit ? 'pointer' : 'not-allowed',
+                  cursor: canEdit && !locked ? 'pointer' : 'not-allowed',
                   outline: 'none',
                   textAlign: 'left',
-                  opacity: canEdit ? 1 : 0.6,
+                  opacity: canEdit && !locked ? 1 : 0.6,
                 }}
                 onFocus={(e) => { e.currentTarget.style.borderColor = '#2563eb'; }}
                 onBlur={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
@@ -832,7 +1119,7 @@ const QualityTimeRow = React.memo<{
             </button>
           )}
           {isCurrentEntry ? (
-            canEdit ? (
+            canEdit && !locked ? (
               <button
                 onClick={() => removeBottle(time)}
                 title="Remove one bottle from this row"
@@ -851,7 +1138,7 @@ const QualityTimeRow = React.memo<{
             ) : (
               <button
                 disabled
-                title="No edit permission for Quality Control"
+                title={locked ? 'This row is locked and cannot be edited.' : 'No edit permission for Quality Control'}
                 style={mutedActionButton}
               >
                 −
@@ -910,7 +1197,7 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td style={tdCenter}>
-        <EffBadge val={calcEffForEntry(entry, gobCount)} />
+        <EffBadge val={calcEffForEntry(entry, gobCount, durationHours)} />
       </td>
 
       <td style={{ ...tdCenter, padding: '4px 4px' }}>
@@ -1016,6 +1303,10 @@ export const QualityControlModule: React.FC = () => {
   // mid-request can never be dropped from the next manual save.
   const touchedTimes = useRef<Record<string, Record<string, Record<string, number>>>>({});
   const touchSeq = useRef(0);
+  // Saved split rows the operator deleted locally (date -> machine -> times).
+  // Sent explicitly on the next Save so the backend drops those DB rows and the
+  // delete persists after Save/Refresh/reload. Unsaved splits need no entry.
+  const deletedSplitsRef = useRef<Record<string, Record<string, Set<string>>>>({});
 
   const productionStoreRef = useRef(productionStore);
   useEffect(() => {
@@ -1148,7 +1439,10 @@ export const QualityControlModule: React.FC = () => {
               byTime[tKey] = localEntry;
             }
           }
-          mergedDate[mKey] = byTime;
+          // Every row carries its explicit period (previous displayed time →
+          // own time), so duration never comes from the displayed label alone
+          // and survives Save → Refresh → Reload via the persisted time keys.
+          mergedDate[mKey] = stampSplitPeriods(byTime);
         }
         return { ...prev, [dateKey]: mergedDate };
       });
@@ -1192,6 +1486,7 @@ export const QualityControlModule: React.FC = () => {
     remarks: '',
     defect_ids: [],
     job_id: '',
+    split_group_id: '',
   });
 
   // ── Manual-save plumbing ─────────────────────────────────────────────────
@@ -1226,12 +1521,30 @@ export const QualityControlModule: React.FC = () => {
 
   const patchEntry = useCallback((time: string, patch: Partial<QualityHourlyEntry>) => {
     if (!canEdit) return;
-    const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
     const mStr = String(activeMachine);
+    // A locked row is read-only. The inputs of a locked row are disabled
+    // already; this second check stops any other path (a keyboard shortcut, a
+    // stray handler) from staging an edit the backend would reject on save
+    // with "This row is locked and cannot be edited."
+    if (productionStoreRef.current?.[dateKey]?.[mStr]?.[time]?.is_locked) return;
+    const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
     markTouched(dateKey, mStr, time);
     // Manual save only: no automatic backend write here.
     setProductionStore((prev) => {
-      const existing = prev[dateKey]?.[mStr]?.[time] ?? blankEntry(time, slot?.shift_id ?? 1);
+      const prevEntry = prev[dateKey]?.[mStr]?.[time];
+      // Split rows inherit their parent hour's shift when no explicit shift exists.
+      let fallbackShift = slot?.shift_id ?? prevEntry?.shift_id ?? 1;
+      if (!slot && !prevEntry) {
+        const tOwn = toTimelineMinutes(time);
+        let parentShift = 1;
+        for (const pt of PRODUCTION_TIMES) {
+          const tPt = toTimelineMinutes(pt.time);
+          if (tPt !== null && tOwn !== null && tPt <= tOwn) parentShift = pt.shift_id;
+          else break;
+        }
+        fallbackShift = parentShift;
+      }
+      const existing = prevEntry ?? blankEntry(time, fallbackShift);
       return {
         ...prev,
         [dateKey]: {
@@ -1320,26 +1633,310 @@ export const QualityControlModule: React.FC = () => {
   // every date.
   const activeEntryTime = useMemo(() => activeJobEntryTime(activeRows), [activeRows]);
 
-  // ── Row lock (Machine 1–4 tables only) ─────────────────────────────────
-  // Per-hourly-row edit lock. Keyed by the row's unique entry_id when the row
-  // has one (saved rows), falling back to the date + machine + time slot for
-  // rows not yet saved — never by time alone. Each hourly row owns its own
-  // key, so locking one row can never lock any other row. Nothing outside the
-  // Machine 1–4 tables reads this state (All Machine / reports untouched).
-  const [lockedRows, setLockedRows] = useState<Record<string, boolean>>({});
+  // ── Manual Split Row state ─────────────────────────────────────────────
+  // Split rows live in the same productionStore map under their own end-time
+  // key ("10:25 AM"). Hourly labels never change; only each row's actual
+  // period (previous displayed time → own time) changes, which both restores
+  // correctly on delete and drives the duration-aware efficiency below.
+  const [splitTarget, setSplitTarget] = useState<string | null>(null);
+  const [splitValue, setSplitValue] = useState<string>('');
+  const [splitError, setSplitError] = useState<string>('');
 
-  const rowLockKey = useCallback((time: string, entry?: QualityHourlyEntry): string => {
-    const eid = entry?.entry_id ? String(entry.entry_id) : '';
-    return eid
-      ? `eid:${dateKey}:M${activeMachine}:${eid}`
-      : `slot:${dateKey}:M${activeMachine}:${time}`;
-  }, [dateKey, activeMachine]);
+  // Chronological display order: the 24 hourly rows plus any split rows
+  // inserted immediately after their parent hour.
+  const displayKeys = useMemo(() => getOrderedDisplayKeys(activeRows), [activeRows]);
+  const durationByKey = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const k of displayKeys) {
+      map[k] = durationHoursFromEntry(
+        activeRows[k],
+        getDurationHoursForKey(displayKeys, k),
+      );
+    }
+    return map;
+  }, [displayKeys, activeRows]);
+  const shiftIdxByKey = useMemo(() => {
+    const map: Record<string, number> = {};
+    const hourlyShift = new Map<string, number>(PRODUCTION_TIMES.map((pt) => [pt.time, pt.shift_id - 1]));
+    for (const k of displayKeys) {
+      if (hourlyShift.has(k)) {
+        map[k] = hourlyShift.get(k) ?? 0;
+      } else {
+        // Split rows inherit their parent hour's shift so the shift block
+        // (and its background) stays visually contiguous.
+        const tOwn = toTimelineMinutes(k);
+        let s = 0;
+        for (const pt of PRODUCTION_TIMES) {
+          const tPt = toTimelineMinutes(pt.time);
+          if (tPt !== null && tOwn !== null && tPt <= tOwn) s = pt.shift_id - 1;
+          else break;
+        }
+        const stored = activeRows[k]?.shift_id;
+        map[k] = stored ? Math.max(0, Math.min(2, stored - 1)) : s;
+      }
+    }
+    return map;
+  }, [displayKeys, activeRows]);
+  // Shift-block heights grow with the splits they contain (8 + splits).
+  const shiftBlockCounts = useMemo(() => {
+    const counts = [0, 0, 0];
+    for (const k of displayKeys) counts[shiftIdxByKey[k] ?? 0] += 1;
+    return counts;
+  }, [displayKeys, shiftIdxByKey]);
+
+  const openSplitDialog = useCallback((time: string) => {
+    if (!canEdit) return;
+    if (isSplitKey(time)) return;
+    if (!getNextHourlyTime(time)) return;
+    setSplitTarget(time);
+    // Pre-fill with the start time of the period being split ([time, next)),
+    // so the user only needs to change the minutes (e.g. 3:00 AM → 3:15).
+    // Split validation, job/entry IDs and calculations are untouched.
+    const tStart = parseTimeLabelToMinutes(time);
+    if (tStart !== null) {
+      const hh = Math.floor(tStart / 60);
+      const mm = tStart % 60;
+      setSplitValue(`${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`);
+    } else {
+      setSplitValue('');
+    }
+    setSplitError('');
+  }, [canEdit]);
+
+  const closeSplitDialog = useCallback(() => {
+    setSplitTarget(null);
+    setSplitValue('');
+    setSplitError('');
+  }, []);
+
+  const deleteSplitRow = useCallback((time: string) => {
+    if (!canEdit) return;
+    if (!isSplitKey(time)) return;
+    const mStr = String(activeMachine);
+    // Removing the key restores the next hourly row's original period
+    // automatically (its period_start falls back to the parent hour).
+    // A previously saved split is recorded for explicit backend deletion so
+    // the delete persists after Save/Refresh/reload. Job IDs are untouched.
+    const savedEntry = productionStoreRef.current?.[dateKey]?.[mStr]?.[time];
+    const deletedGroup = (savedEntry?.split_group_id ?? '').trim();
+    // Deleting a row is a modification like any other: a locked split can
+    // never be dropped (the backend rejects it, so refusing here only avoids
+    // staging a save that is guaranteed to fail).
+    if (savedEntry?.is_locked) {
+      toast.error('This row is locked and cannot be edited.');
+      return;
+    }
+    if (savedEntry?.entry_id) {
+      const byDate = deletedSplitsRef.current[dateKey] ?? (deletedSplitsRef.current[dateKey] = {});
+      const byMachine = byDate[mStr] ?? (byDate[mStr] = new Set<string>());
+      byMachine.add(time);
+    }
+    setProductionStore((prev) => {
+      const byMachine = prev[dateKey]?.[mStr] ?? {};
+      if (!(time in byMachine)) return prev;
+      const nextByMachine = { ...byMachine };
+      delete nextByMachine[time];
+      // The split's group dies with it: the following hourly row covers the
+      // whole hour again, so a stale group there would group unrelated hours.
+      // Only the group of THIS split is cleared — any other group is kept.
+      const withDeleted = getOrderedDisplayKeys({ ...nextByMachine, [time]: savedEntry });
+      const ordered = getOrderedDisplayKeys(nextByMachine);
+      const followerKey = ordered[withDeleted.indexOf(time)];
+      const follower = followerKey ? nextByMachine[followerKey] : undefined;
+      // A locked follower keeps its stored group untouched — clearing it would
+      // be an edit the backend rejects. The group is grouping/history only, so
+      // leaving it in place costs nothing except that one cosmetic label.
+      if (follower && followerKey && deletedGroup && !follower.is_locked
+        && (follower.split_group_id ?? '').trim() === deletedGroup) {
+        nextByMachine[followerKey] = { ...follower, split_group_id: '' };
+        markTouched(dateKey, mStr, followerKey);
+      }
+      // Re-stamping restores the next hourly row's original period.
+      return { ...prev, [dateKey]: { ...(prev[dateKey] ?? {}), [mStr]: stampSplitPeriods(nextByMachine) } };
+    });
+    const byDateTouched = touchedTimes.current[dateKey]?.[mStr];
+    if (byDateTouched) delete byDateTouched[time];
+  }, [canEdit, dateKey, activeMachine]);
+
+  const confirmSplit = useCallback(() => {
+    if (!splitTarget || !canEdit) return;
+    const nextTime = getNextHourlyTime(splitTarget);
+    if (!nextTime) {
+      setSplitError('This hour cannot be split.');
+      return;
+    }
+    // Accept "10:25 AM" labels or "10:25" 24h values from <input type="time">.
+    let candidate = splitValue.trim();
+    if (/^\d{1,2}:\d{2}$/.test(candidate)) {
+      const [hh, mm] = candidate.split(':').map(Number);
+      const ap = hh < 12 ? 'AM' : 'PM';
+      const h12 = hh % 12 === 0 ? 12 : hh % 12;
+      candidate = `${h12}:${String(mm).padStart(2, '0')} ${ap}`;
+    }
+    const tParent = toTimelineMinutes(splitTarget);
+    const tNext = toTimelineMinutes(nextTime);
+    const tSplit = toTimelineMinutes(candidate);
+    if (tSplit === null) {
+      setSplitError(`Enter a time between ${splitTarget} and ${nextTime} (e.g. 10:25 AM).`);
+      return;
+    }
+    if (tParent === null || tNext === null || !(tSplit > tParent && tSplit < tNext)) {
+      setSplitError(`Pick a time strictly between ${splitTarget} and ${nextTime}.`);
+      return;
+    }
+    const splitKey = formatMinutesToLabel(parseTimeLabelToMinutes(candidate) ?? 0);
+    const mStr = String(activeMachine);
+    const existsLocal = productionStoreRef.current?.[dateKey]?.[mStr]?.[splitKey];
+    if (existsLocal || PRODUCTION_TIME_SET.has(splitKey)) {
+      setSplitError(`${splitKey} already exists — pick a different minute.`);
+      return;
+    }
+    const parentSlot = PRODUCTION_TIMES.find((pt) => pt.time === splitTarget);
+    const parentEntry = productionStoreRef.current?.[dateKey]?.[mStr]?.[splitTarget];
+    const shiftId = parentEntry?.shift_id ?? parentSlot?.shift_id ?? 1;
+    markTouched(dateKey, mStr, splitKey);
+    // A split is a continuation of the previous row's job, never a new job:
+    // the new row inherits the parent's Job ID, bottle and production values
+    // (editable afterwards), while no other row's Job ID is created or changed.
+    // Its period is [parent → split]; the next hourly row's period becomes
+    // [split → next] by ordering. Efficiency then uses each row's own duration.
+    //
+    // Split Group ID: both time segments of this split (the new split row and
+    // the following hourly row) carry the same logical group id while each
+    // keeps its own unique entry_id and row. The id is grouping/history only
+    // and never influences jobs, calculations or reports. Ids are sequential
+    // per day + machine (SG001, SG002, …), reusing neither an id already in
+    // use nor one pending deletion.
+    const byMachineNow = productionStoreRef.current?.[dateKey]?.[mStr] ?? {};
+    const usedGroups = new Set<string>();
+    for (const e of Object.values(byMachineNow)) {
+      const g = (e?.split_group_id ?? '').trim();
+      if (g) usedGroups.add(g);
+    }
+    let seq = 1;
+    let newGroup = '';
+    while (seq < 1000) {
+      const candidate = `SG${String(seq).padStart(3, '0')}`;
+      if (!usedGroups.has(candidate)) {
+        newGroup = candidate;
+        break;
+      }
+      seq += 1;
+    }
+    const base = parentEntry ?? blankEntry(splitTarget, shiftId);
+    const splitEntry: QualityHourlyEntry = {
+      ...base,
+      packing_category: [...(base.packing_category ?? [])],
+      defect_ids: [...(base.defect_ids ?? [])],
+      entry_id: '',
+      report_id: dateKey,
+      machine_no: activeMachine,
+      shift_id: shiftId,
+      production_time: splitKey,
+      period_start: splitTarget,
+      period_end: splitKey,
+      split_group_id: newGroup,
+      // A split segment is a NEW row: it is created unlocked even when the
+      // hour it was carved out of was locked (the parent row itself is never
+      // modified by a split).
+      is_locked: false,
+    };
+    const pendingDeleted = deletedSplitsRef.current[dateKey]?.[mStr];
+    if (pendingDeleted) pendingDeleted.delete(splitKey);
+    // The following hourly row is the split's second segment: stamp the same
+    // group on it now (marked dirty so it persists) when it already exists and
+    // is not locked (a locked row is never edited — it keeps its stored group).
+    // When it does not exist yet, buildSavePayload attaches this split's group
+    // to it at save time instead — no extra row is ever created here.
+    const nextEntry = productionStoreRef.current?.[dateKey]?.[mStr]?.[nextTime];
+    if (nextEntry && !nextEntry.is_locked && !(nextEntry.split_group_id ?? '').trim()) {
+      markTouched(dateKey, mStr, nextTime);
+    }
+    setProductionStore((prev) => {
+      const byMachine = prev[dateKey]?.[mStr] ?? {};
+      if (byMachine[splitKey]) return prev;
+      const withNext: Record<string, QualityHourlyEntry> = { ...byMachine, [splitKey]: splitEntry };
+      const existingNext = withNext[nextTime];
+      if (existingNext && !existingNext.is_locked && !(existingNext.split_group_id ?? '').trim()) {
+        withNext[nextTime] = { ...existingNext, split_group_id: newGroup };
+      }
+      const nextByMachine = stampSplitPeriods(withNext);
+      return {
+        ...prev,
+        [dateKey]: {
+          ...(prev[dateKey] ?? {}),
+          [mStr]: nextByMachine,
+        },
+      };
+    });
+    closeSplitDialog();
+    toast.success(`Split ${splitTarget} at ${splitKey} (${newGroup})`);
+  }, [splitTarget, splitValue, canEdit, dateKey, activeMachine, markTouched, closeSplitDialog]);
+
+  // ── Row lock (Machine 1–4 tables only) ─────────────────────────────────
+  // The lock lives in the DATABASE (hourly_production.is_locked), never in
+  // local component state: Refresh, a new session and a second browser all
+  // show the same flag, and every write API independently rejects a locked
+  // row with "This row is locked and cannot be edited." — so the protection
+  // holds even when this client is bypassed.
+  //
+  // Toggling calls the dedicated one-row lock endpoint, which writes ONLY that
+  // row's flag: no day reload, no save of any other row and no other field of
+  // this row is touched, so no calculation, Job ID, split or styling logic
+  // runs. Exactly one row's own store entry is patched (optimistically, and
+  // rolled back if the server refuses), so only that row re-renders.
+  const [lockBusy, setLockBusy] = useState(false);
 
   const toggleRowLock = useCallback((time: string, entry?: QualityHourlyEntry) => {
-    if (!canEdit) return;
-    const key = rowLockKey(time, entry);
-    setLockedRows((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, [canEdit, rowLockKey]);
+    if (!canEdit || lockBusy) return;
+    const mStr = String(activeMachine);
+    const cur = productionStoreRef.current?.[dateKey]?.[mStr]?.[time] ?? entry;
+    // The row has to exist locally to be locked — the grid always carries one
+    // entry per slot once the day is loaded.
+    if (!cur) return;
+    const next = !(cur.is_locked ?? false);
+    // A locked row is never written again, so any unsaved edit on it would be
+    // lost. Save the row first, then lock it.
+    if (next && touchedTimes.current[dateKey]?.[mStr]?.[time]) {
+      toast.error('Save this row before locking it.');
+      return;
+    }
+    const patchLock = (value: boolean) => {
+      setProductionStore((prev) => {
+        const existing = prev[dateKey]?.[mStr]?.[time];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [dateKey]: {
+            ...(prev[dateKey] ?? {}),
+            [mStr]: {
+              ...(prev[dateKey]?.[mStr] ?? {}),
+              [time]: { ...existing, is_locked: value },
+            },
+          },
+        };
+      });
+    };
+    setLockBusy(true);
+    patchLock(next);
+    void qualityRepository
+      .setRowLock({
+        dateKey,
+        machineNo: activeMachine,
+        productionTime: time,
+        isLocked: next,
+      })
+      .then((res) => {
+        if (!res.ok) {
+          // The database still holds the previous state — undo the flip.
+          patchLock(!next);
+          toast.error(res.error ?? 'The row lock could not be saved.');
+          return;
+        }
+        toast.success(next ? `Row ${time} locked.` : `Row ${time} unlocked.`);
+      })
+      .finally(() => setLockBusy(false));
+  }, [canEdit, lockBusy, dateKey, activeMachine]);
 
   // Bottle name shown as plain text next to a picked bottle. Resolved from the
   // full Bottle Master list (a bottle id is machine independent), so an entry
@@ -1366,12 +1963,17 @@ export const QualityControlModule: React.FC = () => {
     if (!canEdit) return;
     const machineKey = String(activeMachine);
     const slot = PRODUCTION_TIMES.find((pt) => pt.time === time);
+    // A locked row is never edited — not even by a confirmed bottle change.
+    if (productionStoreRef.current?.[dateKey]?.[machineKey]?.[time]?.is_locked) return;
 
     markTouched(dateKey, machineKey, time);
     // Manual save only: no automatic backend write here.
 
     setProductionStore((prev) => {
-      const base = prev[dateKey]?.[machineKey]?.[time] ?? blankEntry(time, slot?.shift_id ?? 1);
+      const prevBase = prev[dateKey]?.[machineKey]?.[time];
+      // Locked rows are never written, not even by a confirmed job change.
+      if (prevBase?.is_locked) return prev;
+      const base = prevBase ?? blankEntry(time, slot?.shift_id ?? 1);
       return {
         ...prev,
         [dateKey]: {
@@ -1401,7 +2003,8 @@ export const QualityControlModule: React.FC = () => {
     const existingEntry = productionStoreRef.current?.[dateKey]?.[machineKey]?.[time];
     // A job entry never changes its bottle: it is either current (buttons only)
     // or a historical/closed entry (read-only). Both are handled elsewhere.
-    if (existingEntry?.bottle_id) return;
+    // A locked row never changes anything — the backend rejects it anyway.
+    if (existingEntry?.bottle_id || existingEntry?.is_locked) return;
     if (!bottleId) {
       patchEntry(time, {
         bottle_id: '',
@@ -1429,6 +2032,8 @@ export const QualityControlModule: React.FC = () => {
     if (!isActiveEntryTime(time)) return;
     const idx = PRODUCTION_TIMES.findIndex((pt) => pt.time === time);
     // Manual save only: the extended row stays in memory until Save is confirmed.
+    // Split sources (idx === -1) copy into the next empty HOURLY slot after
+    // their timeline position; hourly sources keep the exact existing order.
     setProductionStore((prev) => {
       const machineKey = String(activeMachine);
       const source = prev[dateKey]?.[machineKey]?.[time];
@@ -1436,51 +2041,85 @@ export const QualityControlModule: React.FC = () => {
       const markRow = (date: string, mKey: string, tKey: string) => {
         markTouched(date, mKey, tKey);
       };
-      for (let i = idx + 1; i < PRODUCTION_TIMES.length; i++) {
-        const nextTime = PRODUCTION_TIMES[i].time;
-        if (!prev[dateKey]?.[machineKey]?.[nextTime]?.bottle_id) {
+      const hourlyAfter = (srcTime: string): { time: string; shift_id: number }[] => {
+        const tSrc = toTimelineMinutes(srcTime);
+        return PRODUCTION_TIMES.filter((pt) => {
+          const tPt = toTimelineMinutes(pt.time);
+          return tSrc !== null && tPt !== null && (idx >= 0 ? PRODUCTION_TIMES.indexOf(pt) > idx : tPt > tSrc);
+        });
+      };
+      for (const slot of hourlyAfter(time)) {
+        const nextTime = slot.time;
+        const target = prev[dateKey]?.[machineKey]?.[nextTime];
+        // A locked slot is never written into — it would be an edit the
+        // backend rejects. Keep looking for the next free, unlocked slot.
+        if (!target?.bottle_id && !target?.is_locked) {
           markRow(dateKey, machineKey, nextTime);
+          // The extended row continues the same job (same Job ID via spread);
+          // periods are re-stamped so the target keeps its own duration.
+          // A "+" extension is a NEW hour, never part of the source's split:
+          // the split group is not inherited.
+          const nextByMachine = stampSplitPeriods({
+            ...(prev[dateKey]?.[machineKey] ?? {}),
+            [nextTime]: {
+              ...source,
+              packing_category: [...(source.packing_category ?? [])],
+              defect_ids: [...(source.defect_ids ?? [])],
+              production_time: nextTime,
+              entry_id: '',
+              shift_id: slot.shift_id,
+              split_group_id: '',
+              // New rows are always created unlocked, even when the row they
+              // were copied from is locked.
+              is_locked: false,
+            },
+          });
           return {
             ...prev,
             [dateKey]: {
               ...(prev[dateKey] ?? {}),
-              [machineKey]: {
-                ...(prev[dateKey]?.[machineKey] ?? {}),
-                [nextTime]: {
-                  ...source,
-                  production_time: nextTime,
-                  entry_id: '',
-                  shift_id: PRODUCTION_TIMES[i].shift_id,
-                },
-              },
+              [machineKey]: nextByMachine,
             },
           };
         }
       }
-      if (idx === PRODUCTION_TIMES.length - 1) {
+      const isLastHourly = idx === PRODUCTION_TIMES.length - 1;
+      const isLastDisplay = (() => {
+        const rows = prev[dateKey]?.[machineKey] ?? {};
+        return time === activeJobEntryTime(rows) && getOrderedDisplayKeys(rows).slice(-1)[0] === time;
+      })();
+      if (isLastHourly || (idx < 0 && isLastDisplay)) {
         const nextDate = new Date(`${dateKey}T00:00:00`);
         nextDate.setDate(nextDate.getDate() + 1);
         const nextDateKey = toIso(nextDate);
         const firstTime = PRODUCTION_TIMES[0].time;
         const firstShiftId = PRODUCTION_TIMES[0].shift_id;
-        // Never overwrite an existing job in the next day's first slot.
-        if (prev[nextDateKey]?.[machineKey]?.[firstTime]?.bottle_id) return prev;
+        // Never overwrite an existing job in the next day's first slot, and
+        // never write into a row that was locked on that other date.
+        const nextDayFirst = prev[nextDateKey]?.[machineKey]?.[firstTime];
+        if (nextDayFirst?.bottle_id || nextDayFirst?.is_locked) return prev;
         continuationDates.current[nextDateKey] = true;
         markRow(nextDateKey, machineKey, firstTime);
+        const nextDayByMachine = stampSplitPeriods({
+          ...(prev[nextDateKey]?.[machineKey] ?? {}),
+          [firstTime]: {
+            ...source,
+            packing_category: [...(source.packing_category ?? [])],
+            defect_ids: [...(source.defect_ids ?? [])],
+            production_time: firstTime,
+            report_id: nextDateKey,
+            entry_id: '',
+            shift_id: firstShiftId,
+            split_group_id: '',
+            // The continuation row starts unlocked like any other new row.
+            is_locked: false,
+          },
+        });
         return {
           ...prev,
           [nextDateKey]: {
             ...(prev[nextDateKey] ?? {}),
-            [machineKey]: {
-              ...(prev[nextDateKey]?.[machineKey] ?? {}),
-              [firstTime]: {
-                ...source,
-                production_time: firstTime,
-                report_id: nextDateKey,
-                entry_id: '',
-                shift_id: firstShiftId,
-              },
-            },
+            [machineKey]: nextDayByMachine,
           },
         };
       }
@@ -1548,8 +2187,8 @@ export const QualityControlModule: React.FC = () => {
   const calcBottlesInNosFor = useCallback((e?: QualityHourlyEntry): string => calcBottlesInNos(e), []);
 
   const calcEffFor = useCallback(
-    (e?: QualityHourlyEntry, machineNo?: number): string =>
-      calcEffForEntry(e, machineNo === undefined ? 0 : gobCountFor(machineNo)),
+    (e?: QualityHourlyEntry, machineNo?: number, durationHours = 1): string =>
+      calcEffForEntry(e, machineNo === undefined ? 0 : gobCountFor(machineNo), durationHours),
     [gobCountFor]
   );
 
@@ -1563,15 +2202,15 @@ export const QualityControlModule: React.FC = () => {
   const dayAvgs = useMemo(() => {
     const collect = (field: 'weight_front' | 'weight_middle' | 'weight_rear'): string => {
       const vals: number[] = [];
-      for (const pt of PRODUCTION_TIMES) {
-        const v = parseFloat(activeRows[pt.time]?.[field] ?? '');
+      for (const k of displayKeys) {
+        const v = parseFloat(activeRows[k]?.[field] ?? '');
         if (!isNaN(v)) vals.push(v);
       }
       return vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : '';
     };
     const avgVals: number[] = [];
-    for (const pt of PRODUCTION_TIMES) {
-      const v = parseFloat(calcRowAvgFor(activeRows[pt.time], activeMachine));
+    for (const k of displayKeys) {
+      const v = parseFloat(calcRowAvgFor(activeRows[k], activeMachine));
       if (!isNaN(v)) avgVals.push(v);
     }
     return {
@@ -1580,19 +2219,19 @@ export const QualityControlModule: React.FC = () => {
       rear: collect('weight_rear'),
       avg: avgVals.length ? (avgVals.reduce((s, v) => s + v, 0) / avgVals.length).toFixed(1) : '',
     };
-  }, [activeRows, activeMachine, calcRowAvgFor]);
+  }, [activeRows, activeMachine, calcRowAvgFor, displayKeys]);
 
   const stats = useMemo(() => {
     let totalCartons = 0;
     let totalBottles = 0;
     const effVals: number[] = [];
-    for (const pt of PRODUCTION_TIMES) {
-      const e = activeRows[pt.time];
+    for (const k of displayKeys) {
+      const e = activeRows[k];
       const ct = parseInt(e?.cartons ?? '');
       if (!isNaN(ct)) totalCartons += ct;
       const ps = parseInt(e?.packing_size ?? '');
       if (!isNaN(ct) && ps > 0) totalBottles += ps * ct;
-      const eff = parseFloat(calcEffFor(e, activeMachine));
+      const eff = parseFloat(calcEffFor(e, activeMachine, durationByKey[k] ?? 1));
       if (!isNaN(eff)) effVals.push(eff);
     }
     return {
@@ -1600,7 +2239,7 @@ export const QualityControlModule: React.FC = () => {
       totalBottles,
       avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
     };
-  }, [activeRows, activeMachine, calcEffFor]);
+  }, [activeRows, activeMachine, calcEffFor, displayKeys, durationByKey]);
 
   // ── Save / Export / Print ────────────────────────────────────────────────
   /**
@@ -1631,7 +2270,10 @@ export const QualityControlModule: React.FC = () => {
   // Builds the smallest correct payload: only rows edited in this session and
   // rows that carry real data are included — never the pre-loaded empty 24-slot
   // grid. Touched-but-cleared rows are still sent so the backend clears values
-  // that were previously saved. Only the manual Save action calls this.
+  // that were previously saved. Split rows are always sent (even when blank)
+  // so their structure persists after Save/Refresh/reload; deleting a split is
+  // persisted by omitting it (the backend drops orphaned splits). Only the
+  // manual Save action calls this.
   const buildSavePayload = (
     date: string,
     store: Record<string, Record<string, Record<string, QualityHourlyEntry>>>,
@@ -1642,24 +2284,60 @@ export const QualityControlModule: React.FC = () => {
     const byMachine = store[date] ?? {};
     for (const [mStr, timeMap] of Object.entries(byMachine)) {
       const mNum = parseInt(mStr, 10) || activeMachine;
+      // Duration per row for this machine (hourly = 1, splits = fractional).
+      const ordered = getOrderedDisplayKeys(timeMap);
+      const durByTime: Record<string, number> = {};
+      for (const k of ordered) durByTime[k] = getDurationHoursForKey(ordered, k);
+      // Split-group inheritance: the hourly row immediately following a split
+      // is that split's second segment, so it carries the split's group when
+      // it has none of its own (e.g. it was created after the split). The
+      // group is grouping/history only — durations, quantities, jobs and
+      // efficiency are untouched.
+      const inheritedGroup: Record<string, string> = {};
+      for (let i = 0; i < ordered.length; i++) {
+        const key = ordered[i];
+        const group = (timeMap[key]?.split_group_id ?? '').trim();
+        if (group && isSplitKey(key) && i + 1 < ordered.length) {
+          const follower = ordered[i + 1];
+          // Never inherit onto a locked row: that would put a group the stored
+          // row does not have into its payload, which the backend correctly
+          // answers with "This row is locked and cannot be edited."
+          if (!(timeMap[follower]?.split_group_id ?? '').trim()
+            && !timeMap[follower]?.is_locked
+            && !inheritedGroup[follower]) {
+            inheritedGroup[follower] = group;
+          }
+        }
+      }
       for (const [time, entry] of Object.entries(timeMap)) {
         if (!entry) continue;
+        const isSplit = isSplitKey(time);
         const isTouched = !!touched?.[mStr]?.[time];
-        if (touchedOnly && !isTouched) continue;
+        if (touchedOnly && !isTouched && !isSplit) continue;
         const meaningful = hasMeaningfulData(entry);
-        if (!isTouched && !meaningful) continue;
-        // A blank row the component invented (no entry_id from the database)
-        // carries nothing to write: sending it would be a pointless no-op at
-        // best and could blank out a stored row for the same slot at worst.
-        // Deliberately cleared rows always carry their entry_id and are kept.
-        if (!meaningful && !entry.entry_id) continue;
+        if (!isSplit) {
+          if (!isTouched && !meaningful) continue;
+          // A blank row the component invented (no entry_id from the database)
+          // carries nothing to write: sending it would be a pointless no-op at
+          // best and could blank out a stored row for the same slot at worst.
+          // Deliberately cleared rows always carry their entry_id and are kept.
+          if (!meaningful && !entry.entry_id) continue;
+        } else if (touchedOnly && !isTouched && !meaningful && !entry.entry_id) {
+          continue;
+        }
+        // Actual period: previous displayed row → own time (first row = 1h).
+        const idx = ordered.indexOf(time);
+        const periodStart = idx > 0 ? ordered[idx - 1] : time;
         (out[mStr] ??= {})[time] = {
           ...entry,
           report_id: date,
           weight_avg: calcRowAvgFor(entry, mNum),
           bottles_in_nos: calcBottlesInNosFor(entry),
-          efficiency_percentage: calcEffFor(entry, mNum),
-        };
+          efficiency_percentage: calcEffFor(entry, mNum, durByTime[time] ?? 1),
+          period_start: periodStart,
+          period_end: time,
+          split_group_id: (entry.split_group_id ?? '').trim() || inheritedGroup[time] || '',
+        } as QualityHourlyEntry;
       }
     }
     return out;
@@ -1704,8 +2382,13 @@ export const QualityControlModule: React.FC = () => {
         const payload = buildSavePayload(date, store, touchedTimes.current[date], false);
         // Manual save persists the full day state including shift assignments.
         const shifts = shiftStoreRef.current[date] ?? {};
-        if (Object.keys(store[date] ?? {}).length === 0 && Object.keys(shifts).length === 0) continue;
-        if (Object.keys(payload).length === 0 && Object.keys(shifts).length === 0) continue;
+        const deletedForDate: Record<string, string[]> = {};
+        for (const [mStr, set] of Object.entries(deletedSplitsRef.current[date] ?? {})) {
+          if (set.size > 0) deletedForDate[mStr] = [...set];
+        }
+        const hasDeleted = Object.keys(deletedForDate).length > 0;
+        if (Object.keys(store[date] ?? {}).length === 0 && Object.keys(shifts).length === 0 && !hasDeleted) continue;
+        if (Object.keys(payload).length === 0 && Object.keys(shifts).length === 0 && !hasDeleted) continue;
         // Remember which sequence numbers this request is about to persist so
         // only those marks can be cleared when it comes back.
         const sentSeqs: Record<string, Record<string, number>> = {};
@@ -1716,7 +2399,7 @@ export const QualityControlModule: React.FC = () => {
             if (seq) (sentSeqs[mStr] ??= {})[time] = seq;
           }
         }
-        const result = await qualityRepository.save(date, payload, shifts);
+        const result = await qualityRepository.save(date, payload, shifts, { deletedSplits: deletedForDate });
         attempted = true;
         if (!result.ok) {
           // Never swallow the reason: the rows for this date were NOT saved.
@@ -1768,7 +2451,7 @@ export const QualityControlModule: React.FC = () => {
                     : merged;
                 }
               }
-              mergedDate[mKey] = byTime;
+              mergedDate[mKey] = stampSplitPeriods(byTime);
             }
             return { ...prev, [nextDateKey]: mergedDate };
           });
@@ -1809,6 +2492,7 @@ export const QualityControlModule: React.FC = () => {
                     report_id: savedEntry.report_id || prevEntry.report_id || '',
                     job_id: savedEntry.job_id || prevEntry.job_id || '',
                     bottle_id: prevEntry.bottle_id || savedEntry.bottle_id || '',
+                    split_group_id: savedEntry.split_group_id || prevEntry.split_group_id || '',
                   };
                   // The response carries the whole 4 x 24 grid, but only the
                   // rows the operator actually changed can differ. Reusing the
@@ -1820,7 +2504,7 @@ export const QualityControlModule: React.FC = () => {
                     : merged;
                 }
               }
-              mergedDate[mKey] = byTime;
+              mergedDate[mKey] = stampSplitPeriods(byTime);
             }
             return { ...prev, [date]: mergedDate };
           });
@@ -1840,6 +2524,8 @@ export const QualityControlModule: React.FC = () => {
             }
           }
         }
+        // Split deletions confirmed by the backend no longer need to be sent.
+        if (deletedSplitsRef.current[date]) delete deletedSplitsRef.current[date];
         setSavedFlags((prev) => ({ ...prev, [date]: true }));
       }
 
@@ -1909,21 +2595,30 @@ rows.push(dateAndDay);
       'QTY EFF%', 'SQC', 'QC Hold', 'NUM', 'Defects', 'Remarks',
     ];
     rows.push(header.join(','));
-    for (const pt of PRODUCTION_TIMES) {
-      const e = productionStore[dateKey]?.[String(activeMachine)]?.[pt.time];
+    // Every displayed row in timeline order — the 24 hourly rows plus any
+    // split segments exactly as they appear in the table. Split rows show
+    // their time range only (e.g. "3:00–3:34 PM"); no Entry ID, Job ID or
+    // split identifier is exported. Values and calculations are untouched —
+    // efficiency uses the same per-row duration the table itself uses.
+    for (const key of displayKeys) {
+      const e = productionStore[dateKey]?.[String(activeMachine)]?.[key];
+      const timeLabel = getIntervalDisplayForKey(displayKeys, key, e);
+      const shiftLabel = SHIFT_LABELS[(e?.shift_id ?? 0) - 1]
+        ?? SHIFT_LABELS[shiftIdxByKey[key] ?? 0]
+        ?? '';
       if (!e) {
-        rows.push([SHIFT_LABELS[pt.shift_id - 1], pt.time, `Machine ${activeMachine}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''].join(','));
+        rows.push([shiftLabel, timeLabel, `Machine ${activeMachine}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''].join(','));
         continue;
       }
       const bottleName = bottles.find((b) => b.id === e.bottle_id)?.name ?? e.bottle_id;
       const defectNames = defectGroups.length > 0
         ? defectGroups.flatMap((g) => g.items).filter((d) => e.defect_ids.includes(d))
         : (e.defect_ids ?? []);
-      const eff = calcEffFor(e, activeMachine);
+      const eff = calcEffFor(e, activeMachine, durationByKey[key] ?? 1);
       rows.push(
         [
-          SHIFT_LABELS[e.shift_id - 1] ?? SHIFT_LABELS[pt.shift_id - 1],
-          e.production_time,
+          shiftLabel,
+          timeLabel,
           `Machine ${activeMachine}`,
           bottleName,
           e.weight_front,
@@ -2049,14 +2744,21 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       ];
       const head = [headRowBase, ['F', ...(hasM ? ['M'] : []), 'R']];
 
-      // ── Body: all 24 hourly rows (calculations identical to on-screen) ───
+      // ── Body: every displayed row in timeline order (calculations identical
+      // to on-screen) — the 24 hourly rows plus any split segments. Split rows
+      // show their time range only (e.g. "3:00–3:34 PM"); no Entry ID, Job ID
+      // or split identifier is printed. ───
       const body: any[][] = [];
-      for (const pt of PRODUCTION_TIMES) {
-        const e = byTime[pt.time];
+      const bodyMeta: { shiftIdx: number; grouped: boolean; summary?: boolean }[] = [];
+      for (const key of displayKeys) {
+        const e = byTime[key];
         const defectNames = defectNamesFor(e);
+        const timeLabel = getIntervalDisplayForKey(displayKeys, key, e);
+        const shiftIdx = e?.shift_id ? Math.max(0, Math.min(2, e.shift_id - 1)) : (shiftIdxByKey[key] ?? 0);
+        bodyMeta.push({ shiftIdx, grouped: !!(e?.split_group_id ?? '').trim() });
         body.push([
-          pt.time,
-          SHIFT_LABELS[pt.shift_id - 1] ?? '',
+          timeLabel,
+          SHIFT_LABELS[shiftIdx] ?? '',
           e?.bottle_id ? bottleNameFor(e.bottle_id) : '',
           e?.weight_front ?? '',
           ...(hasM ? [e?.weight_middle ?? ''] : []),
@@ -2067,7 +2769,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           e?.packing_size ?? '',
           e?.cartons ?? '',
           calcBottlesInNosFor(e) || e?.bottles_in_nos || '',
-          calcEffFor(e, activeMachine),
+          calcEffFor(e, activeMachine, durationByKey[key] ?? 1),
           e?.sqc ?? '',
           e?.qc_hold != null ? String(e.qc_hold) : '0',
           e?.num ?? '',
@@ -2096,6 +2798,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       summary[wIdx++] = stats.totalBottles.toLocaleString();
       summary[wIdx++] = `${stats.avgEff}%`;
       body.push(summary);
+      bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
 
       // ── Column widths + alignment (landscape A4 with 10mm page margins) ──
       const colWidths = hasM
@@ -2136,13 +2839,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         alternateRowStyles: false,
         didParseCell: (data: any) => {
           if (data.section !== 'body') return;
-          const idx = data.row.index;
-          if (idx < PRODUCTION_TIMES.length) {
-            const shiftIdx = Math.floor(idx / 8);
-            data.cell.styles.fillColor = SHIFT_ROW_BG[shiftIdx];
-          } else {
+          const meta = bodyMeta[data.row.index];
+          if (meta?.summary) {
             data.cell.styles.fillColor = [240, 244, 250];
             data.cell.styles.fontStyle = 'bold';
+          } else if (meta?.grouped) {
+            // Split-group highlight, mirroring the on-screen table.
+            data.cell.styles.fillColor = '#fff7e1';
+          } else {
+            data.cell.styles.fillColor = SHIFT_ROW_BG[meta?.shiftIdx ?? 0];
           }
         },
       });
@@ -2196,6 +2901,24 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
     backgroundColor: C.headerBg,
   });
 
+  // ── Sticky table header ────────────────────────────────────────────────
+  // The two-row header stays pinned to the top of the table's scroll area
+  // while production rows scroll underneath. Only positioning is added —
+  // widths, padding, colours and borders all still come from thStyle above.
+  // The first header row gets an explicit height so the second row's sticky
+  // offset always lines up with it; the 1px overlap hides any subpixel
+  // seam. Both rows keep the opaque header background with a z-index above
+  // the body rows so scrolling rows never show through or overlap the head.
+  const QM_HEAD_ROW1_H = 34;
+  const QM_HEAD_ROW2_TOP = QM_HEAD_ROW1_H - 1;
+  const stickyThStyle = (top: number, last = false): React.CSSProperties => ({
+    ...thStyle(last),
+    position: 'sticky',
+    top,
+    zIndex: 20,
+    backgroundColor: C.headerBg,
+  });
+
   const inputStyle: React.CSSProperties = {
     width: '100%',
     padding: '5px 8px',
@@ -2229,6 +2952,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         .qm-navbar-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
         .qm-navbar-scroll > button, .qm-navbar-scroll > label, .qm-navbar-scroll > div { flex-shrink: 0; }
         .qm-content-scroll { scrollbar-gutter: stable; }
+        .qm-table-scroll { scrollbar-gutter: stable; }
         @media print {
           @page { size: landscape; margin: 0.15in; }
           body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -2236,6 +2960,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           .no-print { display: none !important; }
           .qm-navbar-stable { position: static !important; }
           .qm-content-scroll { overflow: visible !important; flex: none !important; min-height: 0 !important; max-height: none !important; }
+          .qm-table-scroll { max-height: none !important; overflow: visible !important; }
+          thead.qm-sticky-head th { position: static !important; }
           .print-header { display: block !important; }
           .print-header { margin-bottom: 3px !important; padding-bottom: 3px !important; }
           .print-header h2 { font-size: 11px !important; margin: 0 !important; }
@@ -2561,75 +3287,101 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 
         {activeMachine >= 1 && activeMachine <= 4 && (
         <div style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden', flexShrink: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
-        {/* Table */}
-        <div style={{ overflowX: 'auto', minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
-            <thead>
-              <tr style={{ backgroundColor: C.headerBg }}>
-                <th rowSpan={2} style={{ ...thStyle(), width: '38px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
-                <th rowSpan={2} title="Lock / unlock row" style={{ ...thStyle(), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px' }}></th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Time</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
-                <th colSpan={hasM ? 3 : 2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '68px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>DEFECTS</th>
-                <th rowSpan={2} style={{ ...thStyle(true), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
+        {/* Table — the wrapper scrolls both axes (capped height) so the sticky header pins to its top */}
+<div
+  className="qm-table-scroll"
+  style={{
+    overflow: 'auto',
+    minWidth: 0,
+    width: '100%',
+    maxWidth: '100%',
+    boxSizing: 'border-box',
+    maxHeight: '750px'
+  }}
+>          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
+            <thead className="qm-sticky-head">
+              <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '38px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
+                <th rowSpan={2} title="Lock / unlock row" style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px' }}></th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Time</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
+                <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>DEFECTS</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0, true), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
               </tr>
               <tr style={{ backgroundColor: C.headerBg }}>
-                <th style={{ ...thStyle(), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>F</th>
-                {hasM && <th style={{ ...thStyle(), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>M</th>}
-                <th style={{ ...thStyle(), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>R</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>F</th>
+                {hasM && <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>M</th>}
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>R</th>
               </tr>
             </thead>
             <tbody>
-              {PRODUCTION_TIMES.map((slot, idx) => {
-                const { time } = slot;
-                const shiftIdx = Math.floor(idx / 8);
-                const isFirstInShift = idx % 8 === 0;
-                const entry = activeRows[time];
-                // Only the current entry of the running job carries the "+" and
-                // "−" buttons; every earlier entry of that job — and every entry
-                // of a job a later entry has replaced — is read-only plain text.
-                const isActiveEntry = time === activeEntryTime;
-                const bottleName = entry?.bottle_id
-                  ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
-                  : '';
-                const rowLocked = !!lockedRows[rowLockKey(time, entry)];
+              {(() => {
+                const seen = new Set<number>();
+                return displayKeys.map((time) => {
+                  const shiftIdx = shiftIdxByKey[time] ?? 0;
+                  const isFirstInShift = !seen.has(shiftIdx);
+                  seen.add(shiftIdx);
+                  const entry = activeRows[time];
+                  // Only the current entry of the running job carries the "+" and
+                  // "−" buttons; every earlier entry of that job — and every entry
+                  // of a job a later entry has replaced — is read-only plain text.
+                  const isActiveEntry = time === activeEntryTime;
+                  const bottleName = entry?.bottle_id
+                    ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
+                    : '';
+                  // The database flag decides: one row can never lock another.
+                  const rowLocked = !!entry?.is_locked;
+                  const split = isSplitKey(time);
+                  const pos = displayKeys.indexOf(time);
+                  const prevKey = pos > 0 ? displayKeys[pos - 1] : time;
+                  const displayTime = getIntervalDisplayForKey(displayKeys, time, entry);
 
-                return (
-                  <QualityTimeRow
-                    key={time}
-                    time={time}
-                    shiftIdx={shiftIdx}
-                    isFirstInShift={isFirstInShift}
-                    entry={entry}
-                    gobCount={gobCount}
-                    hasM={hasM}
-                    bottles={machineBottles}
-                    allDefectNames={allDefectNames}
-                    defectGroups={defectGroups}
-                    loadingDefects={loadingDefects}
-                    selectBottle={selectBottle}
-                    patchEntry={patchEntry}
-                    copyRowDown={copyRowDown}
-                    removeBottle={removeBottle}
-                    canEdit={canEdit}
-                    isActiveEntry={isActiveEntry}
-                    bottleName={bottleName}
-                    locked={rowLocked}
-                    toggleRowLock={toggleRowLock}
-                  />
-                );
-              })}
+                  return (
+                    <QualityTimeRow
+                      key={time}
+                      time={time}
+                      displayTime={displayTime}
+                      isSplitRow={split}
+                      canSplit={!split && !!getNextHourlyTime(time)}
+                      rowSpan={shiftBlockCounts[shiftIdx] ?? 8}
+                      durationHours={durationByKey[time] ?? 1}
+                      periodStart={entry?.period_start ?? prevKey}
+                      periodEnd={entry?.period_end ?? time}
+                      onSplit={openSplitDialog}
+                      onDeleteSplit={deleteSplitRow}
+                      shiftIdx={shiftIdx}
+                      isFirstInShift={isFirstInShift}
+                      entry={entry}
+                      gobCount={gobCount}
+                      hasM={hasM}
+                      bottles={machineBottles}
+                      allDefectNames={allDefectNames}
+                      defectGroups={defectGroups}
+                      loadingDefects={loadingDefects}
+                      selectBottle={selectBottle}
+                      patchEntry={patchEntry}
+                      copyRowDown={copyRowDown}
+                      removeBottle={removeBottle}
+                      canEdit={canEdit}
+                      isActiveEntry={isActiveEntry}
+                      bottleName={bottleName}
+                      locked={rowLocked}
+                      toggleRowLock={toggleRowLock}
+                    />
+                  );
+                });
+              })()}
 
               {/* Day Avg / Summary row */}
               <tr style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
@@ -2784,6 +3536,76 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 No
               </button>
               
+            </div>
+          </div>
+        </div>
+      )}
+
+      {splitTarget && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.45)', zIndex: 1000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '16px',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Split ${splitTarget}`}
+            style={{
+              backgroundColor: '#ffffff', borderRadius: '10px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.2)',
+              border: '1px solid #e2e8f0',
+              width: '100%', maxWidth: '380px',
+              padding: '20px',
+            }}
+          >
+            <div style={{ fontSize: '14px', fontWeight: 700, color: '#1e293b', marginBottom: '8px' }}>
+              Split {splitTarget}
+            </div>
+            <div style={{ fontSize: '13px', color: '#475569', marginBottom: '12px' }}>
+              Pick a time strictly between {splitTarget} and {getNextHourlyTime(splitTarget) ?? ''}.
+              A continuation row is inserted for the selected period, inheriting {splitTarget}'s bottle and Job ID — no new job is created.
+              The next hour stays blank unless you extend the job into it with +.
+            </div>
+            <input
+              type="time"
+              value={splitValue}
+              onChange={(e) => { setSplitValue(e.target.value); setSplitError(''); }}
+              style={{
+                width: '100%', padding: '7px 10px', fontSize: '13px', color: '#1e293b',
+                backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '6px',
+                outline: 'none', boxSizing: 'border-box',
+              }}
+            />
+            {splitError && (
+              <div style={{ marginTop: '8px', fontSize: '12px', color: '#b91c1c' }}>{splitError}</div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '18px' }}>
+              <button
+                onClick={confirmSplit}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 600,
+                  color: '#ffffff', backgroundColor: '#2563eb',
+                  border: 'none', borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                Split
+              </button>
+              <button
+                onClick={closeSplitDialog}
+                style={{
+                  padding: '7px 18px', fontSize: '13px', fontWeight: 500,
+                  color: '#475569', backgroundColor: '#ffffff',
+                  border: '1px solid #cbd5e1', borderRadius: '6px',
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
             </div>
           </div>
         </div>

@@ -51,6 +51,24 @@ export interface QualityHourlyEntry {
   remarks: string;
   defect_ids: string[];
   job_id: string;
+  /** Actual production period start label (previous displayed row's time). */
+  period_start?: string;
+  /** Actual production period end label (own time). */
+  period_end?: string;
+  /**
+   * Logical grouping identifier of one manual split (e.g. "SG001").
+   * All time segments created from the same split carry the same id while
+   * each keeps its own unique entry_id and row. Grouping/history only —
+   * never used by any calculation or report.
+   */
+  split_group_id?: string;
+  /**
+   * Row lock state (hourly_production.is_locked). When true the row is
+   * frozen: the backend rejects any update or delete of this row with
+   * "This row is locked and cannot be edited." Only the dedicated lock API
+   * changes it, so this flag always reflects the database — never local state.
+   */
+  is_locked?: boolean;
 }
 
 export interface DefectMasterItem {
@@ -95,6 +113,14 @@ export interface QualityEntryPayload {
   remarks: string | null;
   defect_ids: string[];
   job_id: string | null;
+  /** Logical split-group identifier (e.g. "SG001") — persisted verbatim, never calculated. */
+  split_group_id: string | null;
+  /**
+   * Lock state of the row, mirrored for shape fidelity with the schema. The
+   * daily save never writes this column — only POST .../daily/lock/ does — so
+   * echoing it back cannot unlock a row behind the backend's back.
+   */
+  is_locked?: boolean;
 }
 
 export interface QualityShiftAssignment {
@@ -237,7 +263,13 @@ const toDefectArray = (v: unknown): string[] => {
     .filter(Boolean);
 };
 
-/** Maps a string-based form entry to the database-shaped payload. */
+/** Maps a string-based form entry to the database-shaped payload.
+ * period_start/period_end are frontend-only (derived from row ordering) and
+ * are intentionally NOT sent: the backend identifies rows by production_time
+ * and derives the same period from ordering, so no schema change is needed.
+ * split_group_id IS sent: it is the persisted logical grouping of one split's
+ * time segments (each keeps its own entry_id and row).
+ */
 const toDbEntry = (entry: QualityHourlyEntry): QualityEntryPayload => ({
   entry_id: entry.entry_id || null,
   report_id: entry.report_id || null,
@@ -262,6 +294,8 @@ const toDbEntry = (entry: QualityHourlyEntry): QualityEntryPayload => ({
   remarks: toStrOrEmpty(entry.remarks) || null,
   defect_ids: toDefectArray(entry.defect_ids),
   job_id: entry.job_id || null,
+  split_group_id: entry.split_group_id?.trim() ? entry.split_group_id.trim() : null,
+  is_locked: entry.is_locked === true,
 });
 
 /** Maps a database-shaped entry (or already-normalised form entry) back to the form model. */
@@ -289,6 +323,19 @@ const fromDbEntry = (raw: Record<string, unknown>): QualityHourlyEntry => ({
   remarks: toStrOrEmpty(raw.remarks),
   defect_ids: toDefectArray(raw.defect_ids),
   job_id: toStrOrEmpty(raw.job_id),
+  // Split-group id survives the round-trip verbatim; absent on pre-split rows.
+  ...(toStrOrEmpty(raw.split_group_id)
+    ? { split_group_id: toStrOrEmpty(raw.split_group_id) }
+    : {}),
+  // Row lock: the database flag, mapped straight through from the API.
+  is_locked: raw.is_locked === true || raw.is_locked === 1 || raw.is_locked === 'true',
+  // Periods are (re)derived from ordering after load; passed through when present.
+  ...(toStrOrEmpty(raw.period_start)
+    ? { period_start: toStrOrEmpty(raw.period_start) }
+    : {}),
+  ...(toStrOrEmpty(raw.period_end)
+    ? { period_end: toStrOrEmpty(raw.period_end) }
+    : {}),
 });
 
 type NestedPayload =
@@ -443,6 +490,50 @@ export const qualityRepository = {
   },
 
   /**
+   * Persists the lock checkbox of exactly ONE hourly row to the backend
+   * (POST /api/production/quality/daily/lock/). The server writes only
+   * hourly_production.is_locked for that row — no other field, no other row
+   * and no reload of the day — so toggling a lock can never disturb the rest
+   * of the Quality Module.
+   *
+   * The lock lives in the database rather than in component state: Refresh,
+   * a new session and a second browser all read the same flag, and the write
+   * APIs reject a locked row even if this client is bypassed entirely.
+   *
+   * Never throws: `ok` is false with the server's reason on any failure so the
+   * caller can undo the optimistic checkbox flip and tell the user why.
+   */
+  async setRowLock(params: {
+    dateKey: string;
+    machineNo: number;
+    productionTime: string;
+    isLocked: boolean;
+  }): Promise<{ ok: boolean; is_locked: boolean; error?: string }> {
+    try {
+      const res = await apiFetch('/api/production/quality/daily/lock/', {
+        method: 'POST',
+        body: JSON.stringify({
+          production_date: params.dateKey,
+          machine_no: params.machineNo,
+          production_time: params.productionTime,
+          is_locked: params.isLocked,
+        }),
+      });
+      const body = res as { is_locked?: boolean } | null;
+      if (!body || typeof body !== 'object') {
+        return { ok: false, is_locked: !params.isLocked, error: 'The server did not confirm the lock.' };
+      }
+      return { ok: true, is_locked: body.is_locked === true };
+    } catch (err) {
+      return {
+        ok: false,
+        is_locked: !params.isLocked,
+        error: err instanceof Error && err.message ? err.message : 'The row lock could not be saved.',
+      };
+    }
+  },
+
+  /**
    * Persists one day of hourly production + shift assignments to the backend.
    * No local cache is written: the database is the source of truth, so a
    * failed POST fails loudly instead of pretending the data was saved.
@@ -460,7 +551,7 @@ export const qualityRepository = {
     dateKey: string,
     hourly: QualityDayHourly,
     shifts: QualityShiftMap,
-    options: { keepalive?: boolean } = {}
+    options: { keepalive?: boolean; deletedSplits?: Record<string, string[]> } = {}
   ): Promise<QualitySaveResult> {
     try {
       const res = await apiFetch('/api/production/quality/daily/', {
@@ -470,6 +561,9 @@ export const qualityRepository = {
           production_date: dateKey,
           hourly: buildDbHourly(hourly),
           shift_assignments: shifts,
+          ...(options.deletedSplits && Object.keys(options.deletedSplits).length > 0
+            ? { deleted_splits: options.deletedSplits }
+            : {}),
         }),
       });
       const body = res as {

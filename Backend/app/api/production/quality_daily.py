@@ -11,13 +11,17 @@ from app.models.quality import (
     HourlyProductionReport, ShiftAssignment, HourlyProduction,
     DefectMaster, HourlyProductionDefect, HprJob
 )
-from app.schemas.quality import QualityDailyRequest, QualityDailyResponse, QualityHourlyEntrySchema, QualityShiftAssignmentSchema, QualityJobRowSchema
+from app.schemas.quality import QualityDailyRequest, QualityDailyResponse, QualityHourlyEntrySchema, QualityShiftAssignmentSchema, QualityJobRowSchema, QualityRowLockRequest, QualityRowLockResponse
 from app.api.permissions import require_module_read, require_module_edit, MODULE_QUALITY_CONTROL
 from app.models.auth import AuthUser
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Rejected by every write path that touches a locked hourly row. The wording is
+# part of the contract: the frontend surfaces this string verbatim to the user.
+LOCKED_ROW_DETAIL = "This row is locked and cannot be edited."
 
 PRODUCTION_TIMES = [
     {'time': '9:00 AM', 'shift_id': 1}, {'time': '10:00 AM', 'shift_id': 1},
@@ -98,6 +102,87 @@ def _entry_key(machine_no: int, production_time: Any) -> Tuple[int, Optional[dti
     return (machine_no, _norm_time(production_time))
 
 
+# Clock time -> owning shift, precomputed from the same PRODUCTION_TIMES grid
+# the UI renders, so a row created outside the save path (the lock endpoint)
+# always lands in the shift the grid already displays for that slot.
+SLOT_SHIFT_IDS: Dict[dtime, int] = {_parse_time_string(pt["time"]): pt["shift_id"] for pt in PRODUCTION_TIMES}
+
+
+def _shift_id_for_slot(slot: Optional[dtime]) -> int:
+    """Shift of a clock time; a minute-granularity split inherits its hour."""
+    if slot is None:
+        return 1
+    direct = SLOT_SHIFT_IDS.get(slot)
+    if direct is not None:
+        return direct
+    return SLOT_SHIFT_IDS.get(slot.replace(minute=0, second=0, microsecond=0)) or 1
+
+
+def _norm_lock_value(value: Any, blank_zero: bool = False) -> Any:
+    """Normalizes one column value for the locked-row comparison.
+
+    A stored NULL and the grid's empty value (``None`` / ``""``) must compare
+    equal, and numbers must compare numerically — a Numeric column read back as
+    ``Decimal("52.50")`` has to match the ``52.5`` the client echoes. The grid
+    writes ``qc_hold`` as ``0`` rather than NULL, so a stored NULL there means 0.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return 0.0 if blank_zero else None
+    if isinstance(value, bool):
+        return value
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _norm_lock_parts(value: Any) -> Tuple[str, ...]:
+    """Splits a packing value (stored string or client list) into its items."""
+    if value is None:
+        return ()
+    parts = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return tuple(str(p).strip() for p in parts if str(p).strip())
+
+
+def _locked_payload_differs(entry: HourlyProduction, data: QualityHourlyEntrySchema) -> bool:
+    """True when the incoming row would CHANGE the stored data of a locked row.
+
+    Only the fields an operator can actually edit are compared. ``weight_avg``,
+    ``bottles_in_nos`` and ``efficiency_percentage`` are deliberately excluded:
+    the grid recomputes all three from the fields below on every save, so their
+    stored value can never tell an edit apart from a recomputation. Excluding
+    them is safe because a locked row is never written at all — the save skips
+    it entirely once this check passes, so nothing can be smuggled past the lock.
+    """
+    numeric = (
+        (entry.bottle_id, data.bottle_id, False),
+        (entry.weight_front, data.weight_front, False),
+        (entry.weight_middle, data.weight_middle, False),
+        (entry.weight_rear, data.weight_rear, False),
+        (entry.speed_per_min, data.speed_per_min, False),
+        (entry.weight_efficiency, data.weight_efficiency, False),
+        (entry.packing_size, data.packing_size, False),
+        (entry.cartons, data.cartons, False),
+        (entry.sqc, data.sqc, False),
+        (entry.qc_hold, data.qc_hold, True),
+        (entry.num, data.num, False),
+    )
+    for stored, incoming, blank_zero in numeric:
+        if _norm_lock_value(stored, blank_zero) != _norm_lock_value(incoming, blank_zero):
+            return True
+    if _norm_lock_value(entry.remarks) != _norm_lock_value(data.remarks):
+        return True
+    if _norm_lock_parts(entry.packing_category) != _norm_lock_parts(data.packing_category):
+        return True
+    if _norm_lock_value(entry.job_id) != _norm_lock_value(data.job_id):
+        return True
+    if _norm_lock_value(getattr(entry, "split_group_id", None)) != _norm_lock_value(data.split_group_id):
+        return True
+    stored_defects = tuple(sorted(str(d.defect_name) for d in entry.defects))
+    incoming_defects = tuple(sorted(str(n) for n in (data.defect_ids or []) if str(n).strip()))
+    return stored_defects != incoming_defects
+
+
 def _physical_dt(production_date: date, value: Any) -> Optional[datetime]:
     """Timeline position of one hourly row inside the 9 AM production day.
 
@@ -169,7 +254,9 @@ def get_default_shape(date_str: str) -> QualityDailyResponse:
                 num=None,
                 remarks=None,
                 defect_ids=[],
-                job_id=None
+                job_id=None,
+                split_group_id=None,
+                is_locked=False
             )
     
     shifts = {str(s): QualityShiftAssignmentSchema(supervisor="", executive="") for s in SHIFTS}
@@ -244,7 +331,9 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
             num=entry.num,
             remarks=entry.remarks,
             defect_ids=[d.defect_name for d in entry.defects],
-            job_id=entry.job_id
+            job_id=entry.job_id,
+            split_group_id=getattr(entry, 'split_group_id', None),
+            is_locked=bool(getattr(entry, 'is_locked', False)),
         )
 
         # If duplicate historical rows map onto the same slot, keep whichever
@@ -428,6 +517,100 @@ def get_daily_jobs(
     return [row for _, row in built]
 
 
+@router.post("/lock/", response_model=QualityRowLockResponse)
+def set_row_lock(
+    payload: QualityRowLockRequest,
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_module_edit(MODULE_QUALITY_CONTROL)),
+):
+    """Lock or unlock exactly ONE hourly row — the checkbox of that row.
+
+    The request writes ``hourly_production.is_locked`` for a single
+    (production date, machine, time-of-day) row and nothing else: no other
+    field, no other row and no reload of the day, so ticking the checkbox can
+    never disturb any other part of the Quality Module.
+
+    This is the ONLY API allowed to change the flag; every other write path
+    rejects a locked row with LOCKED_ROW_DETAIL. That is what makes the
+    database — not the frontend checkbox — the source of truth for locking.
+    """
+    try:
+        p_date = datetime.strptime(payload.production_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    slot = _slot_time(payload.production_time)
+    machine_no = int(payload.machine_no)
+    slot_label = f"{slot.hour % 12 or 12}:{slot.minute:02d} {'AM' if slot.hour < 12 else 'PM'}"
+
+    try:
+        report = db.query(HourlyProductionReport).filter_by(production_date=p_date).first()
+        entry = None
+        if report is not None:
+            # Match on the normalized time-of-day, exactly like the save path, so
+            # a row stored by a different driver or an older schema is still found
+            # instead of a second row being created next to it.
+            entry = next(
+                (
+                    candidate
+                    for candidate in db.query(HourlyProduction).filter_by(
+                        report_id=report.report_id, machine_no=machine_no
+                    ).all()
+                    if _norm_time(candidate.production_time) == slot
+                ),
+                None,
+            )
+
+        if entry is None:
+            if not payload.is_locked:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Row not found for the given date, machine and time.",
+                )
+            # Locking a slot that was never saved stores the (still empty) row
+            # first, so the checkbox state survives Refresh and the next
+            # session exactly like any other saved row. It carries no data, so
+            # there is nothing to protect yet — but there is now a row to lock.
+            # The report is created only here: a failed unlock must leave no
+            # empty report row behind for a date that never had one.
+            if report is None:
+                report = HourlyProductionReport(production_date=p_date)
+                db.add(report)
+                db.flush()
+            entry = HourlyProduction(
+                report_id=report.report_id,
+                machine_no=machine_no,
+                shift_id=_shift_id_for_slot(slot),
+                production_time=datetime.combine(p_date, slot),
+                job_id="",
+                is_locked=True,
+            )
+            db.add(entry)
+        else:
+            entry.is_locked = bool(payload.is_locked)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "Row lock update failed for %s machine %s at %s — transaction rolled back",
+            payload.production_date, payload.machine_no, payload.production_time,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"The row lock was NOT saved (the transaction was rolled back): {exc}",
+        )
+
+    return QualityRowLockResponse(
+        entry_id=entry.entry_id,
+        machine_no=machine_no,
+        production_time=slot_label,
+        is_locked=bool(entry.is_locked),
+    )
+
+
 @router.post("/", response_model=QualityDailyResponse)
 def save_daily_quality(
     payload: QualityDailyRequest,
@@ -526,15 +709,34 @@ def save_daily_quality(
                 # Check if it exists
                 entry = entry_map.get(map_key)
 
+                # ── Row lock ──────────────────────────────────────────────
+                # A locked row owns its own data. The payload must echo it
+                # back unchanged or the WHOLE save is rejected with a clear
+                # 409 (one request carries the entire day, so a silent skip
+                # would hide the failed edit until the next refresh). On a
+                # match nothing is written either: the stored row stays
+                # exactly as it is, and only the /lock/ endpoint can flip the
+                # flag — so unlocking is the only way to make it editable.
+                if entry is not None and bool(getattr(entry, "is_locked", False)):
+                    if _locked_payload_differs(entry, entry_data):
+                        raise HTTPException(status_code=409, detail=LOCKED_ROW_DETAIL)
+                    continue
+
                 incoming_has_data = _has_meaningful_data(entry_data)
                 # The frontend stamps every row it read from the database with a
                 # synthetic entry_id. A row WITHOUT one was invented locally by a
                 # blank slot and must never blank out a stored row. An empty row
                 # that DOES carry an entry_id is an explicit clear ("−" button /
                 # "— Select bottle") and is still applied.
+                # Manual split rows (minute-granularity times) are the exception:
+                # a split row continues the previous row's job (it inherits the
+                # bottle/Job ID), and even a split whose parent hour was blank
+                # must still be created so the row structure persists after
+                # Save/Refresh/reload. Hourly rows keep the existing rule unchanged.
                 incoming_is_known_row = bool(str(entry_data.entry_id or "").strip())
+                is_split_time = parsed_time.minute != 0 or parsed_time.second != 0
 
-                if not incoming_has_data and (entry is None or not incoming_is_known_row):
+                if not incoming_has_data and (entry is None or not incoming_is_known_row) and not is_split_time:
                     # Nothing to create and nothing the operator could have
                     # deliberately cleared — leave the stored row untouched.
                     continue
@@ -585,7 +787,11 @@ def save_daily_quality(
                         # does not belong to a job yet must be stored as an empty id
                         # — writing NULL raises an IntegrityError, the transaction
                         # rolls back and EVERY row for the day is silently lost.
-                        job_id=entry_data.job_id or ""
+                        job_id=entry_data.job_id or "",
+                        # Split-group identifier is grouping/history only: it is
+                        # stored verbatim and never influences any job,
+                        # scheduling or calculation logic below.
+                        split_group_id=(entry_data.split_group_id or "").strip() or None,
                     )
                     db.add(entry)
                     entry_map[map_key] = entry
@@ -609,6 +815,14 @@ def save_daily_quality(
                     entry.qc_hold = qch
                     entry.num = n_val
                     entry.remarks = rmk
+                    # The split-group identifier mirrors the frontend state
+                    # verbatim (grouping/history only). An empty value clears a
+                    # stale group — e.g. the next hourly row after its split was
+                    # deleted — while rows outside any split simply stay NULL.
+                    try:
+                        entry.split_group_id = (entry_data.split_group_id or "").strip() or None
+                    except AttributeError:
+                        pass
                     if entry_data.job_id:
                         entry.job_id = entry_data.job_id
                     elif b_id is None and stored_bottle_id is not None:
@@ -625,6 +839,46 @@ def save_daily_quality(
                 # same key: an IntegrityError that rolls back the WHOLE day. The
                 # set of names is already validated above; dedup here.
                 entry.defects = list({dname: defect_map[dname] for dname in entry_data.defect_ids}.values())
+
+        # Step 3.4: Explicitly deleted manual split rows.
+        # The frontend removes the split key locally (which restores the next
+        # hourly row's original period by ordering) and lists it here so the DB
+        # row is dropped and the delete persists after Save/Refresh/reload.
+        # Only minute-granularity split times are ever deleted — hourly rows are
+        # never removed by this path and Job IDs are untouched.
+        deleted_splits = getattr(payload, 'deleted_splits', None) or {}
+        for del_machine_str, del_times in deleted_splits.items():
+            try:
+                del_machine_no = int(del_machine_str)
+            except (TypeError, ValueError):
+                continue
+            for del_time_str in del_times or []:
+                try:
+                    del_parsed = _slot_time(del_time_str)
+                except HTTPException:
+                    continue
+                if del_parsed.minute == 0 and del_parsed.second == 0:
+                    continue
+                del_entry = entry_map.get((del_machine_no, del_parsed))
+                if del_entry is None:
+                    del_dt = datetime.combine(p_date, del_parsed)
+                    del_entry = db.query(HourlyProduction).filter_by(
+                        report_id=report.report_id,
+                        machine_no=del_machine_no,
+                        production_time=del_dt,
+                    ).first()
+                if del_entry is not None:
+                    # Deleting is a modification too: a locked row can never be
+                    # dropped from a save payload, however the client got here.
+                    if bool(getattr(del_entry, "is_locked", False)):
+                        raise HTTPException(status_code=409, detail=LOCKED_ROW_DETAIL)
+                    try:
+                        del_entry.defects = []
+                    except Exception:
+                        pass
+                    db.delete(del_entry)
+                    entry_map.pop((del_machine_no, del_parsed), None)
+        db.flush()
 
         # Step 3.5: Cross-day job continuation
         # Look at the previous production day's last entry (8 AM) for each machine.
@@ -741,7 +995,10 @@ def save_daily_quality(
                 # 5. Overwrite job_id on every ORM entry in this run
                 for item in run:
                     orm_entry = entry_map.get(item["map_key"])
-                    if orm_entry:
+                    # A locked row keeps the job it already has: it is never
+                    # written by this save, so its Job ID can never be
+                    # reassigned by a run a neighbouring row created.
+                    if orm_entry and not bool(getattr(orm_entry, "is_locked", False)):
                         orm_entry.job_id = canonical_job_id
 
                 # 6. Compute job_start_time, job_end_candidate, and bottle_id
@@ -914,7 +1171,9 @@ def save_daily_quality(
                     num=entry.num,
                     remarks=entry.remarks,
                     defect_ids=[d.defect_name for d in entry.defects],
-                    job_id=entry.job_id
+                    job_id=entry.job_id,
+                    split_group_id=getattr(entry, 'split_group_id', None),
+                    is_locked=bool(getattr(entry, 'is_locked', False)),
                 )
 
         # Step 5: Single Commit
