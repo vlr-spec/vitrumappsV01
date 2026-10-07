@@ -14,6 +14,34 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-06 — Remove Legacy production.users Table and Model from Backend
+- **Problem:**
+  - The application previously maintained two user models and tables: `auth.users` (`AuthUser`) as the authoritative authentication source, and `production.users` (`User`) as a legacy mirror storing display `department` and `role`. This caused dual inserts, dual password updates, and database fragmentation.
+- **Root Cause:**
+  - Historical transition to database-driven RBAC left the legacy `production.users` table partially coupled into signup, profile, and change-password flows.
+- **Fix:**
+  - Deleted `Backend/app/models/user.py` entirely and removed the `User` model import from `Backend/app/main.py` so `Base.metadata.create_all()` never recreates `production.users`.
+  - Removed the `ForeignKey` to `users.employee_id` in `Backend/app/models/audit_log.py` (`user_id = Column(String, nullable=True)`).
+  - Updated `Backend/app/api/auth.py`:
+    - Removed `ProductionUser` import and queries.
+    - Updated `SignupRequest` to accept optional `department` and `role` fields (ignored on save) to maintain backwards compatibility with existing frontend forms.
+    - Updated `signup()` to enforce unique case-insensitive email and unique employee ID checks exclusively against `AuthUser`, inserting only into `auth.users`.
+    - Updated `user_response()` to return fixed compatibility values (`"department": ""` and `"role": "Viewer"`).
+    - Updated `change_password()` to update password strictly on `AuthUser`.
+  - Added test suite `Backend/tests/test_zz_auth.py` verifying full auth workflows against `AuthUser` only and confirming complete absence of `production.users` in `Base.metadata`.
+- **Files Changed:**
+  - `Backend/app/models/user.py` (deleted)
+  - `Backend/app/main.py`
+  - `Backend/app/models/audit_log.py`
+  - `Backend/app/api/auth.py`
+  - `Backend/tests/test_zz_auth.py`
+  - `DOCUMENTATION.md`
+  - `CHANGELOG.md`
+- **API or DB Impact:**
+  - `auth.users` is now the sole source of truth for users in the backend.
+  - `department` and `role` are intentionally not migrated to `auth.users`; the API preserves contract shape by returning `"department": ""` and `"role": "Viewer"`.
+  - The database team can safely drop `production.users` without breaking backend boot or runtime queries.
+
 ### 2026-10-05 — Documentation Cleanup & Codebase Synchronization
 - **Problem:**
   - `DOCUMENTATION.md` contained massive duplication (sections 3-6 repeated), conflicting statements regarding implemented quality features, broken markdown formatting, environment-specific CI paths, and lacked documentation for entire database schemas (`hpr.*`, `auth.*`, `job_master`, `machine_job_sequence`).
