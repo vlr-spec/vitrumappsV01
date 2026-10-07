@@ -2,17 +2,21 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, HTTPException, status
+# pyrefly: ignore [missing-import]
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel, Field, field_validator
+# pyrefly: ignore [missing-import]
 from sqlalchemy import func, or_
+# pyrefly: ignore [missing-import]
 from sqlalchemy.orm import Session
 
 from app.api.access import load_access
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.auth import AuthUser
-from app.models.user import User as ProductionUser
 
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
@@ -39,11 +43,11 @@ class LoginRequest(BaseModel):
 class SignupRequest(BaseModel):
     employee_id: str = Field(min_length=1, max_length=100)
     employee_name: str = Field(min_length=1, max_length=255)
-    department: str = Field(min_length=1, max_length=100)
+    department: str | None = Field(default=None, max_length=100)  # accepted, ignored
     email: str = Field(min_length=3, max_length=255)
     phone_number: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=8, max_length=1024)
-    role: str
+    role: str | None = None  # accepted, ignored
 
     @field_validator("email")
     @classmethod
@@ -62,19 +66,15 @@ class ChangePasswordRequest(BaseModel):
 
 
 def user_response(user: AuthUser, db: Session) -> dict:
-    # Employee self-service display fields (profile/header) come from the
-    # legacy production.users table when available; auth.users is authoritative
-    # for login and permissions. Missing legacy rows fall back safely.
-    legacy = db.get(ProductionUser, user.employee_id)
     access = load_access(user.employee_id, db)
 
     return {
         "employee_id": user.employee_id,
         "employee_name": user.employee_name,
-        "department": legacy.department if legacy else "",
+        "department": "",
         "email": user.email or "",
         "phone_number": user.phone_number or "",
-        "role": legacy.role if legacy else "Viewer",
+        "role": "Viewer",
         # Dynamic module catalog (auth.module_master) + effective permissions
         # (auth.user_module_permissions) -- both read fresh from the database.
         "modules": access["modules"],
@@ -241,24 +241,12 @@ def signup(
     payload: SignupRequest,
     db: Session = Depends(get_db),
 ):
-    if payload.role not in {"Editor", "Viewer"}:
-        raise HTTPException(
-            status_code=422,
-            detail="Role must be Editor or Viewer",
-        )
-
     email = payload.email
 
-    if db.query(ProductionUser).filter(ProductionUser.email == email).first():
+    if db.query(AuthUser).filter(func.lower(AuthUser.email) == email).first():
         raise HTTPException(
             status_code=409,
             detail="An account already exists for this email address",
-        )
-
-    if db.get(ProductionUser, payload.employee_id.strip()):
-        raise HTTPException(
-            status_code=409,
-            detail="An account already exists for this employee ID",
         )
 
     if db.get(AuthUser, payload.employee_id.strip()):
@@ -274,18 +262,6 @@ def signup(
         email=email,
         phone_number=payload.phone_number.strip(),
         password=payload.password,
-        is_active=True,
-    ))
-
-    # Legacy production.users row retains the display-only department/role.
-    db.add(ProductionUser(
-        employee_id=payload.employee_id.strip(),
-        employee_name=payload.employee_name.strip(),
-        department=payload.department.strip(),
-        email=email,
-        phone_number=payload.phone_number.strip(),
-        password=payload.password,
-        role=payload.role,
         is_active=True,
     ))
 
@@ -319,10 +295,6 @@ def change_password(
 
     # Store new password without hashing
     user.password = payload.new_password
-
-    legacy = db.get(ProductionUser, user.employee_id)
-    if legacy:
-        legacy.password = payload.new_password
 
     db.commit()
 

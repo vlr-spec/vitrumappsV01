@@ -142,18 +142,6 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 
 ### Schema: `production`
 
-#### `production.users`
-*Legacy user profile table used for employee department and display role.*
-- `employee_id` (`String`, **PK**, index, non-null)
-- `employee_name` (`String`, non-null)
-- `department` (`String`, non-null)
-- `email` (`String`, unique, index, non-null)
-- `phone_number` (`String`, index, non-null)
-- `password` (`String`, non-null) — *Note: Stored in plain text.*
-- `role` (`String`, non-null) — *Display role: `"Editor"` or `"Viewer"`.*
-- `is_active` (`Boolean`, default `True`, non-null)
-- `created_at` (`DateTime(timezone=True)`, server default `now()`, non-null)
-
 #### `production.machine_master`
 *Physical glass forming machines.*
 - `machine_no` (`Integer`, **PK**, index, non-null) — *Factory machines: 1, 2, 3, 4.*
@@ -226,7 +214,7 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 #### `production.audit_logs`
 *System event and modification trail.*
 - `id` (`Integer`, **PK**, index, non-null)
-- `user_id` (`String`, **FK** → `users.employee_id`, nullable)
+- `user_id` (`String`, nullable) — *Employee ID who triggered the action.*
 - `action` (`String`, non-null)
 - `details` (`String`, nullable)
 - `timestamp` (`DateTime(timezone=True)`, server default `now()`)
@@ -526,9 +514,16 @@ Enforcement is applied via FastAPI dependencies in [`app/api/permissions.py`](fi
 - `require_module_edit(module_name)`: Enforces `can_read == True` and `can_edit == True`.
 - `require_any_module_read([modules])`: Allows read access if user has read permission on any listed module.
 
+### User Model & Single Source of Truth
+- `auth.users` (`AuthUser` in `Backend/app/models/auth.py`) is the application's sole source of truth for users and authentication.
+- The legacy `production.users` table and model have been completely removed from the backend.
+- `auth.users` in the live DB contains only: `employee_id`, `employee_name`, `email`, `phone_number`, `password`, `is_active`, `created_at`. It intentionally does not contain `department` or `role`.
+- For backwards-compatibility with the frontend, user profile endpoints (`/api/auth/login`, `/api/auth/me`) continue returning `"department": ""` and `"role": "Viewer"`.
+- `POST /api/auth/signup` continues accepting optional `department` and `role` fields from legacy frontend forms, but ignores them safely.
+
 ### Public Signup Isolation
 Anyone can invoke `POST /api/auth/signup` to register an account. However:
-- Signup inserts rows into `auth.users` and `production.users`.
+- Signup inserts a single row into `auth.users`.
 - **Zero permissions** are created in `auth.user_module_permissions`.
 - When a newly registered user logs in, their effective permissions dictionary is empty (`{}`).
 - Consequently, all functional business endpoints (`/api/production/*`) return **HTTP 403 Forbidden** until a database developer or system administrator inserts permission records into `auth.user_module_permissions`.
@@ -627,9 +622,9 @@ Automated through GitHub Actions (`.github/workflows/ci.yml`) on pushes to `main
 | Issue | Severity | Impact | Status |
 | :--- | :---: | :--- | :---: |
 | **`GET /health` Credential Leak** | **Critical** | Public endpoint returns `settings.DATABASE_URL` containing database host, username, and password. | **Open** *(Separate fix task in progress)* |
-| **Plain-Text Password Storage** | **High** | Passwords in `auth.users` and `production.users` are stored without hashing and compared directly. | **Open** |
+| **Plain-Text Password Storage** | **High** | Passwords in `auth.users` are stored without hashing and compared directly. | **Open** |
 | **In-Memory Session Map (`SESSIONS`)** | **High** | Sessions stored in a local process dictionary; restarting container or scaling across instances logs all users out. | **Open** |
-| **`AuditLogResponse.user_id` Type Mismatch** | **Medium** | Schema defines `user_id: int`, while model stores alphanumeric employee ID string (`users.employee_id`). Calling `GET /api/production/audit-logs/` triggers a 500 serialization error. | **Open** |
+| **`AuditLogResponse.user_id` Type Mismatch** | **Medium** | Schema defines `user_id: int`, while model stores alphanumeric employee ID string. Calling `GET /api/production/audit-logs/` triggers a 500 serialization error. | **Open** |
 | **Unpinned & Duplicated Dependencies** | **Medium** | `Backend/requirements.txt` has unpinned ranges (`>=`), duplicates `pydantic-settings` 3 times, and installs both `psycopg2-binary` and `psycopg[binary]`. | **Open** |
 | **CI Tests Restricted to SQLite** | **Medium** | GitHub Actions pipeline runs tests against SQLite only. PostgreSQL-specific SQL syntax and driver quirks bypass CI checks. | **Open** |
 | **Public Signup Lacks Self-Service Onboarding** | **Low** | Anyone can sign up, but new accounts have no default module permissions and encounter 403 on all functional screens. | **Open** *(By Design)* |

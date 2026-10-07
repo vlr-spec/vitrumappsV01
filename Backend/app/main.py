@@ -20,7 +20,6 @@ from app.db.session import engine
 from app.db.base import Base
 
 # We must import all models here so SQLAlchemy knows about them before creating tables
-from app.models.user import User
 from app.models.machine import MachineMaster
 from app.models.product import BottleMaster, BottleConfiguration
 from app.models.job import JobMaster, ProductionJob, JobPackaging, MachineJobSequence
