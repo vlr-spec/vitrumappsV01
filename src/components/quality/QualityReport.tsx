@@ -453,6 +453,9 @@ interface JobSourceRow {
 interface JobWiseRow {
   key: string;
   machineNo: number;
+  /** Bottle id of the day segment — part of the row key so two bottles sharing
+   *  one job id still render as separate rows, never merged. Display only. */
+  bottleId: string;
   itemName: string;
   dateText: string;
   timeText: string;
@@ -501,7 +504,9 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
         end++;
       }
       const startDate = parseSlotDate(dateKey, points[i].slot.time);
-      if (startDate) {
+      // Zero actual production on the date is never a summary row — the job
+      // must have produced to be listed, exactly as on the backend.
+      if (startDate && units > 0) {
         out.push({
           machineNo,
           jobId,
@@ -805,11 +810,33 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   // first, then the newest job first within a machine on the actual 9 AM
   // production-day timeline. No blank rows: a machine without a job on the
   // date simply has no rows here.
+  //
+  // Data-selection guard: only jobs the selected day's own hourly records
+  // (this Daily Production Performance Report) actually contain are shown, so
+  // a still-active job from an earlier date — or a job from a machine with no
+  // production that day — can never leak in from the endpoint. The guard is
+  // skipped only while the day has no job-bearing records at all, preserving
+  // the previous fallback behaviour in that case.
   const jobWiseRows = useMemo<JobWiseRow[]>(() => {
     if (jobLoadedKey !== dateKey) return [];
 
+    const dayJobKeys = new Set<string>();
+    for (const [mStr, byTime] of Object.entries(dayHourly ?? {})) {
+      for (const entry of Object.values(byTime ?? {})) {
+        const jid = String((entry as QualityHourlyEntry)?.job_id ?? '').trim();
+        if (jid) dayJobKeys.add(`${Number(mStr)}|${jid}`);
+      }
+    }
+
+    const endpointRows = jobRowsOk
+      ? (dayJobKeys.size > 0
+        ? jobRows.filter((row) =>
+          dayJobKeys.has(`${row.machine_no}|${String(row.job_id ?? '').trim()}`))
+        : jobRows)
+      : [];
+
     const source: JobSourceRow[] = jobRowsOk
-      ? jobRows.flatMap((row) => {
+      ? endpointRows.flatMap((row) => {
         const startDate = new Date(row.job_start_time);
         if (Number.isNaN(startDate.getTime())) return [];
         return [{
@@ -826,8 +853,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
     return source
       .map((s) => ({
-        key: `${s.machineNo}-${s.jobId}`,
+        key: `${s.machineNo}-${s.jobId}-${s.bottleId}`,
         machineNo: s.machineNo,
+        bottleId: s.bottleId,
         itemName: bottleNameFor(s.bottleId, bottles),
         dateText: fmtDateSlash(s.startDate),
         timeText: fmtTime12(s.startDate),

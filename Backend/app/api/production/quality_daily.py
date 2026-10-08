@@ -383,57 +383,102 @@ def get_daily_jobs(
 ):
     """Job-wise production summary for one production date (read-only).
 
-    One row per machine + Job ID applicable to the selected 9 AM -> 8:59 AM
-    production day: every Job ID with hourly records inside the day (a job
-    change therefore yields one row per job, while many hourly records of the
-    same job stay a single row), plus each machine's currently running job when
-    the day has no entries saved yet. Start date/time, item and production are
-    derived from the SAME hpr hourly rows and hpr_job table the Quality Module
-    already writes — no new tables and no change to any existing endpoint.
+    The day's job sequence is reconstructed per machine from that date's own
+    hourly rows in production-timeline order (9 AM -> 8:59 AM next calendar
+    day) — the exact sequence the Daily Production Performance Report renders.
+    Consecutive rows of one job form that job's day segment; a different job
+    starts the next segment, i.e. the job change. A machine without a change
+    yields its single continuing job; a change yields both the previous job
+    (with its original start) and the new job (with its actual start). A
+    machine with no job rows on the date yields nothing, so a still-active job
+    from an earlier date never appears on its own.
+
+    One summary row maps to one report job/bottle row: day rows are partitioned
+    by (machine, job, bottle produced that day), so two bottles are never
+    merged into one row even if they share a job id, and a job with zero actual
+    production on the date is not listed at all. The bottle shown is the one
+    produced on the selected day; history/meta are only a fallback when the
+    day rows carry no bottle.
+
+    Each row's production is that job's ACTUAL production on the selected day
+    only (its day rows: up to the change for the previous job, from the change
+    onward for the new job — never a cumulative across dates), while the start
+    date/time is the job's true start resolved from its earliest known hourly
+    row. Start/end, item and status are derived from the SAME hpr hourly rows
+    and hpr_job table the Quality Module already writes — no new tables and no
+    change to any existing endpoint.
     """
     try:
         query_date = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    # 1. Candidate (machine, job) pairs: jobs that produced during the selected
-    #    production day, in deterministic order.
-    candidates: Dict[Tuple[int, str], None] = {}
-    day_pairs = (
-        db.query(HourlyProduction.machine_no, HourlyProduction.job_id)
+    # 1. This date's hourly rows per machine, in production-timeline order —
+    #    the same order the Daily Production Performance Report walks when it
+    #    detects bottle/job changes. Rows without a Job ID belong to no job
+    #    and are skipped exactly as in the report's own job grouping.
+    day_rows: Dict[int, List[HourlyProduction]] = {}
+    for entry, _production_date in (
+        db.query(HourlyProduction, HourlyProductionReport.production_date)
         .join(
             HourlyProductionReport,
             HourlyProduction.report_id == HourlyProductionReport.report_id,
         )
         .filter(
             HourlyProductionReport.production_date == query_date,
+            HourlyProduction.job_id.isnot(None),
             HourlyProduction.job_id != "",
         )
-        .distinct()
         .all()
-    )
-    for machine_no, job_id in day_pairs:
-        jid = str(job_id or "").strip()
-        if jid:
-            candidates[(int(machine_no), jid)] = None
+    ):
+        if not str(entry.job_id or "").strip():
+            continue
+        day_rows.setdefault(int(entry.machine_no), []).append(entry)
+    for rows in day_rows.values():
+        rows.sort(
+            key=lambda e: _physical_dt(query_date, e.production_time)
+            or datetime.max
+        )
 
-    # ... plus each machine's RUNNING job, so the table still shows what is
-    # producing before the day's first hourly entry has been saved (candidates
-    # without hourly rows on/before the selected date are dropped below, so a
-    # job that had not started yet never appears for this date).
-    if datetime.now().date() >= query_date:
-        for job in db.query(HprJob).filter(HprJob.status == "RUNNING").all():
-            jid = str(job.job_id or "").strip()
-            if jid:
-                candidates.setdefault((int(job.machine_no), jid), None)
+    # 2. Reconstruct each machine's job sequence for the date by walking its
+    #    timeline: previous continuing job -> job change -> new job. Day rows
+    #    are partitioned by (machine, job, bottle produced that day) so two
+    #    bottles are never merged into one row even if they share a job id;
+    #    distinct (job, bottle) pairs in first-appearance order are the summary
+    #    candidates, so both jobs are included only when the change actually
+    #    happened on this selected date — never from history alone.
+    day_sequences: Dict[int, List[str]] = {}
+    day_rows_by_jb: Dict[Tuple[int, str, Optional[int]], List[HourlyProduction]] = {}
+    for machine_no in sorted(day_rows):
+        seq: List[str] = []
+        for entry in day_rows[machine_no]:
+            jid = str(entry.job_id or "").strip()
+            if not jid:
+                continue
+            bkey = int(entry.bottle_id) if entry.bottle_id is not None else None
+            day_rows_by_jb.setdefault((machine_no, jid, bkey), []).append(entry)
+            if not seq or seq[-1] != jid:
+                seq.append(jid)
+        day_sequences[machine_no] = seq
+    # Candidates follow each machine's timeline sequence; bottle splits of one
+    # job keep the order their day rows first appeared in.
+    candidates: List[Tuple[int, str, Optional[int]]] = []
+    seen_jb: set = set()
+    for machine_no in sorted(day_sequences):
+        for jid in day_sequences[machine_no]:
+            for key in day_rows_by_jb:
+                if (key[0], key[1]) == (machine_no, jid) and key not in seen_jb:
+                    seen_jb.add(key)
+                    candidates.append(key)
 
     if not candidates:
         return []
 
-    # 2. Every hourly row of those Job IDs from their start through the
-    #    selected report date — this is what makes Production to Date span
-    #    multiple days for a job that continues across production dates.
-    job_ids = list(dict.fromkeys(jid for _, jid in candidates))
+    # 3. History of those Job IDs up to the selected report date — used ONLY
+    #    for each job's true start/end and bottle fallback below. Production
+    #    sums never read this: every unit shown comes from the selected day.
+    candidate_jobs = {(m, jid) for m, jid, _ in candidates}
+    job_ids = list(dict.fromkeys(jid for _, jid, _ in candidates))
     rows_by_job: Dict[Tuple[int, str], List[Tuple[HourlyProduction, date]]] = {}
     for entry, production_date in (
         db.query(HourlyProduction, HourlyProductionReport.production_date)
@@ -448,7 +493,7 @@ def get_daily_jobs(
         .all()
     ):
         key = (int(entry.machine_no), str(entry.job_id or "").strip())
-        if key in candidates:
+        if key in candidate_jobs:
             rows_by_job.setdefault(key, []).append((entry, production_date))
 
     job_meta = {
@@ -456,13 +501,27 @@ def get_daily_jobs(
         for job in db.query(HprJob).filter(HprJob.job_id.in_(job_ids)).all()
     }
 
-    # 3. One row per candidate job.
+    # A job id shared across bottles on this date gets per-segment starts
+    # (each segment's own first row is its actual start); otherwise the job's
+    # true history start below, which keeps a continuing job's original start.
+    bottles_per_job: Dict[Tuple[int, str], set] = {}
+    for (m2, j2, b2) in candidates:
+        if b2 is not None:
+            bottles_per_job.setdefault((m2, j2), set()).add(b2)
+
+    # 4. One row per candidate (machine, job, day-bottle). Production is the
+    #    segment's ACTUAL bottles on the selected day only — its day rows
+    #    (before the change for the previous job, after it for the new job);
+    #    the bottle shown is the one produced that day, while start/end come
+    #    from the job's full history so a previous job on a job-change day
+    #    still shows its true bottle, start date and time. A segment with zero
+    #    actual production on the date is not listed at all.
     built: List[Tuple[datetime, QualityJobRowSchema]] = []
-    for machine_no, jid in candidates:
+    for machine_no, jid, bkey in candidates:
         entries = rows_by_job.get((machine_no, jid), [])
         if not entries:
-            # Not applicable to this production date (e.g. a running job that
-            # starts later) — never rendered as a blank row.
+            # No hourly row for this job on or before the date — never
+            # rendered as a blank row.
             continue
         meta = job_meta.get(jid)
 
@@ -470,11 +529,20 @@ def get_daily_jobs(
         start_stamp: Optional[datetime] = None
         end_phys: Optional[datetime] = None
         end_stamp: Optional[datetime] = None
+        # The bottle produced on the selected day decides the row's item —
+        # exactly what the report row for this segment shows. History/meta are
+        # only a fallback when the day rows carry no bottle.
+        bottle_id: Optional[int] = bkey
+
+        # Daily production only: the selected day's rows of this segment.
         units = 0
-        bottle_id: Optional[int] = None
+        for day_entry in day_rows_by_jb.get((machine_no, jid, bkey), []):
+            units += _entry_units(day_entry)
+        if units <= 0:
+            # Zero actual production on the date — not a summary row.
+            continue
 
         for entry, production_date in entries:
-            units += _entry_units(entry)
             if bottle_id is None and entry.bottle_id is not None:
                 bottle_id = int(entry.bottle_id)
             phys = _physical_dt(production_date, entry.production_time)
@@ -494,7 +562,16 @@ def get_daily_jobs(
             if meta is None or meta.job_start_time is None:
                 continue
             start_stamp = meta.job_start_time
-        if meta is not None and meta.bottle_id is not None:
+        if len(bottles_per_job.get((machine_no, jid), set())) > 1:
+            # Shared id: each bottle segment starts when its own day rows
+            # start (day rows are timeline-ordered, so [0] is the first).
+            seg_rows = day_rows_by_jb.get((machine_no, jid, bkey), [])
+            if seg_rows:
+                seg_phys = _physical_dt(query_date, seg_rows[0].production_time)
+                if seg_phys is not None:
+                    start_phys = seg_phys
+                    start_stamp = datetime.combine(query_date, seg_phys.time())
+        if meta is not None and bottle_id is None and meta.bottle_id is not None:
             bottle_id = int(meta.bottle_id)
 
         built.append((
