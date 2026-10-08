@@ -1882,24 +1882,32 @@ export const QualityControlModule: React.FC = () => {
   // this row is touched, so no calculation, Job ID, split or styling logic
   // runs. Exactly one row's own store entry is patched (optimistically, and
   // rolled back if the server refuses), so only that row re-renders.
-  const [lockBusy, setLockBusy] = useState(false);
+  //
+  // Performance: the checkbox flips synchronously BEFORE any network call, so
+  // the UI responds instantly even when the save+lock round-trips take
+  // seconds. The in-flight guard is a per-row ref (no state), so toggling one
+  // row never re-renders or blocks any other row.
+  const lockBusyRef = useRef<Set<string>>(new Set());
 
   const toggleRowLock = useCallback((time: string, entry?: QualityHourlyEntry) => {
-    if (!canEdit || lockBusy) return;
+    if (!canEdit) return;
     const mStr = String(activeMachine);
+    const rowKey = `${dateKey}|${mStr}|${time}`;
+    if (lockBusyRef.current.has(rowKey)) return;
     const cur = productionStoreRef.current?.[dateKey]?.[mStr]?.[time] ?? entry;
     // The row has to exist locally to be locked — the grid always carries one
     // entry per slot once the day is loaded.
     if (!cur) return;
     const next = !(cur.is_locked ?? false);
     // Special handling: when locking an edited row that belongs to an existing job (has job_id),
-    // save the row first, then lock only if save succeeds. Do not lock first.
+    // save the single row first, then lock only if save succeeds. Do not lock first.
     const isTouched = next && !!touchedTimes.current[dateKey]?.[mStr]?.[time];
     const isExistingJobRow = !!(cur.job_id && String(cur.job_id).trim());
     const patchLock = (value: boolean) => {
       setProductionStore((prev) => {
         const existing = prev[dateKey]?.[mStr]?.[time];
         if (!existing) return prev;
+        if (existing.is_locked === value) return prev;
         return {
           ...prev,
           [dateKey]: {
@@ -1913,85 +1921,89 @@ export const QualityControlModule: React.FC = () => {
       });
     };
     if (next && isTouched && isExistingJobRow) {
-      setLockBusy(true);
+      // Optimistic flip: the checkbox checks immediately without waiting for
+      // the API. The single-row save + lock below run asynchronously; on any
+      // failure the flip is reverted with the existing error message.
+      patchLock(true);
+      lockBusyRef.current.add(rowKey);
       void (async () => {
         try {
           const store = productionStoreRef.current;
           const payload = buildSavePayload(dateKey, store, touchedTimes.current[dateKey], true);
           const machinePayload = payload[mStr];
           if (!machinePayload || !machinePayload[time]) {
+            patchLock(false);
             toast.error('Could not prepare row data for saving.');
-            setLockBusy(false);
             return;
           }
+          // Single-row save only: just this machine + time slot (matched by
+          // the backend on machine + production_time / entry_id). No shift
+          // writes, no other-row deletions, no day reload — the response's
+          // full-day state is used ONLY to backfill this row's ids below.
           const rowPayload: Record<string, Record<string, QualityHourlyEntry>> = {
             [mStr]: {
               [time]: machinePayload[time],
             },
           };
-          const shifts = shiftStoreRef.current[dateKey] ?? {};
-          const deletedForDate: Record<string, string[]> = {};
-          for (const [ms, set] of Object.entries(deletedSplitsRef.current[dateKey] ?? {})) {
-            if (set.size > 0) deletedForDate[ms] = [...set];
-          }
-          const sentSeqs: Record<string, Record<string, number>> = {};
           const touchedNow = touchedTimes.current[dateKey];
           const seq = touchedNow?.[mStr]?.[time];
-          if (seq) {
-            sentSeqs[mStr] = { [time]: seq };
-          }
-          const result = await qualityRepository.save(dateKey, rowPayload, shifts, {
-            deletedSplits: deletedForDate,
-          });
+          const result = await qualityRepository.save(dateKey, rowPayload, {}, {});
           if (!result.ok) {
+            patchLock(false);
             toast.error(result.error ?? 'Save failed. Row not locked.');
-            setLockBusy(false);
             return;
           }
           const unconfirmed = unconfirmedBottleRows(rowPayload, result.hourly);
           if (unconfirmed.length > 0) {
+            patchLock(false);
             toast.error('Save failed — row not locked.');
-            setLockBusy(false);
             return;
           }
-          if (result.hourly && Object.keys(result.hourly).length > 0) {
-            const saved = result.hourly;
+          // Backfill ONLY this row's DB-generated ids, keeping the operator's
+          // values and the optimistic lock. No full-table merge, no period
+          // re-stamp, no other row is touched so memoized rows skip re-render.
+          const savedEntry = result.hourly?.[mStr]?.[time];
+          if (savedEntry) {
             setProductionStore((prev) => {
-              const prevDate = prev[dateKey] ?? {};
-              const savedMachine = saved[mStr] ?? {};
-              const prevMachine = prevDate[mStr] ?? {};
-              const savedEntry = savedMachine[time];
-              const prevEntry = prevMachine[time];
-              if (!savedEntry && !prevEntry) return prev;
-              const mergedEntry = savedEntry
-                ? {
-                    ...(prevEntry ?? savedEntry),
-                    entry_id: savedEntry.entry_id || prevEntry?.entry_id || '',
-                    report_id: savedEntry.report_id || prevEntry?.report_id || '',
-                    job_id: savedEntry.job_id || prevEntry?.job_id || '',
-                    bottle_id: prevEntry?.bottle_id || savedEntry.bottle_id || '',
-                    split_group_id: savedEntry.split_group_id || prevEntry?.split_group_id || '',
-                  }
-                : prevEntry;
-              const byTime = { ...(prevMachine ?? {}) };
-              byTime[time] = mergedEntry;
-              const mergedDate = {
-                ...(prevDate ?? {}),
-                [mStr]: stampSplitPeriods(byTime),
+              const prevEntry = prev[dateKey]?.[mStr]?.[time];
+              if (!prevEntry) return prev;
+              const mergedEntry: QualityHourlyEntry = {
+                ...prevEntry,
+                entry_id: savedEntry.entry_id || prevEntry.entry_id || '',
+                report_id: savedEntry.report_id || prevEntry.report_id || '',
+                job_id: savedEntry.job_id || prevEntry.job_id || '',
+                split_group_id: savedEntry.split_group_id || prevEntry.split_group_id || '',
+                is_locked: true,
               };
-              return { ...prev, [dateKey]: mergedDate };
+              if (
+                mergedEntry.entry_id === prevEntry.entry_id &&
+                mergedEntry.report_id === prevEntry.report_id &&
+                mergedEntry.job_id === prevEntry.job_id &&
+                mergedEntry.split_group_id === prevEntry.split_group_id &&
+                mergedEntry.is_locked === prevEntry.is_locked
+              ) {
+                return prev;
+              }
+              return {
+                ...prev,
+                [dateKey]: {
+                  ...(prev[dateKey] ?? {}),
+                  [mStr]: {
+                    ...(prev[dateKey]?.[mStr] ?? {}),
+                    [time]: mergedEntry,
+                  },
+                },
+              };
             });
           }
+          // Clear ONLY this row's touched mark (when it was not re-edited
+          // mid-flight), so a concurrent edit is never dropped.
           const byDateTouched = touchedTimes.current[dateKey];
-          if (byDateTouched && sentSeqs[mStr]?.[time]) {
-            if (byDateTouched[mStr]?.[time] === sentSeqs[mStr][time]) {
+          if (byDateTouched && seq) {
+            if (byDateTouched[mStr]?.[time] === seq) {
               delete byDateTouched[mStr][time];
             }
           }
-          if (deletedSplitsRef.current[dateKey]) {
-            delete deletedSplitsRef.current[dateKey];
-          }
-          setSavedFlags((prev) => ({ ...prev, [dateKey]: true }));
           const lockRes = await qualityRepository.setRowLock({
             dateKey,
             machineNo: activeMachine,
@@ -2001,15 +2013,14 @@ export const QualityControlModule: React.FC = () => {
           if (!lockRes.ok) {
             patchLock(false);
             toast.error(lockRes.error ?? 'Save succeeded but lock failed.');
-            setLockBusy(false);
             return;
           }
-          patchLock(true);
           toast.success(`Row ${time} saved and locked.`);
         } catch (err: any) {
+          patchLock(false);
           toast.error(err?.message ?? 'Save+Lock failed.');
         } finally {
-          setLockBusy(false);
+          lockBusyRef.current.delete(rowKey);
         }
       })();
       return;
@@ -2020,8 +2031,9 @@ export const QualityControlModule: React.FC = () => {
       toast.error('Save this row before locking it.');
       return;
     }
-    setLockBusy(true);
+    // Optimistic flip for the pure lock/unlock path as well — revert on failure.
     patchLock(next);
+    lockBusyRef.current.add(rowKey);
     void qualityRepository
       .setRowLock({
         dateKey,
@@ -2038,8 +2050,10 @@ export const QualityControlModule: React.FC = () => {
         }
         toast.success(next ? `Row ${time} locked.` : `Row ${time} unlocked.`);
       })
-      .finally(() => setLockBusy(false));
-  }, [canEdit, lockBusy, dateKey, activeMachine]);
+      .finally(() => {
+        lockBusyRef.current.delete(rowKey);
+      });
+  }, [canEdit, dateKey, activeMachine]);
 
   // Bottle name shown as plain text next to a picked bottle. Resolved from the
   // full Bottle Master list (a bottle id is machine independent), so an entry
