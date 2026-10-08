@@ -118,15 +118,12 @@ const formatMinutesToLabel = (minsSinceMidnight: number): string => {
   return `${h12}:${String(mm).padStart(2, '0')} ${ap}`;
 };
 
-/** "8:00 AM" + "9:00 AM" → "8:00 - 9:00 AM"; "11:00 AM" + "12:00 PM" → "11:00 AM - 12:00 PM" (suffix collapsed when shared). */
+/** "8:00 AM" + "9:00 AM" → "8:00 - 9:00 AM" (never show AM/PM on start; show AM/PM only on end). */
 const formatIntervalDisplayLabel = (start: string, end: string): string => {
   const sm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(start);
   const em = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(end);
   if (!sm || !em) return end;
-  if (sm[2].toUpperCase() === em[2].toUpperCase()) {
-    return `${sm[1]} - ${em[1]} ${em[2].toUpperCase()}`;
-  }
-  return `${sm[1]} ${sm[2].toUpperCase()} - ${em[1]} ${em[2].toUpperCase()}`;
+  return `${sm[1]} - ${em[1]} ${em[2].toUpperCase()}`;
 };
 
 /** "10:00 AM" + "10:25 AM" → "10:00 - 10:25 AM" (suffix collapsed when shared). */
@@ -1895,12 +1892,10 @@ export const QualityControlModule: React.FC = () => {
     // entry per slot once the day is loaded.
     if (!cur) return;
     const next = !(cur.is_locked ?? false);
-    // A locked row is never written again, so any unsaved edit on it would be
-    // lost. Save the row first, then lock it.
-    if (next && touchedTimes.current[dateKey]?.[mStr]?.[time]) {
-      toast.error('Save this row before locking it.');
-      return;
-    }
+    // Special handling: when locking an edited row that belongs to an existing job (has job_id),
+    // save the row first, then lock only if save succeeds. Do not lock first.
+    const isTouched = next && !!touchedTimes.current[dateKey]?.[mStr]?.[time];
+    const isExistingJobRow = !!(cur.job_id && String(cur.job_id).trim());
     const patchLock = (value: boolean) => {
       setProductionStore((prev) => {
         const existing = prev[dateKey]?.[mStr]?.[time];
@@ -1917,6 +1912,114 @@ export const QualityControlModule: React.FC = () => {
         };
       });
     };
+    if (next && isTouched && isExistingJobRow) {
+      setLockBusy(true);
+      void (async () => {
+        try {
+          const store = productionStoreRef.current;
+          const payload = buildSavePayload(dateKey, store, touchedTimes.current[dateKey], true);
+          const machinePayload = payload[mStr];
+          if (!machinePayload || !machinePayload[time]) {
+            toast.error('Could not prepare row data for saving.');
+            setLockBusy(false);
+            return;
+          }
+          const rowPayload: Record<string, Record<string, QualityHourlyEntry>> = {
+            [mStr]: {
+              [time]: machinePayload[time],
+            },
+          };
+          const shifts = shiftStoreRef.current[dateKey] ?? {};
+          const deletedForDate: Record<string, string[]> = {};
+          for (const [ms, set] of Object.entries(deletedSplitsRef.current[dateKey] ?? {})) {
+            if (set.size > 0) deletedForDate[ms] = [...set];
+          }
+          const sentSeqs: Record<string, Record<string, number>> = {};
+          const touchedNow = touchedTimes.current[dateKey];
+          const seq = touchedNow?.[mStr]?.[time];
+          if (seq) {
+            sentSeqs[mStr] = { [time]: seq };
+          }
+          const result = await qualityRepository.save(dateKey, rowPayload, shifts, {
+            deletedSplits: deletedForDate,
+          });
+          if (!result.ok) {
+            toast.error(result.error ?? 'Save failed. Row not locked.');
+            setLockBusy(false);
+            return;
+          }
+          const unconfirmed = unconfirmedBottleRows(rowPayload, result.hourly);
+          if (unconfirmed.length > 0) {
+            toast.error('Save failed — row not locked.');
+            setLockBusy(false);
+            return;
+          }
+          if (result.hourly && Object.keys(result.hourly).length > 0) {
+            const saved = result.hourly;
+            setProductionStore((prev) => {
+              const prevDate = prev[dateKey] ?? {};
+              const savedMachine = saved[mStr] ?? {};
+              const prevMachine = prevDate[mStr] ?? {};
+              const savedEntry = savedMachine[time];
+              const prevEntry = prevMachine[time];
+              if (!savedEntry && !prevEntry) return prev;
+              const mergedEntry = savedEntry
+                ? {
+                    ...(prevEntry ?? savedEntry),
+                    entry_id: savedEntry.entry_id || prevEntry?.entry_id || '',
+                    report_id: savedEntry.report_id || prevEntry?.report_id || '',
+                    job_id: savedEntry.job_id || prevEntry?.job_id || '',
+                    bottle_id: prevEntry?.bottle_id || savedEntry.bottle_id || '',
+                    split_group_id: savedEntry.split_group_id || prevEntry?.split_group_id || '',
+                  }
+                : prevEntry;
+              const byTime = { ...(prevMachine ?? {}) };
+              byTime[time] = mergedEntry;
+              const mergedDate = {
+                ...(prevDate ?? {}),
+                [mStr]: stampSplitPeriods(byTime),
+              };
+              return { ...prev, [dateKey]: mergedDate };
+            });
+          }
+          const byDateTouched = touchedTimes.current[dateKey];
+          if (byDateTouched && sentSeqs[mStr]?.[time]) {
+            if (byDateTouched[mStr]?.[time] === sentSeqs[mStr][time]) {
+              delete byDateTouched[mStr][time];
+            }
+          }
+          if (deletedSplitsRef.current[dateKey]) {
+            delete deletedSplitsRef.current[dateKey];
+          }
+          setSavedFlags((prev) => ({ ...prev, [dateKey]: true }));
+          const lockRes = await qualityRepository.setRowLock({
+            dateKey,
+            machineNo: activeMachine,
+            productionTime: time,
+            isLocked: true,
+          });
+          if (!lockRes.ok) {
+            patchLock(false);
+            toast.error(lockRes.error ?? 'Save succeeded but lock failed.');
+            setLockBusy(false);
+            return;
+          }
+          patchLock(true);
+          toast.success(`Row ${time} saved and locked.`);
+        } catch (err: any) {
+          toast.error(err?.message ?? 'Save+Lock failed.');
+        } finally {
+          setLockBusy(false);
+        }
+      })();
+      return;
+    }
+    // Default behavior for all other cases (including locking untouched rows, unlocking, or new job touched rows)
+    if (next && isTouched && !isExistingJobRow) {
+      // For touched rows that are not existing job rows, keep existing behavior (block)
+      toast.error('Save this row before locking it.');
+      return;
+    }
     setLockBusy(true);
     patchLock(next);
     void qualityRepository
