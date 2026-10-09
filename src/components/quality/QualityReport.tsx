@@ -89,6 +89,24 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
 };
 
 /**
+ * Shift/Overall Efficiency % — production-UNITS based only.
+ *
+ *   Shift Efficiency %   = (Shift Actual Production Units / Shift Expected Production Units) × 100
+ *   Overall Efficiency % = (Total Actual Production Units / Total Expected Production Units) × 100
+ *
+ * "Expected Production Units" is the As-Per-Speed theoretical quantity
+ * (Speed/min × 60 × Machine Gob × Duration/Hours). Weight, draw and weight
+ * efficiency are never used here. Returns null when expected units are zero,
+ * missing or non-finite so callers render '—' instead of dividing by zero.
+ */
+const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number | null => {
+  const actual = Number(actualUnits);
+  const expected = Number(expectedUnits);
+  if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
+  return (actual / expected) * 100;
+};
+
+/**
  * Applicable weight of one hourly record — stored weight_avg when present,
  * otherwise the same F/M/R average the Quality Module computes from the
  * machine's gob type.
@@ -373,7 +391,7 @@ const splitMachineRuns = (
 const fmtUnits = (n: number) => Math.round(n).toLocaleString('en-US');
 const fmt1 = (n: number) => n.toFixed(1);
 const fmt3 = (n: number) => n.toFixed(3);
-const fmtEff = (n: number | null) => (n === null ? '—' : n.toFixed(1));
+const fmtEff = (n: number | null) => (n === null ? '—' : n.toFixed(2));
 
 // ─── Job-wise table helpers ───────────────────────────────────────────────
 
@@ -745,16 +763,18 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         // Actual Total Draw = Actual Total Units × Weight / 1,000,000
         const actualDraw = (weight * totalUnits) / 1_000_000;
 
-        // Shift Efficiency = the ACTUAL production of the complete 8-hour
-        // shift / that shift's as-per-speed production × 100. Every hour of the
-        // shift is summed first (all of them here, and across the bottle rows
-        // the Total row adds up again), so an hourly Eff% value is never copied
-        // and several bottles in one shift are simply added.
-        const shiftEff = shiftUnits.map((u, i) =>
-          shiftTheoretical[i] > 0 ? (u / shiftTheoretical[i]) * 100 : null
-        );
-        // Overall Efficiency = Actual Total Units / As Per Speed Total Units × 100
-        const overallEff = theoreticalTotal > 0 ? (totalUnits / theoreticalTotal) * 100 : null;
+        // Shift Efficiency % (UNITS based only — never weight/draw/weight-efficiency):
+        //   Shift I/II/III Efficiency % = (Shift Actual Production Units /
+        //   Shift Expected Production Units) × 100, where Expected = that
+        //   shift's As-Per-Speed theoretical units. Every hour of the shift is
+        //   summed first (all of them here, and across the bottle rows the
+        //   Total row adds up again), so an hourly Eff% value is never copied
+        //   and several bottles in one shift are simply added. Zero or missing
+        //   expected units yield null (rendered as '—'), never a division by zero.
+        const shiftEff = shiftUnits.map((u, i) => calcUnitEfficiency(u, shiftTheoretical[i]));
+        // Overall Efficiency % = (Total Actual Production Units /
+        // Total Expected Production Units) × 100 — units only.
+        const overallEff = calcUnitEfficiency(totalUnits, theoreticalTotal);
 
         out.push({
           machineNo,
@@ -776,8 +796,10 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     return out;
   }, [dayHourly, machines, bottles]);
 
-  // Total row — weighted from total actual / theoretical production, never an
-  // average of the machine efficiencies.
+  // Total row — Efficiency % is the simple (arithmetic) average of the row
+  // Efficiency % values above (null/“—” rows excluded), never the weighted
+  // total and never weight/draw. Unit/production totals above it are still
+  // straight sums. E.g. Shift-I Total = (88.9 + 92.5 + 93.0 + 92.9 + 84.5) / 5.
   const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
     const shiftTheoretical = [0, 0, 0];
@@ -797,8 +819,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         shiftTheoretical[i] += t;
       });
     }
-    const shiftEff = shiftUnits.map((u, i) => (shiftTheoretical[i] > 0 ? (u / shiftTheoretical[i]) * 100 : null));
-    const overallEff = asPerSpeedUnits > 0 ? (actualUnits / asPerSpeedUnits) * 100 : null;
+    // Total Efficiency % = simple average of the row Efficiency % values for
+    // that column; a null (“—”) row contributes nothing instead of a zero.
+    const shiftEff = [0, 1, 2].map((i) => {
+      const vals = rows
+        .map((r) => r.shiftEff[i])
+        .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+      if (vals.length === 0) return null;
+      return vals.reduce((s, v) => s + v, 0) / vals.length;
+    });
+    const overallVals = rows
+      .map((r) => r.overallEff)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    const overallEff =
+      overallVals.length > 0 ? overallVals.reduce((s, v) => s + v, 0) / overallVals.length : null;
     return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff };
   }, [rows]);
 
