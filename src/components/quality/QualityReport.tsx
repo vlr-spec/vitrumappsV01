@@ -271,7 +271,7 @@ interface HourPoint {
   durationHours: number;
 }
 
-/** One continuous machine + bottle/job period inside a single production date. */
+/** One continuous machine + bottle/job/speed period inside a single production date. */
 interface JobRun {
   machineNo: number;
   runIndex: number;
@@ -291,28 +291,57 @@ interface JobRun {
  * run keeps the old one, which would cut one bottle into several rows with
  * quantities from different periods of the day.
  *
+ * Speed is the second half of the identity: a speed change starts a new run
+ * even when the bottle/job is unchanged, because expected production is
+ * speed × gob × duration per period. Without this, two periods at different
+ * speeds collapse into one row whose speed is a blended average and whose
+ * expected/actual totals belong to different reference lines (e.g. Machine 2
+ * on 09/10/2026 ran 100 ML BRUT at 132 and at 119: merging yields speed
+ * 124.1 with expected 317,640 instead of the reference's 119.0 / 185,640
+ * plus a separate 132-speed line). Records with no usable speed carry no
+ * speed identity and join the adjacent run via the same gap-closing passes,
+ * so they can never split an otherwise continuous run.
+ *
  * One gap is closed so the split reflects real production and never a
  * half-filled cell: a record with production but no bottle belongs to the run
  * it physically sits in (previous run, or the next one when it comes first),
  * so filling the bottle in later does not break a machine row in two.
  */
 const runKeysFor = (points: HourPoint[]): string[] => {
-  const keys = points.map((p) => {
+  // Bottle half of the identity, with the long-standing gap-closing passes so
+  // a record with production but no bottle joins the run it sits in.
+  const bottles = points.map((p) => {
     const bottle = entryBottle(p.entry);
     return bottle ? `b:${bottle}` : '';
   });
-
   let inherited = '';
-  for (let i = 0; i < keys.length; i++) {
-    if (keys[i]) inherited = keys[i];
-    else keys[i] = inherited;
+  for (let i = 0; i < bottles.length; i++) {
+    if (bottles[i]) inherited = bottles[i];
+    else bottles[i] = inherited;
   }
   inherited = '';
-  for (let i = keys.length - 1; i >= 0; i--) {
-    if (keys[i]) inherited = keys[i];
-    else keys[i] = inherited;
+  for (let i = bottles.length - 1; i >= 0; i--) {
+    if (bottles[i]) inherited = bottles[i];
+    else bottles[i] = inherited;
   }
-  return keys;
+  // Speed half of the identity (parsed number, so "132" and "132.00" are the
+  // same period). Gap-closed identically so a record without a usable speed
+  // never splits an otherwise continuous run.
+  const speeds = points.map((p) => {
+    const speed = parseNum(p.entry.speed_per_min);
+    return speed > 0 ? `s:${speed}` : '';
+  });
+  inherited = '';
+  for (let i = 0; i < speeds.length; i++) {
+    if (speeds[i]) inherited = speeds[i];
+    else speeds[i] = inherited;
+  }
+  inherited = '';
+  for (let i = speeds.length - 1; i >= 0; i--) {
+    if (speeds[i]) inherited = speeds[i];
+    else speeds[i] = inherited;
+  }
+  return points.map((_, i) => `${bottles[i]}|${speeds[i]}`);
 };
 
 /**
@@ -327,8 +356,8 @@ const runKeysFor = (points: HourPoint[]): string[] => {
  *      at all. Split segments are separate time segments of the hour they
  *      divide (their durations sum to exactly that hour), so daily/monthly
  *      totals stay consistent and no production is ever duplicated.
- *   2. DETECT bottle/job changes across those window records only.
- *   3. CREATE one run per continuous bottle segment (empty hours never break
+ *   2. DETECT bottle/job/speed changes across those window records only.
+ *   3. CREATE one run per continuous bottle/speed segment (empty hours never break
  *      a run because they are not part of the sequence).
  *
  * Nothing about bottles or machines is hard-coded; every row comes from the
@@ -796,10 +825,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     return out;
   }, [dayHourly, machines, bottles]);
 
-  // Total row — Efficiency % is the simple (arithmetic) average of the row
-  // Efficiency % values above (null/“—” rows excluded), never the weighted
-  // total and never weight/draw. Unit/production totals above it are still
-  // straight sums. E.g. Shift-I Total = (88.9 + 92.5 + 93.0 + 92.9 + 84.5) / 5.
+  // Total row — Efficiency % is weighted from total actual / total expected
+  // production units, never an average of the row Efficiency % values and
+  // never weight/draw. Unit/production totals above it are straight sums, and
+  // each Total Efficiency % below re-applies calcUnitEfficiency to those sums,
+  // so a short run (e.g. Machine 2's 160-min segment) can never count equally
+  // with a long run (e.g. its 780-min segment).
   const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
     const shiftTheoretical = [0, 0, 0];
@@ -819,20 +850,14 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         shiftTheoretical[i] += t;
       });
     }
-    // Total Efficiency % = simple average of the row Efficiency % values for
-    // that column; a null (“—”) row contributes nothing instead of a zero.
-    const shiftEff = [0, 1, 2].map((i) => {
-      const vals = rows
-        .map((r) => r.shiftEff[i])
-        .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-      if (vals.length === 0) return null;
-      return vals.reduce((s, v) => s + v, 0) / vals.length;
-    });
-    const overallVals = rows
-      .map((r) => r.overallEff)
-      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-    const overallEff =
-      overallVals.length > 0 ? overallVals.reduce((s, v) => s + v, 0) / overallVals.length : null;
+    // Total Shift Efficiency % = (Total Shift Actual Units /
+    // Total Shift Expected Units) × 100 per shift, aggregated across every run
+    // in that shift. Total Overall Efficiency % = (Total Actual Units /
+    // Total Expected Units) × 100 over the full 24-hour reporting period.
+    // Zero or missing expected units yield null (rendered as '—') via
+    // calcUnitEfficiency — never NaN, Infinity or a division by zero.
+    const shiftEff = [0, 1, 2].map((i) => calcUnitEfficiency(shiftUnits[i], shiftTheoretical[i]));
+    const overallEff = calcUnitEfficiency(actualUnits, asPerSpeedUnits);
     return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff };
   }, [rows]);
 
