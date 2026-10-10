@@ -455,6 +455,16 @@ export const AllMachineReport: React.FC<{ date: Date }> = ({ date }) => {
   };
   const tdLast: React.CSSProperties = { ...td, borderRight: 'none' };
 
+  const AMR_HEAD_ROW1_H = 31;
+  const AMR_HEAD_ROW2_TOP = AMR_HEAD_ROW1_H - 1;
+  const stickyThStyle = (top: number, last = false): React.CSSProperties => ({
+    ...thStyle(last),
+    position: 'sticky',
+    top,
+    zIndex: 20,
+    backgroundColor: C.headerBg,
+  });
+
   return (
     <div style={{ marginTop: '16px' }}>
       <div
@@ -463,7 +473,7 @@ export const AllMachineReport: React.FC<{ date: Date }> = ({ date }) => {
           border: `1px solid ${C.border}`,
           borderRadius: '10px',
           boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-          overflow: 'hidden',
+          overflow: 'clip',
         }}
       >
         <div
@@ -534,30 +544,37 @@ export const AllMachineReport: React.FC<{ date: Date }> = ({ date }) => {
           </div>
         )}
 
-        <div style={{ overflowX: 'auto' }}>
+        <div
+          style={{
+            minWidth: 0,
+            width: '100%',
+            maxWidth: '100%',
+            boxSizing: 'border-box',
+          }}
+        >
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1800px' }}>
-            <thead>
-              <tr style={{ backgroundColor: C.headerBg }}>
-                <th rowSpan={2} style={{ ...thStyle(), width: '80px', borderBottom: `2px solid ${C.border}` }}>Date</th>
+            <thead className="qm-sticky-head">
+              <tr style={{ backgroundColor: C.headerBg, height: AMR_HEAD_ROW1_H }}>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '80px', borderBottom: `2px solid ${C.border}` }}>Date</th>
                 {MACHINE_NOS.map((m) => (
-                  <th key={m} colSpan={4} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>
+                  <th key={m} colSpan={4} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>
                     Machine No.{m}
                   </th>
                 ))}
-                <th colSpan={3} style={{ ...thStyle(true), borderBottom: `1px solid ${C.border}` }}>Total</th>
+                <th colSpan={3} style={{ ...stickyThStyle(0, true), borderBottom: `1px solid ${C.border}` }}>Total</th>
               </tr>
               <tr style={{ backgroundColor: C.headerBg }}>
                 {MACHINE_NOS.map((m) => (
                   <React.Fragment key={m}>
-                    <th style={{ ...thStyle(), width: '140px', borderBottom: `2px solid ${C.border}` }}>Job Name</th>
-                    <th style={{ ...thStyle(), width: '80px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
-                    <th style={{ ...thStyle(), width: '80px', borderBottom: `2px solid ${C.border}` }}>Finish</th>
-                    <th style={{ ...thStyle(), width: '60px', borderBottom: `2px solid ${C.border}` }}>%</th>
+                    <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '140px', borderBottom: `2px solid ${C.border}` }}>Job Name</th>
+                    <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '80px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
+                    <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '80px', borderBottom: `2px solid ${C.border}` }}>Finish</th>
+                    <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '60px', borderBottom: `2px solid ${C.border}` }}>%</th>
                   </React.Fragment>
                 ))}
-                <th style={{ ...thStyle(), width: '80px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
-                <th style={{ ...thStyle(), width: '80px', borderBottom: `2px solid ${C.border}` }}>Finish</th>
-                <th style={{ ...thStyle(true), width: '60px', borderBottom: `2px solid ${C.border}` }}>%</th>
+                <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '80px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
+                <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP), width: '80px', borderBottom: `2px solid ${C.border}` }}>Finish</th>
+                <th style={{ ...stickyThStyle(AMR_HEAD_ROW2_TOP, true), width: '60px', borderBottom: `2px solid ${C.border}` }}>%</th>
               </tr>
             </thead>
             <tbody>

@@ -400,11 +400,14 @@ def get_daily_jobs(
     produced on the selected day; history/meta are only a fallback when the
     day rows carry no bottle.
 
-    Each row's production is that job's ACTUAL production on the selected day
-    only (its day rows: up to the change for the previous job, from the change
-    onward for the new job — never a cumulative across dates), while the start
-    date/time is the job's true start resolved from its earliest known hourly
-    row. Start/end, item and status are derived from the SAME hpr hourly rows
+    Each row's production is that job's ACTUAL bottles accumulated from the
+    job's true start (its earliest known hourly row) through the selected
+    report date — earlier days of a still-running job keep adding up instead
+    of resetting at midnight, and a job (or bottle) change on the date splits
+    the total at the change: the previous segment stops at the change time,
+    the new segment starts from it, and the two are never combined. A segment
+    with zero actual production in its whole run is not listed at all.
+    Start/end, item and status are derived from the SAME hpr hourly rows
     and hpr_job table the Quality Module already writes — no new tables and no
     change to any existing endpoint.
     """
@@ -474,9 +477,10 @@ def get_daily_jobs(
     if not candidates:
         return []
 
-    # 3. History of those Job IDs up to the selected report date — used ONLY
-    #    for each job's true start/end and bottle fallback below. Production
-    #    sums never read this: every unit shown comes from the selected day.
+    # 3. History of those Job IDs up to the selected report date — used for
+    #    each job's true start/end, bottle fallback AND the cumulative
+    #    production sums below (a still-running job accumulates from its
+    #    original start instead of restarting every day).
     candidate_jobs = {(m, jid) for m, jid, _ in candidates}
     job_ids = list(dict.fromkeys(jid for _, jid, _ in candidates))
     rows_by_job: Dict[Tuple[int, str], List[Tuple[HourlyProduction, date]]] = {}
@@ -509,13 +513,40 @@ def get_daily_jobs(
         if b2 is not None:
             bottles_per_job.setdefault((m2, j2), set()).add(b2)
 
+    # Cumulative-production windows, one per candidate segment. Candidates
+    # follow each machine's timeline, so a job's bottle segments are listed in
+    # the order the changes happened: the first segment runs from the job's
+    # true start, every later segment from its own first day row, and each
+    # segment ends where the next one begins — two segments (or the previous
+    # job and the new job on a change day) never double-count a bottle.
+    seg_order: Dict[Tuple[int, str], List[Optional[int]]] = {}
+    seg_day_start: Dict[Tuple[int, str, Optional[int]], Optional[datetime]] = {}
+    job_true_start: Dict[Tuple[int, str], Optional[datetime]] = {}
+    for machine_no, jid, bkey in candidates:
+        seg_order.setdefault((machine_no, jid), []).append(bkey)
+        first_phys = None
+        for day_entry in day_rows_by_jb.get((machine_no, jid, bkey), []):
+            phys = _physical_dt(query_date, day_entry.production_time)
+            if phys is not None and (first_phys is None or phys < first_phys):
+                first_phys = phys
+        seg_day_start[(machine_no, jid, bkey)] = first_phys
+    for (machine_no, jid), hist_rows in rows_by_job.items():
+        true_start = None
+        for entry, production_date in hist_rows:
+            phys = _physical_dt(production_date, entry.production_time)
+            if phys is not None and (true_start is None or phys < true_start):
+                true_start = phys
+        job_true_start[(machine_no, jid)] = true_start
+
     # 4. One row per candidate (machine, job, day-bottle). Production is the
-    #    segment's ACTUAL bottles on the selected day only — its day rows
-    #    (before the change for the previous job, after it for the new job);
-    #    the bottle shown is the one produced that day, while start/end come
-    #    from the job's full history so a previous job on a job-change day
-    #    still shows its true bottle, start date and time. A segment with zero
-    #    actual production on the date is not listed at all.
+    #    segment's ACTUAL bottles accumulated from its window start (the job's
+    #    true start for the first segment, the segment's own start after a
+    #    bottle change) through the selected report date — a still-running job
+    #    keeps accumulating from its original start instead of resetting at
+    #    midnight; the bottle shown is the one produced that day, while
+    #    start/end come from the job's full history so a previous job on a
+    #    job-change day still shows its true bottle, start date and time. A
+    #    segment with zero actual production in its whole run is not listed.
     built: List[Tuple[datetime, QualityJobRowSchema]] = []
     for machine_no, jid, bkey in candidates:
         entries = rows_by_job.get((machine_no, jid), [])
@@ -533,14 +564,6 @@ def get_daily_jobs(
         # exactly what the report row for this segment shows. History/meta are
         # only a fallback when the day rows carry no bottle.
         bottle_id: Optional[int] = bkey
-
-        # Daily production only: the selected day's rows of this segment.
-        units = 0
-        for day_entry in day_rows_by_jb.get((machine_no, jid, bkey), []):
-            units += _entry_units(day_entry)
-        if units <= 0:
-            # Zero actual production on the date — not a summary row.
-            continue
 
         for entry, production_date in entries:
             if bottle_id is None and entry.bottle_id is not None:
@@ -573,6 +596,44 @@ def get_daily_jobs(
                     start_stamp = datetime.combine(query_date, seg_phys.time())
         if meta is not None and bottle_id is None and meta.bottle_id is not None:
             bottle_id = int(meta.bottle_id)
+
+        # Cumulative production over this segment's window of the job's full
+        # history through the selected date: the job's rows from its true
+        # start for the first segment, from this segment's own start after a
+        # bottle change, ending where the next segment begins. A job still
+        # running keeps accumulating from its original start instead of
+        # resetting at midnight; a job (or bottle) change on the date splits
+        # the total at the change time, so the previous segment and the new
+        # one are never combined.
+        segs = seg_order.get((machine_no, jid)) or [bkey]
+        try:
+            seg_idx = segs.index(bkey)
+        except ValueError:
+            seg_idx = 0
+        lower = (
+            job_true_start.get((machine_no, jid))
+            if seg_idx == 0
+            else seg_day_start.get((machine_no, jid, bkey))
+        )
+        upper = (
+            seg_day_start.get((machine_no, jid, segs[seg_idx + 1]))
+            if seg_idx + 1 < len(segs)
+            else None
+        )
+        units = 0
+        for entry, production_date in entries:
+            phys = _physical_dt(production_date, entry.production_time)
+            if phys is None:
+                continue
+            if lower is not None and phys < lower:
+                continue
+            if upper is not None and phys >= upper:
+                continue
+            units += _entry_units(entry)
+        if units <= 0:
+            # No actual production anywhere in this segment's run — not a
+            # summary row.
+            continue
 
         built.append((
             start_phys if start_phys is not None else start_stamp,
@@ -917,12 +978,12 @@ def save_daily_quality(
                 # set of names is already validated above; dedup here.
                 entry.defects = list({dname: defect_map[dname] for dname in entry_data.defect_ids}.values())
 
-        # Step 3.4: Explicitly deleted manual split rows.
-        # The frontend removes the split key locally (which restores the next
-        # hourly row's original period by ordering) and lists it here so the DB
-        # row is dropped and the delete persists after Save/Refresh/reload.
-        # Only minute-granularity split times are ever deleted — hourly rows are
-        # never removed by this path and Job IDs are untouched.
+        # Step 3.4: Explicitly deleted rows (manual split rows and rows the
+        # "-" button removes). The frontend drops the key locally (which
+        # restores the next row's original period by ordering) and lists it
+        # here so the DB row is deleted and the delete persists after
+        # Save/Refresh/reload. Only the listed machine + time keys are
+        # deleted — every other row, Job ID and shift assignment is untouched.
         deleted_splits = getattr(payload, 'deleted_splits', None) or {}
         for del_machine_str, del_times in deleted_splits.items():
             try:
@@ -933,8 +994,6 @@ def save_daily_quality(
                 try:
                     del_parsed = _slot_time(del_time_str)
                 except HTTPException:
-                    continue
-                if del_parsed.minute == 0 and del_parsed.second == 0:
                     continue
                 del_entry = entry_map.get((del_machine_no, del_parsed))
                 if del_entry is None:

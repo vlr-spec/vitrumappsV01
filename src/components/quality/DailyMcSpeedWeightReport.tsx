@@ -501,6 +501,18 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
   };
   const tdLast: React.CSSProperties = { ...td, borderRight: 'none' };
 
+  const DSWR_HEAD_ROW1_H = 31;
+  const DSWR_HEAD_ROW2_H = 29;
+  const DSWR_HEAD_ROW2_TOP = DSWR_HEAD_ROW1_H - 1;
+  const DSWR_HEAD_ROW3_TOP = DSWR_HEAD_ROW2_TOP + DSWR_HEAD_ROW2_H - 1;
+  const stickyThStyle = (top: number, last = false): React.CSSProperties => ({
+    ...thStyle(last),
+    position: 'sticky',
+    top,
+    zIndex: 20,
+    backgroundColor: C.headerBg,
+  });
+
   return (
     <div className="dswr-print-root" ref={printAreaRef} style={{ marginTop: '16px' }}>
       <style>{`
@@ -517,6 +529,7 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
           .dswr-print-root .dswr-table th,
           .dswr-print-root .dswr-table td { padding: 2px 3px !important; font-size: 8px !important; line-height: 1.2 !important; white-space: normal !important; }
           .dswr-print-root .dswr-table thead { display: table-header-group; }
+          .dswr-print-root .dswr-table thead.qm-sticky-head th { position: static !important; }
           .dswr-print-root .dswr-table tr { page-break-inside: avoid; page-break-after: auto; }
         }
       `}</style>
@@ -528,7 +541,7 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
           border: `1px solid ${C.border}`,
           borderRadius: '10px',
           boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-          overflow: 'hidden',
+          overflow: 'clip',
         }}
       >
         <div
@@ -621,18 +634,26 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
           </div>
         )}
 
-        <div className="dswr-table-scroll" style={{ overflowX: 'auto' }}>
+        <div
+          className="dswr-table-scroll"
+          style={{
+            minWidth: 0,
+            width: '100%',
+            maxWidth: '100%',
+            boxSizing: 'border-box',
+          }}
+        >
           <table className="dswr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: `${120 + columns.length * 130}px` }}>
-            <thead>
-              <tr style={{ backgroundColor: C.headerBg }}>
-                <th rowSpan={3} style={{ ...thStyle(), width: '90px', borderBottom: `2px solid ${C.border}` }}>Time</th>
+            <thead className="qm-sticky-head">
+              <tr style={{ backgroundColor: C.headerBg, height: DSWR_HEAD_ROW1_H }}>
+                <th rowSpan={3} style={{ ...stickyThStyle(0), width: '90px', borderBottom: `2px solid ${C.border}` }}>Time</th>
                 {columns.map((c, i) => (
-                  <th key={c.key} colSpan={2} style={{ ...(i === columns.length - 1 ? thStyle(true) : thStyle()), borderBottom: `1px solid ${C.border}` }}>
+                  <th key={c.key} colSpan={2} style={{ ...(i === columns.length - 1 ? stickyThStyle(0, true) : stickyThStyle(0)), borderBottom: `1px solid ${C.border}` }}>
                     Machine {c.machineNo}
                   </th>
                 ))}
               </tr>
-              <tr style={{ backgroundColor: C.headerBg }}>
+              <tr style={{ backgroundColor: C.headerBg, height: DSWR_HEAD_ROW2_H }}>
                 {columns.map((c, i) => {
                   const last = i === columns.length - 1;
                   return (
@@ -641,7 +662,7 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
                       colSpan={2}
                       title={c.bottleName || undefined}
                       style={{
-                        ...(last ? thStyle(true) : thStyle()),
+                        ...(last ? stickyThStyle(DSWR_HEAD_ROW2_TOP, true) : stickyThStyle(DSWR_HEAD_ROW2_TOP)),
                         borderBottom: `1px solid ${C.border}`,
                         fontSize: '10.5px',
                         textTransform: 'none',
@@ -661,8 +682,8 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
               <tr style={{ backgroundColor: C.headerBg }}>
                 {columns.map((c, i) => (
                   <React.Fragment key={c.key}>
-                    <th style={{ ...thStyle(), width: '65px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
-                    <th style={{ ...(i === columns.length - 1 ? thStyle(true) : thStyle()), width: '65px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
+                    <th style={{ ...stickyThStyle(DSWR_HEAD_ROW3_TOP), width: '65px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
+                    <th style={{ ...(i === columns.length - 1 ? stickyThStyle(DSWR_HEAD_ROW3_TOP, true) : stickyThStyle(DSWR_HEAD_ROW3_TOP)), width: '65px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
                   </React.Fragment>
                 ))}
               </tr>

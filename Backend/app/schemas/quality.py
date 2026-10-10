@@ -108,10 +108,11 @@ class QualityDailyRequest(BaseModel):
     production_date: str
     hourly: Dict[str, Dict[str, QualityHourlyEntrySchema]]
     shift_assignments: Dict[str, QualityShiftAssignmentSchema]
-    # Explicitly deleted manual split rows (machine -> list of time labels).
-    # Hourly rows are never deleted; splits are minute-granularity rows that the
-    # frontend removes locally and the backend drops here so the delete persists
-    # after Save/Refresh/reload and the next hour's original period is restored.
+    # Explicitly deleted row keys (machine -> list of time labels): manual
+    # split rows and rows removed with the "-" button. The frontend drops the
+    # key locally and the backend drops the DB row here so the delete persists
+    # after Save/Refresh/reload; only the listed keys are deleted and Job IDs
+    # of every other row are untouched.
     deleted_splits: Optional[Dict[str, List[str]]] = None
 
 class QualityDailyResponse(BaseModel):
