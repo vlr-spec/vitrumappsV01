@@ -17,6 +17,7 @@ import {
   BottleConfigurationRow,
   BottleMasterRow,
   MachineMasterRow,
+  ParentChildMappingRow,
   ProductionJobRow,
   JobPackagingRow,
 } from '../data/planningSchema';
@@ -222,6 +223,27 @@ const mapConfigRow = (raw: Record<string, unknown>): BottleConfigurationRow => {
   };
 };
 
+/**
+ * Maps a parent/child bottle option (bottle_id + bottle_name) to the string
+ * id format the pickers use. No weight: bottle_master has no weight column.
+ */
+const mapBottleOption = (raw: Record<string, unknown>): BottleMasterRow => ({
+  bottle_id: toStr(raw.bottle_id),
+  bottle_name: toStr(raw.bottle_name),
+});
+
+/**
+ * Maps a resolved parent -> child row from the self-join on
+ * production.bottle_master.group_id.
+ */
+const mapMappingRow = (raw: Record<string, unknown>): ParentChildMappingRow => ({
+  id: toStr(raw.child_bottle_id),
+  parentBottleId: toStr(raw.parent_bottle_id),
+  parentBottleName: toStr(raw.parent_bottle_name),
+  childBottleId: toStr(raw.child_bottle_id),
+  childBottleName: toStr(raw.child_bottle_name),
+});
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 export const planningRepository = {
@@ -275,10 +297,10 @@ export const planningRepository = {
         applied = true;
       }
       if (bottlesRes.status === 'fulfilled') {
+        // bottle_master has no weight column: only id + name are stored.
         _bottles = (bottlesRes.value as Record<string, unknown>[]).map((b) => ({
           bottle_id: toStr(b.bottle_id),
           bottle_name: toStr(b.bottle_name),
-          weight: toNum(b.weight),
         }));
         applied = true;
       }
@@ -417,10 +439,11 @@ export const planningRepository = {
       ]);
       return {
         ok: true,
+        // bottle_master carries no weight column; weight lives on each
+        // bottle_configuration row (mapped separately below).
         bottles: (bottlesRaw as Record<string, unknown>[]).map((b) => ({
           bottle_id: toStr(b.bottle_id),
           bottle_name: toStr(b.bottle_name),
-          weight: toNum(b.weight),
         })),
         configs: (configsRaw as Record<string, unknown>[]).map(mapConfigRow),
       };
@@ -453,10 +476,10 @@ export const planningRepository = {
       const bottlesRaw = await apiFetch('/api/production/products/bottles/');
       return {
         ok: true,
+        // bottle_master has no weight column — id + name only.
         bottles: (bottlesRaw as Record<string, unknown>[]).map((b) => ({
           bottle_id: toStr(b.bottle_id),
           bottle_name: toStr(b.bottle_name),
-          weight: toNum(b.weight),
         })),
       };
     } catch (err: any) {
@@ -466,6 +489,179 @@ export const planningRepository = {
         error: err.message || 'Failed to load the bottle list from the server.',
         bottles: [],
       };
+    }
+  },
+
+  // ── Parent–Child Bottle Mapping (production.bottle_master.group_id) ──────────
+  //
+  // Read straight from the API like the export helpers above: a mapping must
+  // reflect the committed bottle_master.group_id rows, so it survives a page
+  // refresh, a logout and a different browser. Nothing here is persisted in
+  // localStorage or sessionStorage.
+
+  /**
+   * Bottles that are valid parents — rows where group_id == bottle_id.
+   * Bottles already assigned to another parent are not returned.
+   */
+  async fetchParentBottles(): Promise<{
+    ok: boolean;
+    error?: string;
+    bottles: BottleMasterRow[];
+  }> {
+    try {
+      const raw = await apiFetch('/api/production/products/bottles/parents/');
+      return { ok: true, bottles: (raw as Record<string, unknown>[]).map(mapBottleOption) };
+    } catch (err: any) {
+      console.error('fetchParentBottles failed:', err);
+      return { ok: false, error: err.message || 'Failed to load parent bottles.', bottles: [] };
+    }
+  },
+
+  /**
+   * Bottles that may still be picked as a child: not already mapped to some
+   * parent, and not a parent of another bottle itself (mapping those would
+   * create an invalid group).
+   */
+  async fetchEligibleChildBottles(): Promise<{
+    ok: boolean;
+    error?: string;
+    bottles: BottleMasterRow[];
+  }> {
+    try {
+      const raw = await apiFetch('/api/production/products/bottles/children/');
+      return { ok: true, bottles: (raw as Record<string, unknown>[]).map(mapBottleOption) };
+    } catch (err: any) {
+      console.error('fetchEligibleChildBottles failed:', err);
+      return { ok: false, error: err.message || 'Failed to load child bottles.', bottles: [] };
+    }
+  },
+
+  /** Every saved parent -> child relationship currently in the database. */
+  async fetchParentChildMappings(): Promise<{
+    ok: boolean;
+    error?: string;
+    mappings: ParentChildMappingRow[];
+  }> {
+    try {
+      const raw = await apiFetch('/api/production/products/bottles/mappings/');
+      return { ok: true, mappings: (raw as Record<string, unknown>[]).map(mapMappingRow) };
+    } catch (err: any) {
+      console.error('fetchParentChildMappings failed:', err);
+      return { ok: false, error: err.message || 'Failed to load saved mappings.', mappings: [] };
+    }
+  },
+
+  /** Child bottles of one parent bottle (the Saved Mappings viewer). */
+  async fetchChildBottlesForParent(parentBottleId: string): Promise<{
+    ok: boolean;
+    error?: string;
+    mappings: ParentChildMappingRow[];
+  }> {
+    try {
+      const raw = await apiFetch(
+        `/api/production/products/bottles/mappings/${encodeURIComponent(parentBottleId)}`
+      );
+      return { ok: true, mappings: (raw as Record<string, unknown>[]).map(mapMappingRow) };
+    } catch (err: any) {
+      console.error('fetchChildBottlesForParent failed:', err);
+      return { ok: false, error: err.message || 'Failed to load child bottles for this parent.', mappings: [] };
+    }
+  },
+
+  /**
+   * Saves a new mapping by writing child.group_id = parent.bottle_id.
+   * Returns the database-confirmed row on success so callers can update the
+   * UI from it directly without re-fetching; returns { ok: false, error }
+   * with the backend validation message when the pair is invalid, already
+   * mapped or missing — never a silent success.
+   */
+  async createParentChildMapping(
+    parentBottleId: string,
+    childBottleId: string
+  ): Promise<{ ok: boolean; error?: string; mapping?: ParentChildMappingRow }> {
+    try {
+      const raw = await apiFetch('/api/production/products/bottles/mappings/', {
+        method: 'POST',
+        body: JSON.stringify({
+          parent_bottle_id: Number(parentBottleId),
+          child_bottle_id: Number(childBottleId),
+        }),
+      });
+      return { ok: true, mapping: mapMappingRow(raw as Record<string, unknown>) };
+    } catch (err: any) {
+      console.error('createParentChildMapping failed:', err);
+      return { ok: false, error: err.message || 'Failed to save the parent-child mapping.' };
+    }
+  },
+
+  /**
+   * Saves several children under one parent in ONE request. The backend
+   * validates every child and commits them together, so adding N children
+   * costs one round-trip instead of N. Returns the database-confirmed rows.
+   */
+  async createParentChildMappingsBulk(
+    parentBottleId: string,
+    childBottleIds: string[]
+  ): Promise<{ ok: boolean; error?: string; mappings?: ParentChildMappingRow[] }> {
+    const unique = [...new Set(childBottleIds)];
+    if (unique.length === 0) {
+      return { ok: false, error: 'Select at least one child bottle.' };
+    }
+    // A single child takes the single-mapping path (same response contract).
+    if (unique.length === 1) {
+      const single = await this.createParentChildMapping(parentBottleId, unique[0]);
+      if (!single.ok || !single.mapping) return { ok: single.ok, error: single.error };
+      return { ok: true, mappings: [single.mapping] };
+    }
+    try {
+      const raw = await apiFetch('/api/production/products/bottles/mappings/bulk/', {
+        method: 'POST',
+        body: JSON.stringify({
+          parent_bottle_id: Number(parentBottleId),
+          child_bottle_ids: unique.map(Number),
+        }),
+      });
+      return {
+        ok: true,
+        mappings: (raw as Record<string, unknown>[]).map(mapMappingRow),
+      };
+    } catch (err: any) {
+      console.error('createParentChildMappingsBulk failed:', err);
+      return { ok: false, error: err.message || 'Failed to save the parent-child mappings.' };
+    }
+  },
+
+  /** Moves an existing child bottle under a different parent. */
+  async updateParentChildMapping(
+    childBottleId: string,
+    parentBottleId: string
+  ): Promise<{ ok: boolean; error?: string; mapping?: ParentChildMappingRow }> {
+    try {
+      const raw = await apiFetch(
+        `/api/production/products/bottles/mappings/${encodeURIComponent(childBottleId)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ parent_bottle_id: Number(parentBottleId) }),
+        }
+      );
+      return { ok: true, mapping: mapMappingRow(raw as Record<string, unknown>) };
+    } catch (err: any) {
+      console.error('updateParentChildMapping failed:', err);
+      return { ok: false, error: err.message || 'Failed to update the parent-child mapping.' };
+    }
+  },
+
+  /** Releases a child bottle; it becomes its own parent again. */
+  async deleteParentChildMapping(childBottleId: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await apiFetch(
+        `/api/production/products/bottles/mappings/${encodeURIComponent(childBottleId)}`,
+        { method: 'DELETE' }
+      );
+      return { ok: true };
+    } catch (err: any) {
+      console.error('deleteParentChildMapping failed:', err);
+      return { ok: false, error: err.message || 'Failed to delete the parent-child mapping.' };
     }
   },
 
@@ -737,21 +933,20 @@ export const planningRepository = {
   // ── Bottle Master CRUD ──────────────────────────────────────────────────────
 
   /**
-   * Creates a bottle identity: name + the weight every machine shares.
-   * Machine sections and cut speeds are NOT created here - they are configured
-   * per machine through bulkUpsertBottleConfigurations.
+   * Creates a bottle identity (name only). bottle_master has no weight
+   * column — machine weights live on bottle_configuration rows. The new row
+   * is appended to the in-memory cache so callers can refresh without a full
+   * reload.
    */
-  async createBottle(bottle_name: string, weight?: number | null): Promise<{ ok: boolean; id?: number; error?: string }> {
-    const hasWeight = typeof weight === 'number' && !isNaN(weight);
+  async createBottle(bottle_name: string): Promise<{ ok: boolean; id?: number; error?: string }> {
     try {
       const result = await apiFetch('/api/production/products/bottles/', {
         method: 'POST',
-        body: JSON.stringify(hasWeight ? { bottle_name, weight } : { bottle_name }),
+        body: JSON.stringify({ bottle_name }),
       });
       _bottles.push({
         bottle_id: toStr(result.bottle_id),
         bottle_name,
-        weight: hasWeight ? (weight as number) : undefined,
       });
       _cacheVersion++;
       return { ok: true, id: result.bottle_id };
@@ -761,22 +956,19 @@ export const planningRepository = {
   },
 
   /**
-   * Renames a bottle and, when `weight` is supplied, updates its shared weight.
-   * Omitting weight leaves the stored value untouched, so a rename-only call
-   * can never wipe it.
+   * Renames a bottle. Only the name is sent: the bottle ID, group_id and every
+   * bottle_configuration row stay untouched.
    */
-  async updateBottle(bottle_id: number, bottle_name: string, weight?: number | null): Promise<{ ok: boolean; error?: string }> {
-    const hasWeight = typeof weight === 'number' && !isNaN(weight);
+  async updateBottle(bottle_id: number, bottle_name: string): Promise<{ ok: boolean; error?: string }> {
     try {
       await apiFetch(`/api/production/products/bottles/${bottle_id}`, {
         method: 'PUT',
-        body: JSON.stringify(hasWeight ? { bottle_name, weight } : { bottle_name }),
+        body: JSON.stringify({ bottle_name }),
       });
       const idStr = String(bottle_id);
       const existing = _bottles.find((b) => b.bottle_id === idStr);
       if (existing) {
         existing.bottle_name = bottle_name;
-        if (hasWeight) existing.weight = weight as number;
       }
       _cacheVersion++;
       return { ok: true };

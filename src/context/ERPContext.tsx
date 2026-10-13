@@ -217,7 +217,7 @@ const getDerivedJobWindow = (job: ProductionJob): { start: Date; end: Date } => 
 
 const MODULE_TO_SLUG: Record<string, string> = {
   'Production Planning': 'production',
-  'Quality Control': 'quality',
+  'Hourly Production Monitor': 'quality',
   'Master Management': 'master-management',
   'Settings': 'settings',
   'Profile': 'profile',
@@ -226,7 +226,7 @@ const MODULE_TO_SLUG: Record<string, string> = {
 
 const SLUG_TO_MODULE: Record<string, string> = {
   production: 'Production Planning',
-  quality: 'Quality Control',
+  quality: 'Hourly Production Monitor',
   'master-management': 'Master Management',
   machines: 'Master Management',
   settings: 'Settings',

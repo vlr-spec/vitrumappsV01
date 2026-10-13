@@ -7,11 +7,15 @@ class BottleMaster(Base):
 
     bottle_id = Column(Integer, primary_key=True, index=True)
     bottle_name = Column(String(150), nullable=False)
-    # Weight in grams is a property of the bottle itself and is therefore shared
-    # by every machine it runs on (only the CUT/MIN speeds are machine specific
-    # and live in bottle_configuration). Nullable so bottles created before this
-    # column existed keep working.
-    weight = Column(Numeric(10, 2), nullable=True)
+    # Parent/child grouping already present on production.bottle_master.
+    #   group_id == bottle_id -> the bottle is a parent (an unmapped bottle).
+    #   group_id == <other bottle_id> -> the bottle is a child of that parent.
+    # Nullable only so bottles created before the column existed still load;
+    # create_bottle always writes group_id = bottle_id for a new record.
+    # This column is purely a grouping pointer: it never copies, overrides or
+    # replaces bottle_configuration rows, machine assignments or production
+    # job bottle_ids.
+    group_id = Column(Integer, nullable=True)
 
 
 class BottleConfiguration(Base):

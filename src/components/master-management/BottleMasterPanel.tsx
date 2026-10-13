@@ -4,6 +4,7 @@ import { planningRepository } from '../../services/planningRepository';
 import { MachineMasterRow, BottleMasterRow, BottleConfigurationRow } from '../../data/planningSchema';
 import { useAuth, MODULES } from '../../context/AuthContext';
 import { BottleExportPanel } from './BottleExportPanel';
+import { ParentChildBottlePanel } from './ParentChildBottlePanel';
 
 interface BottleMasterPanelProps {
   machines: MachineMasterRow[];
@@ -19,7 +20,7 @@ interface SectionFormRow {
 }
 
 /** Tabs of the Bottle Master panel. 'export' is read-only. */
-type BottleTab = 'new' | 'edit' | 'export';
+type BottleTab = 'new' | 'edit' | 'mapping' | 'export';
 
 /** Parses a free-text numeric field into a number, or null when blank/invalid. */
 function parseNumberInput(value: string): number | null {
@@ -85,7 +86,7 @@ export const BottleMasterPanel: React.FC<BottleMasterPanelProps> = ({
   );
 
   useEffect(() => {
-    if (!canEdit && tab !== 'edit' && tab !== 'export') setTab('edit');
+    if (!canEdit && tab !== 'edit' && tab !== 'export' && tab !== 'mapping') setTab('edit');
   }, [canEdit, tab]);
 
   // Load the current name of the chosen bottle into the rename box.
@@ -800,9 +801,16 @@ export const BottleMasterPanel: React.FC<BottleMasterPanelProps> = ({
               className={`py-3 px-0 mr-6 text-sm font-semibold border-b-2 -mb-px transition-colors ${tab === t ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'
                 }`}
             >
-              {t === 'new' ? 'Add New' : 'Edit Machine'}
+              {t === 'new' ? 'Add/Edit Bottle' : 'Edit Machine'}
             </button>
           ))}
+        <button
+          onClick={() => switchTab('mapping')}
+          className={`py-3 px-0 mr-6 text-sm font-semibold border-b-2 -mb-px transition-colors ${tab === 'mapping' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'
+            }`}
+        >
+          Parent–Child Bottle
+        </button>
         <button
           onClick={() => switchTab('export')}
           className={`py-3 px-0 mr-6 text-sm font-semibold border-b-2 -mb-px transition-colors ${tab === 'export' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'
@@ -866,7 +874,7 @@ export const BottleMasterPanel: React.FC<BottleMasterPanelProps> = ({
           <div className="rounded-lg border border-gray-200 p-5 flex flex-col gap-4">
             <div className="flex items-center gap-2">
               <span className="text-blue-600"><Pencil className="w-3.5 h-3.5" /></span>
-              <h3 className="text-sm font-semibold text-gray-800">Rename Existing Bottle</h3>
+              <h3 className="text-sm font-semibold text-gray-800">Edit Existing Bottle</h3>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div className="flex flex-col gap-1.5">
@@ -972,6 +980,8 @@ export const BottleMasterPanel: React.FC<BottleMasterPanelProps> = ({
             )}
           </div>
         </div>
+      ) : tab === 'mapping' ? (
+        <ParentChildBottlePanel bottles={bottles} canEdit={canEdit} />
       ) : (
         <div className="p-6 flex flex-col gap-6">
           {/* Section 1: Manage Configured Bottles */}

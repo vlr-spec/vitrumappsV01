@@ -21,6 +21,25 @@ export interface BottleMasterRow {
   weight?: number;      // grams, shared by every machine (null on legacy rows)
 }
 
+/**
+ * One saved parent -> child relationship.
+ *
+ * Mirrors the backend ParentChildMappingResponse. Both sides are resolved
+ * through production.bottle_master.group_id, so every id here is the real
+ * bottle_id stored in the database and the names come from the same row
+ * (no second lookup, no browser storage).
+ *
+ * `id` is the child bottle_id: a child bottle has at most one parent, so it
+ * uniquely identifies the mapping.
+ */
+export interface ParentChildMappingRow {
+  id: string;
+  parentBottleId: string;
+  parentBottleName: string;
+  childBottleId: string;
+  childBottleName: string;
+}
+
 export interface BottleConfigurationRow {
   machine_no: string;   // e.g. "MAC-01"
   bottle_id: string;    // e.g. "123"

@@ -3,7 +3,7 @@ import { Printer, Download, CalendarDays, ChevronUp, ChevronDown } from 'lucide-
 import { toast, Toaster } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth, MODULES } from '../../context/AuthContext';
-import { BottleMaster } from '../../types';
+import { planningRepository } from '../../services/planningRepository';
 import { qualityRepository, QualityHourlyEntry, QualityShiftMap, QualityDayLoad, QualityDayHourly, hasMeaningfulData } from '../../services/qualityRepository';
 import { COMPANY_NAME, getReportHeaderLines } from '../../utils/reportHeader';
 import { calculateTheoreticalBottles } from '../../utils/calculations';
@@ -790,6 +790,155 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
   return activeTime;
 };
 
+// ── Hourly Production bottle dropdown ───────────────────────────────────────
+// One selectable bottle. `value` is the bottle id that is actually stored and
+// saved (the configured/parent bottle, so configuration mappings and saved
+// production data keep working unchanged); `label` is the name shown to the
+// operator. When a configured bottle is a parent whose mapped children define
+// the operator-facing name, one option is listed per child showing that
+// child's bottle_name — the parent id is used only for identity/config, never
+// displayed. `key` is unique per option (`parentId::childId`); `value` repeats
+// the parent id by design.
+interface BottleOption {
+  key: string;
+  value: string;
+  label: string;
+}
+
+/**
+ * Searchable, lightweight bottle picker for the hourly grid. It replaces the
+ * native <select> so an operator can type to filter the (potentially long)
+ * bottle list. Styling matches the surrounding grid: transparent until hovered,
+ * the option panel overlays the table without reflowing it.
+ */
+const BottleSearchSelect: React.FC<{
+  value: string;
+  options: BottleOption[];
+  disabled?: boolean;
+  title?: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}> = ({ value, options, disabled = false, title, placeholder = '— Select bottle', onChange }) => {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const selected = useMemo(() => options.find((o) => o.key === value) ?? null, [options, value]);
+
+  // Close on outside click / Escape. Local state only — no request, no parent
+  // render, so filtering stays responsive while typing.
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery('');
+    const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [open]);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => o.label.toLowerCase().includes(q));
+  }, [options, query]);
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        disabled={disabled}
+        title={title}
+        onClick={() => { if (!disabled) setOpen((o) => !o); }}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px',
+          width: '100%', minWidth: 0,
+          padding: '3px 5px',
+          fontSize: '12px',
+          fontWeight: 400,
+          color: selected ? C.textMain : '#94a3b8',
+          backgroundColor: 'transparent',
+          border: `1px solid ${open ? '#2563eb' : 'transparent'}`,
+          borderRadius: '4px',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          outline: 'none',
+          textAlign: 'left',
+          opacity: disabled ? 0.6 : 1,
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronDown size={12} style={{ flexShrink: 0, color: '#94a3b8' }} />
+      </button>
+      {open && !disabled && (
+        <div
+          style={{
+            position: 'absolute', top: '100%', left: 0, zIndex: 60, marginTop: '2px',
+            width: '240px', maxWidth: '70vw',
+            backgroundColor: C.white,
+            border: `1px solid ${C.border}`,
+            borderRadius: '6px',
+            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.18)',
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ padding: '6px', borderBottom: `1px solid ${C.border}` }}>
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search bottle..."
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                padding: '4px 7px', fontSize: '12px',
+                color: C.textMain, backgroundColor: C.white,
+                border: `1px solid ${C.border}`, borderRadius: '4px',
+                outline: 'none',
+              }}
+            />
+          </div>
+          <div style={{ maxHeight: '220px', overflowY: 'auto' }}>
+            {matches.length === 0 ? (
+              <div style={{ padding: '10px 12px', fontSize: '12px', color: '#94a3b8' }}>No bottles found.</div>
+            ) : (
+              matches.map((o) => (
+                <div
+                  key={o.key}
+                  onMouseDown={(e) => { e.preventDefault(); onChange(o.value); setOpen(false); }}
+                  style={{
+                    padding: '6px 10px', fontSize: '12px', color: C.textMain, cursor: 'pointer',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  {o.label}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Memoized per-hourly-row <tr>. Props are referentially stable across parent
 // renders (handlers are useCallback'd, availableSections/allDefectNames are
 // cached), so typing in one row only re-renders that row instead of all 24.
@@ -818,7 +967,8 @@ const QualityTimeRow = React.memo<{
   entry?: QualityHourlyEntry;
   gobCount: number;
   hasM: boolean;
-  bottles: BottleMaster[];
+  /** Searchable bottle options (value = configured/parent id, label = child name). */
+  bottleOptions: BottleOption[];
   allDefectNames: string[];
   defectGroups: DefectGroup[];
   loadingDefects: boolean;
@@ -855,7 +1005,7 @@ const QualityTimeRow = React.memo<{
   entry,
   gobCount,
   hasM,
-  bottles,
+  bottleOptions,
   allDefectNames,
   defectGroups,
   loadingDefects,
@@ -1075,39 +1225,17 @@ const QualityTimeRow = React.memo<{
             ) : (
               // New-job row: the dropdown is how the job's bottle is picked.
               // The pick is confirmed first, so the previous bottle stays
-              // displayed until the user clicks Yes.
-              <select
+              // displayed until the user clicks Yes. `value` is the bottle id
+              // actually saved (the configured/parent bottle); the visible
+              // label is the mapped child bottle name, so configuration
+              // mappings and saved data are untouched.
+              <BottleSearchSelect
                 value={entry?.bottle_id ?? ''}
+                options={bottleOptions}
                 disabled={!canEdit || locked}
                 title={!canEdit ? undefined : locked ? 'This row is locked and cannot be edited.' : undefined}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  e.target.value = entry?.bottle_id ?? '';
-                  selectBottle(time, next);
-                }}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  padding: '3px 5px',
-                  fontSize: '12px',
-                  fontWeight: 400,
-                  color: '#94a3b8',
-                  backgroundColor: 'transparent',
-                  border: '1px solid transparent',
-                  borderRadius: '4px',
-                  cursor: canEdit && !locked ? 'pointer' : 'not-allowed',
-                  outline: 'none',
-                  textAlign: 'left',
-                  opacity: canEdit && !locked ? 1 : 0.6,
-                }}
-                onFocus={(e) => { e.currentTarget.style.borderColor = '#2563eb'; }}
-                onBlur={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
-              >
-                <option value="">— Select bottle</option>
-                {bottles.map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
+                onChange={(next) => selectBottle(time, next)}
+              />
             )}
 
             {entry?.job_id && (
@@ -1314,6 +1442,34 @@ export const QualityControlModule: React.FC = () => {
   const [loadErrorDetails, setLoadErrorDetails] = useState<Record<string, string>>({});
   const [defectGroups, setDefectGroups] = useState<DefectGroup[]>([]);
   const [loadingDefects, setLoadingDefects] = useState<boolean>(true);
+
+  // Parent → child bottle map, read from the existing parent/child mapping API
+  // (production.bottle_master.group_id). It is used ONLY to display a child
+  // bottle's name in the Hourly Production dropdown in place of its parent's
+  // name; the parent bottle id stays the value that is saved, so configuration
+  // mappings, machine-specific configurations, production calculations and
+  // already-saved rows are all untouched. Fetched once per module mount; on
+  // failure the dropdown simply falls back to the parent's own name.
+  const [childrenByParent, setChildrenByParent] = useState<Map<string, { id: string; name: string }[]>>(
+    () => new Map()
+  );
+  useEffect(() => {
+    let cancelled = false;
+    planningRepository
+      .fetchParentChildMappings()
+      .then((res) => {
+        if (cancelled || !res.ok) return;
+        const next = new Map<string, { id: string; name: string }[]>();
+        for (const m of res.mappings) {
+          const list = next.get(m.parentBottleId);
+          if (list) list.push({ id: m.childBottleId, name: m.childBottleName });
+          else next.set(m.parentBottleId, [{ id: m.childBottleId, name: m.childBottleName }]);
+        }
+        setChildrenByParent(next);
+      })
+      .catch(() => { /* keep parent names as a safe fallback */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // Dates that received a cross-midnight continuation row via "+". The row
   // lives under its OWN date key, so these dates are persisted together with
@@ -1651,6 +1807,32 @@ export const QualityControlModule: React.FC = () => {
     ),
     [getBottlesForMachine, sectionKey]
   );
+
+  // Dropdown options for the Hourly Production grid (all four machines). A
+  // configured bottle that is a parent with mapped children is listed once
+  // per child, each option showing that child's bottle_name (e.g. parent 35
+  // "100 ml Brute" with child 185 "130 ml 25 mm NECK" shows the child name);
+  // every bottle without children keeps its own name. The option VALUE stays
+  // the configured/parent bottle id, so the job identity that is saved, the
+  // configuration mapping and every production calculation are unchanged —
+  // only the visible name differs. Keys are unique per child
+  // (`parentId::childId`) while values intentionally repeat the parent id.
+  const bottleOptions = useMemo<BottleOption[]>(() => {
+    const opts: BottleOption[] = machineBottles.flatMap((bottle) => {
+      const children = childrenByParent.get(bottle.id) ?? [];
+      if (children.length === 0) {
+        return [{ key: bottle.id, value: bottle.id, label: bottle.name }];
+      }
+      return children.map((child) => ({
+        key: `${bottle.id}::${child.id}`,
+        value: bottle.id,
+        label: child.name,
+      }));
+    });
+    return opts.sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+    );
+  }, [machineBottles, childrenByParent]);
 
   // Available sections are derived from bottleMasterRecords/machines, which
   // only change when master data reloads, so the per-key result can be cached
@@ -2200,11 +2382,24 @@ export const QualityControlModule: React.FC = () => {
   // Bottle name shown as plain text next to a picked bottle. Resolved from the
   // full Bottle Master list (a bottle id is machine independent), so an entry
   // whose bottle is no longer configured on this machine still shows its name.
+  // A saved entry stores the configured/parent bottle id, so the mapped child
+  // bottle name is shown instead of the parent name — the same rule the
+  // dropdown uses, which keeps existing saved rows displaying child names.
+  // A parent with several children shows the alphabetically-first child name
+  // (matching the sorted dropdown); the saved value is still the parent id.
   const bottleNameById = useMemo(() => {
     const byId = new Map<string, string>();
     for (const b of bottles) byId.set(b.id, b.name);
+    for (const [parentId, children] of childrenByParent) {
+      if (children.length > 0) {
+        const first = [...children].sort((a, b) =>
+          String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
+        )[0];
+        byId.set(parentId, first.name);
+      }
+    }
     return byId;
-  }, [bottles]);
+  }, [bottles, childrenByParent]);
 
   // Same rule for the handlers, evaluated against the live store so it is right
   // even when a handler runs before the next render. A job that a later entry
@@ -3664,7 +3859,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                       entry={entry}
                       gobCount={gobCount}
                       hasM={hasM}
-                      bottles={machineBottles}
+                      bottleOptions={bottleOptions}
                       allDefectNames={allDefectNames}
                       defectGroups={defectGroups}
                       loadingDefects={loadingDefects}
