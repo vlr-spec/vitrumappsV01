@@ -25,6 +25,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Printer, RefreshCw } from 'lucide-react';
 import { useERP } from '../../context/ERPContext';
+import { planningRepository } from '../../services/planningRepository';
 import {
   qualityRepository,
   QualityDayHourly,
@@ -470,6 +471,8 @@ interface MachineReportRow {
   /** One continuous machine + bottle/job period of the selected date. */
   rowKey: string;
   bottleName: string;
+  /** Packing name mapped to the row's configured/parent bottle (read-only). */
+  packingName: string;
   weight: number;
   speed: number;
   asPerSpeedUnits: number;
@@ -504,6 +507,8 @@ interface JobWiseRow {
    *  one job id still render as separate rows, never merged. Display only. */
   bottleId: string;
   itemName: string;
+  /** Packing name mapped to the row's configured/parent bottle (read-only). */
+  packingName: string;
   dateText: string;
   timeText: string;
   startSort: Date;
@@ -570,6 +575,48 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
   return out;
 };
 
+/**
+ * Exact start time of each job segment on the loaded date — the start of the
+ * FIRST production entry associated with that machine + Job ID + bottle.
+ *
+ * An hourly row covers the production period ENDING at its own label, so a
+ * row's production actually begins at the previous displayed row's time — the
+ * same start the Quality Table's Time column shows for that row. When a manual
+ * split carved a minute boundary (e.g. a "12:35 PM" segment), the first row
+ * after that boundary begins at exactly 12:35 PM — never a rounded hour and
+ * never a default shift start. Taking the earliest entry of a segment in
+ * production-timeline order therefore yields its actual start, and it stays
+ * correct when a job starts midway through an hourly interval or when a new
+ * bottle/job is selected mid-interval.
+ *
+ * Keyed by `${machineNo}|${jobId}|${bottleId}` — the job ID and machine are
+ * always part of the key (one bottle can run in several jobs), and the bottle
+ * separates the segments of ONE job id that ran two bottles on the date, so
+ * the second bottle can never inherit the first bottle's start. Records without
+ * a Job ID belong to no job and are ignored, exactly as in the report's own job
+ * grouping. The day's very first row has no earlier period, so its own label is
+ * used.
+ */
+const jobStartLabels = (dayHourly: QualityDayHourly): Map<string, string> => {
+  const out = new Map<string, string>();
+  for (const machineNo of MACHINE_NOS) {
+    const byTime = dayHourly[String(machineNo)] ?? {};
+    const ordered = getReportOrderedKeys(byTime);
+    for (let i = 0; i < ordered.length; i++) {
+      const entry = byTime[ordered[i]];
+      if (!hasMeaningfulData(entry)) continue;
+      const jobId = entryJob(entry);
+      if (!jobId) continue;
+      const mapKey = `${machineNo}|${jobId}|${entryBottle(entry)}`;
+      if (out.has(mapKey)) continue;
+      // Start of this first entry's period: the previous displayed row's time,
+      // or the entry's own label when it is the day's very first row.
+      out.set(mapKey, i > 0 ? ordered[i - 1] : ordered[i]);
+    }
+  }
+  return out;
+};
+
 // ─── Report ────────────────────────────────────────────────────────────────
 /**
  * The report is read-only and has no date state of its own: `date` is the
@@ -578,6 +625,50 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
  */
 export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   const { machines, bottles } = useERP();
+
+  // ── Packing Name ──────────────────────────────────────────────────────────
+  // The Quality Table stores the configured/parent bottle id, so the "Packing
+  // Name" of a report row is the bottle_name of that bottle's mapped child,
+  // read read-only from the SAME existing parent/child mapping API the Quality
+  // grid already uses (production.bottle_master.group_id). No new database
+  // field, table or endpoint is introduced. A parent with several mapped
+  // children uses the alphabetically-first child — exactly the rule the grid's
+  // saved-row display uses — so the report and the grid always agree. A bottle
+  // without children has no packing name (rendered as '—'). Fetched once per
+  // mount; on failure the report still renders, just without packing names.
+  const [childNameByParent, setChildNameByParent] = useState<Map<string, string>>(() => new Map());
+  useEffect(() => {
+    let cancelled = false;
+    planningRepository
+      .fetchParentChildMappings()
+      .then((res) => {
+        if (cancelled || !res.ok) return;
+        const grouped = new Map<string, { id: string; name: string }[]>();
+        for (const m of res.mappings) {
+          const list = grouped.get(m.parentBottleId);
+          if (list) list.push({ id: m.childBottleId, name: m.childBottleName });
+          else grouped.set(m.parentBottleId, [{ id: m.childBottleId, name: m.childBottleName }]);
+        }
+        const next = new Map<string, string>();
+        for (const [parentId, children] of grouped) {
+          if (children.length === 0) continue;
+          const first = [...children].sort((a, b) =>
+            String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
+          )[0];
+          next.set(parentId, first.name);
+        }
+        setChildNameByParent(next);
+      })
+      .catch(() => { /* keep the report correct without packing names */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  /** Packing name for a stored (parent/configured) bottle id, or '' if unmapped. */
+  const packingNameFor = useCallback((bottleId: string): string => {
+    const id = String(bottleId ?? '').trim();
+    return id ? (childNameByParent.get(id) ?? '') : '';
+  }, [childNameByParent]);
+
   const [hourly, setHourly] = useState<QualityDayHourly>({});
   // The date the stored `hourly` was loaded for. Rows are only ever built
   // from it while it matches the selected date, so a date change can never
@@ -809,6 +900,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
           bottleName: bottleNameFor(run.bottleId, bottles),
+          packingName: packingNameFor(run.bottleId),
           weight,
           speed,
           asPerSpeedUnits: theoreticalTotal,
@@ -823,7 +915,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       }
     }
     return out;
-  }, [dayHourly, machines, bottles]);
+  }, [dayHourly, machines, bottles, packingNameFor]);
 
   // Total row — Efficiency % is weighted from total actual / total expected
   // production units, never an average of the row Efficiency % values and
@@ -910,20 +1002,40 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       })
       : deriveJobSourcesFromDay(dayHourly, dateKey);
 
+    // Actual start of each job segment's first production entry on this date
+    // (minute level for manual splits), used for the Time of Starting column.
+    // Matched on machine + Job ID + bottle so two bottles running under one
+    // job id each keep their own start instead of both showing the first
+    // bottle's time. A segment with no matching entry (e.g. a job that began
+    // on an earlier date) keeps the endpoint's own start — never a default.
+    const startLabels = jobStartLabels(dayHourly);
+
     return source
-      .map((s) => ({
-        key: `${s.machineNo}-${s.jobId}-${s.bottleId}`,
-        machineNo: s.machineNo,
-        bottleId: s.bottleId,
-        itemName: bottleNameFor(s.bottleId, bottles),
-        dateText: fmtDateSlash(s.startDate),
-        timeText: fmtTime12(s.startDate),
-        startSort: s.startSort,
-        units: s.units,
-        remark: s.remark,
-      }))
+      .map((s) => {
+        // The displayed start is the segment's first production entry on the
+        // selected date. A continuing job that began on an earlier day keeps
+        // the job endpoint's true start date/time untouched.
+        let startDate = s.startDate;
+        const dayStartLabel = startLabels.get(`${s.machineNo}|${s.jobId}|${s.bottleId}`);
+        if (dayStartLabel && toIso(s.startDate) === dateKey) {
+          const parsed = parseSlotDate(dateKey, dayStartLabel);
+          if (parsed) startDate = parsed;
+        }
+        return {
+          key: `${s.machineNo}-${s.jobId}-${s.bottleId}`,
+          machineNo: s.machineNo,
+          bottleId: s.bottleId,
+          itemName: bottleNameFor(s.bottleId, bottles),
+          packingName: packingNameFor(s.bottleId),
+          dateText: fmtDateSlash(startDate),
+          timeText: fmtTime12(startDate),
+          startSort: overnightShift(startDate),
+          units: s.units,
+          remark: s.remark,
+        };
+      })
       .sort((a, b) => a.machineNo - b.machineNo || b.startSort.getTime() - a.startSort.getTime());
-  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles]);
+  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles, packingNameFor]);
 
   const thStyle = (last = false): React.CSSProperties => ({
     padding: '7px 6px',
@@ -966,7 +1078,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           [${PRINT_HIDDEN_ATTR}] { display: none !important; }
 
           /* Screen-only chrome is dropped and the table is given the full
-             landscape page width, so all 15 columns print instead of being
+             landscape page width, so all 16 columns print instead of being
              clipped by the screen min-width / horizontal scroller. */
           .dppr-print-root { margin-top: 0 !important; }
           .dppr-print-root .dppr-card { border: none !important; border-radius: 0 !important; box-shadow: none !important; }
@@ -1094,11 +1206,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
         {/* Report table */}
         <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1300px' }}>
+          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1450px' }}>
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th rowSpan={2} style={{ ...thStyle(), width: '54px', borderBottom: `2px solid ${C.border}` }}>M/c No</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '132px', borderBottom: `2px solid ${C.border}` }}>Bottle Name</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packing Name</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
                 <th colSpan={2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>As Per Speed</th>
@@ -1127,6 +1240,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                   <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.bottleName || undefined}>
                     {r.bottleName || '—'}
                   </td>
+                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.packingName || undefined}>
+                    {r.packingName || '—'}
+                  </td>
                   <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
                   <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
                   <td style={td}>{fmtUnits(r.asPerSpeedUnits)}</td>
@@ -1145,7 +1261,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
               {/* Total row — weighted from totals, never an average of efficiencies */}
               <tr className="dppr-total" style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td style={{ ...td, fontWeight: 700 }} colSpan={2}>Total</td>
+                <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
                 <td style={td} />
                 <td style={td} />
                 <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.asPerSpeedUnits)}</td>
@@ -1194,11 +1310,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
           {jobLoadedKey === dateKey && jobWiseRows.length > 0 && (
             <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-              <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
+              <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '940px' }}>
                 <thead>
                   <tr style={{ backgroundColor: C.headerBg }}>
                     <th style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>M/c</th>
                     <th style={{ ...thStyle(), width: '240px', borderBottom: `2px solid ${C.border}` }}>Item Description</th>
+                    <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Packing Name</th>
                     <th style={{ ...thStyle(), width: '130px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
                     <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
                     <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
@@ -1211,6 +1328,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                       <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
                       <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.itemName || undefined}>
                         {r.itemName || '—'}
+                      </td>
+                      <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.packingName || undefined}>
+                        {r.packingName || '—'}
                       </td>
                       <td style={td}>{r.dateText}</td>
                       <td style={td}>{r.timeText}</td>

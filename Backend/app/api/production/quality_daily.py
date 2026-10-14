@@ -202,6 +202,70 @@ def _physical_dt(production_date: date, value: Any) -> Optional[datetime]:
     return base
 
 
+def _timeline_minutes(slot: dtime) -> int:
+    """Minutes since the 9 AM production-day start (9:00 AM = 0 … 8:59 AM next day)."""
+    mins = slot.hour * 60 + slot.minute
+    nine_am = 9 * 60
+    return mins + 24 * 60 - nine_am if mins < nine_am else mins - nine_am
+
+
+def _slot_from_timeline_minutes(mins: int) -> dtime:
+    """Clock time of a production-timeline minute offset (9:00 AM = 0)."""
+    total = (9 * 60 + mins) % (24 * 60)
+    return dtime(total // 60, total % 60)
+
+
+def _period_start_stamp(
+    db: Session,
+    stamp: datetime,
+    machine_no: int,
+    split_cache: Dict[Tuple[date, int], List[dtime]],
+) -> datetime:
+    """Start of the period the hourly row stamped by ``stamp`` actually covers.
+
+    The Quality Table's Time column shows every row as ``previous key – own
+    key``: an hourly row keyed 10:00 AM covers 9:00–10:00 AM, and after a
+    manual split at 12:35 the row keyed 1:00 PM covers 12:35–1:00 PM. The
+    previous key is therefore the row's ACTUAL start — never the shift start,
+    the report date or any other default — and it is what the job-wise summary
+    must report.
+
+    The previous key is the previous hourly label of the 24-slot grid unless a
+    manual split sits inside that hour, in which case the split's own
+    minute-level key wins (so a job starting at 12:35 reports 12:35, not 12:00).
+    The day's very first row has no earlier period, so its own time is kept.
+    ``split_cache`` memoises each (production date, machine) split key set for
+    the request, since several rows of one date usually share it.
+    """
+    own = stamp.time().replace(second=0, microsecond=0)
+    timeline = _timeline_minutes(own)
+    if timeline == 0:
+        return stamp
+    best = ((timeline - 1) // 60) * 60
+    cache_key = (stamp.date(), machine_no)
+    if cache_key not in split_cache:
+        splits: List[dtime] = []
+        report = db.query(HourlyProductionReport).filter_by(production_date=stamp.date()).first()
+        if report is not None:
+            for row in db.query(HourlyProduction).filter_by(
+                report_id=report.report_id, machine_no=machine_no
+            ).all():
+                slot = _norm_time(row.production_time)
+                if slot is not None and slot not in SLOT_SHIFT_IDS:
+                    splits.append(slot)
+        split_cache[cache_key] = splits
+    for split in split_cache[cache_key]:
+        split_timeline = _timeline_minutes(split)
+        if best < split_timeline < timeline:
+            best = split_timeline
+    # Date part stays the row's PRODUCTION date and only the clock time moves —
+    # the same "production date + slot clock time" rule the summary's other
+    # timestamps and the frontend's parseSlotDate() use, so an overnight row's
+    # 11:00 PM period start reads as 11:00 PM of the same production date and
+    # never slips onto the previous calendar day.
+    return datetime.combine(stamp.date(), _slot_from_timeline_minutes(best))
+
+
 def _entry_units(entry: HourlyProduction) -> int:
     """Actual bottles of one hourly row — identical to the frontend's
     hourlyUnits(): packing size x cartons when both are positive, otherwise the
@@ -407,6 +471,18 @@ def get_daily_jobs(
     the total at the change: the previous segment stops at the change time,
     the new segment starts from it, and the two are never combined. A segment
     with zero actual production in its whole run is not listed at all.
+
+    ``job_start_time`` is the start of the PERIOD the segment's first entry
+    covers — the previous displayed key of that machine's production-timeline
+    grid, manual splits included — exactly the start the Quality Table's Time
+    column shows for the same row: a first entry recorded in 9:00–10:00 AM
+    starts at 9:00 AM, and a first entry recorded in 12:35–1:00 PM after a
+    12:35 split starts at 12:35 PM. It is derived from the earliest hourly row
+    of that machine + Job ID (+ bottle when one job id covers several bottles),
+    never from a shift start, the report date or any other default, and it is
+    read fresh on every request — later entries, extensions, refreshes and date
+    changes can never overwrite a job's original start.
+
     Start/end, item and status are derived from the SAME hpr hourly rows
     and hpr_job table the Quality Module already writes — no new tables and no
     change to any existing endpoint.
@@ -505,9 +581,13 @@ def get_daily_jobs(
         for job in db.query(HprJob).filter(HprJob.job_id.in_(job_ids)).all()
     }
 
-    # A job id shared across bottles on this date gets per-segment starts
-    # (each segment's own first row is its actual start); otherwise the job's
-    # true history start below, which keeps a continuing job's original start.
+    # A job id shared across bottles on this date is several summary rows, so
+    # each bottle segment starts from its OWN earliest hourly row (across the
+    # job's whole history, so a bottle that began on an earlier date keeps that
+    # start); every other job starts from the job's true history start below,
+    # which keeps a continuing job's original start. All of those starts are
+    # then converted to the start of the period the first row covers (see
+    # _period_start_stamp), never to the row's own label.
     bottles_per_job: Dict[Tuple[int, str], set] = {}
     for (m2, j2, b2) in candidates:
         if b2 is not None:
@@ -544,9 +624,11 @@ def get_daily_jobs(
     #    bottle change) through the selected report date — a still-running job
     #    keeps accumulating from its original start instead of resetting at
     #    midnight; the bottle shown is the one produced that day, while
-    #    start/end come from the job's full history so a previous job on a
+    #    start/end come from the job's full history (each bottle segment's own
+    #    rows when one job id covers several bottles) so a previous job on a
     #    job-change day still shows its true bottle, start date and time. A
     #    segment with zero actual production in its whole run is not listed.
+    split_cache: Dict[Tuple[date, int], List[dtime]] = {}
     built: List[Tuple[datetime, QualityJobRowSchema]] = []
     for machine_no, jid, bkey in candidates:
         entries = rows_by_job.get((machine_no, jid), [])
@@ -565,9 +647,24 @@ def get_daily_jobs(
         # only a fallback when the day rows carry no bottle.
         bottle_id: Optional[int] = bkey
 
-        for entry, production_date in entries:
-            if bottle_id is None and entry.bottle_id is not None:
-                bottle_id = int(entry.bottle_id)
+        # One job id shared by several bottles on the date is several summary
+        # rows, so each row starts with the earliest row that ran ITS bottle —
+        # across the job's whole history, so a bottle that began on an earlier
+        # date keeps that original start instead of restarting at the selected
+        # date's first row. A single-bottle job keeps the job's history start.
+        seg_entries = entries
+        if len(bottles_per_job.get((machine_no, jid), set())) > 1:
+            if bkey is None:
+                same_bottle = [(e, d) for e, d in entries if e.bottle_id is None]
+            else:
+                same_bottle = [
+                    (e, d) for e, d in entries
+                    if e.bottle_id is not None and int(e.bottle_id) == bkey
+                ]
+            if same_bottle:
+                seg_entries = same_bottle
+
+        for entry, production_date in seg_entries:
             phys = _physical_dt(production_date, entry.production_time)
             if phys is None:
                 continue
@@ -576,8 +673,27 @@ def get_daily_jobs(
             stamp = datetime.combine(production_date, phys.time())
             if start_phys is None or phys < start_phys:
                 start_phys, start_stamp = phys, stamp
+
+        if start_phys is None and seg_entries is not entries:
+            # None of this segment's own rows carried a usable timestamp — the
+            # job's history start is the next source, never a blank/default one.
+            for entry, production_date in entries:
+                phys = _physical_dt(production_date, entry.production_time)
+                if phys is None:
+                    continue
+                stamp = datetime.combine(production_date, phys.time())
+                if start_phys is None or phys < start_phys:
+                    start_phys, start_stamp = phys, stamp
+
+        for entry, production_date in entries:
+            if bottle_id is None and entry.bottle_id is not None:
+                bottle_id = int(entry.bottle_id)
+            phys = _physical_dt(production_date, entry.production_time)
+            if phys is None:
+                continue
+            end_stamp_candidate = datetime.combine(production_date, phys.time())
             if end_phys is None or phys > end_phys:
-                end_phys, end_stamp = phys, stamp
+                end_phys, end_stamp = phys, end_stamp_candidate
 
         if start_phys is None or start_stamp is None:
             # Every timestamp of the job failed to parse — the job table's own
@@ -585,17 +701,15 @@ def get_daily_jobs(
             if meta is None or meta.job_start_time is None:
                 continue
             start_stamp = meta.job_start_time
-        if len(bottles_per_job.get((machine_no, jid), set())) > 1:
-            # Shared id: each bottle segment starts when its own day rows
-            # start (day rows are timeline-ordered, so [0] is the first).
-            seg_rows = day_rows_by_jb.get((machine_no, jid, bkey), [])
-            if seg_rows:
-                seg_phys = _physical_dt(query_date, seg_rows[0].production_time)
-                if seg_phys is not None:
-                    start_phys = seg_phys
-                    start_stamp = datetime.combine(query_date, seg_phys.time())
         if meta is not None and bottle_id is None and meta.bottle_id is not None:
             bottle_id = int(meta.bottle_id)
+
+        # Time of Starting = the start of the period the first entry covers,
+        # exactly what the Quality Table's Time column shows for that row, so a
+        # job first recorded in 9:00–10:00 reports 9:00 AM and a job first
+        # recorded in 12:35–1:00 reports 12:35 PM — never the shift start, the
+        # report date or a rounded hour.
+        start_stamp = _period_start_stamp(db, start_stamp, machine_no, split_cache)
 
         # Cumulative production over this segment's window of the job's full
         # history through the selected date: the job's rows from its true

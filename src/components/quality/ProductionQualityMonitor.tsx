@@ -793,16 +793,21 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
 // ── Hourly Production bottle dropdown ───────────────────────────────────────
 // One selectable bottle. `value` is the bottle id that is actually stored and
 // saved (the configured/parent bottle, so configuration mappings and saved
-// production data keep working unchanged); `label` is the name shown to the
-// operator. When a configured bottle is a parent whose mapped children define
-// the operator-facing name, one option is listed per child showing that
-// child's bottle_name — the parent id is used only for identity/config, never
-// displayed. `key` is unique per option (`parentId::childId`); `value` repeats
+// production data keep working unchanged); `label` is the combined name shown
+// to the operator. When a configured bottle is a parent whose mapped children
+// define the packing name, one option is listed per child showing BOTH the
+// parent's bottle name (the "Bottle Name") and that child's bottle_name (the
+// "Packing Name"). The parent id is used only for identity/config, never
+// changed. `key` is unique per option (`parentId::childId`); `value` repeats
 // the parent id by design.
 interface BottleOption {
   key: string;
   value: string;
   label: string;
+  /** The configured/parent bottle name — the "Bottle Name" shown to the user. */
+  bottleName: string;
+  /** The mapped child bottle name — the "Packing Name"; empty when unmapped. */
+  packingName: string;
 }
 
 /**
@@ -889,7 +894,7 @@ const BottleSearchSelect: React.FC<{
         <div
           style={{
             position: 'absolute', top: '100%', left: 0, zIndex: 60, marginTop: '2px',
-            width: '240px', maxWidth: '70vw',
+            width: '400px', maxWidth: '70vw',
             backgroundColor: C.white,
             border: `1px solid ${C.border}`,
             borderRadius: '6px',
@@ -923,12 +928,15 @@ const BottleSearchSelect: React.FC<{
                   onMouseDown={(e) => { e.preventDefault(); onChange(o.value); setOpen(false); }}
                   style={{
                     padding: '6px 10px', fontSize: '12px', color: C.textMain, cursor: 'pointer',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    whiteSpace: 'normal', wordBreak: 'break-word',
                   }}
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
                   onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
                 >
-                  {o.label}
+                  <span style={{ fontWeight: 500 }}>{o.bottleName}</span>
+                  {o.packingName && (
+                    <span style={{ color: '#272d36' }}>{`  ·  Packing: ${o.packingName}`}</span>
+                  )}
                 </div>
               ))
             )}
@@ -938,7 +946,247 @@ const BottleSearchSelect: React.FC<{
     </div>
   );
 };
+ 
+// Remarks field with hover tooltip and floating multiline editor
+const RemarksField: React.FC<{
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}> = ({ value, disabled, onChange, placeholder = 'Remarks' }) => {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+  const [editorValue, setEditorValue] = useState(value);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [editorPos, setEditorPos] = useState<{ x: number; y: number } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+ 
+  const updateTooltipPos = useCallback(() => {
+    if (inputRef.current) {
+      const rect = inputRef.current.getBoundingClientRect();
+      setTooltipPos({ x: rect.left + 8, y: rect.top - 8 });
+    }
+  }, []);
+ 
+  const updateEditorPos = useCallback(() => {
+    if (inputRef.current) {
+      const rect = inputRef.current.getBoundingClientRect();
+      const editorWidth = 400;
+      const viewportWidth = window.innerWidth;
+      let left = rect.left + 8;
+      if (left + editorWidth > viewportWidth - 16) {
+        left = viewportWidth - editorWidth - 16;
+      }
+      if (left < 8) left = 8;
+      setEditorPos({ x: left, y: rect.top - 8 });
+    }
+  }, []);
+ 
+  useEffect(() => {
+    if (showTooltip) updateTooltipPos();
+  }, [showTooltip, updateTooltipPos]);
+ 
+  useEffect(() => {
+    if (showEditor) {
+      setEditorValue(value);
+      updateEditorPos();
+      const t = window.setTimeout(() => textareaRef.current?.focus(), 0);
+      return () => window.clearTimeout(t);
+    }
+  }, [showEditor, value, updateEditorPos]);
+ 
+  useEffect(() => {
+    if (!showTooltip && !showEditor) return;
+    const handleScroll = () => {
+      if (showTooltip) updateTooltipPos();
+      if (showEditor) updateEditorPos();
+    };
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleScroll);
+    return () => {
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleScroll);
+    };
+  }, [showTooltip, showEditor, updateTooltipPos, updateEditorPos]);
+ 
+  const handleSave = () => {
+    onChange(editorValue);
+    setShowEditor(false);
+  };
+ 
+  const handleCancel = () => {
+    setEditorValue(value);
+    setShowEditor(false);
+  };
+ 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleSave();
+    } else if (e.key === 'Escape') {
+      handleCancel();
+    }
+  };
+ 
+  const handleBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      handleSave();
+    }
+  };
+ 
+  if (!value && !showEditor) {
+    return (
+      <input
+        type="text"
+        value=""
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        ref={inputRef}
+        style={{
+          width: '100%', border: '1px solid transparent', borderRadius: '4px',
+          padding: '4px 6px', fontSize: '12px', color: '#475569',
+          backgroundColor: 'transparent', outline: 'none',
+          transition: 'border-color 0.15s, background-color 0.15s',
+          cursor: disabled ? 'not-allowed' : 'text',
+        }}
+        onFocus={(e) => {
+          if (!disabled) {
+            e.currentTarget.style.borderColor = '#2563eb';
+            e.currentTarget.style.backgroundColor = '#ffffff';
+          }
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = 'transparent';
+          e.currentTarget.style.backgroundColor = 'transparent';
+        }}
+        onClick={(e) => { if (!disabled) { e.stopPropagation(); setShowEditor(true); } }}
+      />
+    );
+  }
+ 
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        type="text"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        readOnly
+        ref={inputRef}
+        style={{
+          width: '100%', border: '1px solid transparent', borderRadius: '4px',
+          padding: '4px 6px', fontSize: '12px', color: '#475569',
+          backgroundColor: 'transparent', outline: 'none',
+          transition: 'border-color 0.15s, background-color 0.15s',
+          cursor: disabled ? 'not-allowed' : 'text',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}
+        onMouseEnter={() => { if (!disabled && value) setShowTooltip(true); }}
+        onMouseLeave={() => setShowTooltip(false)}
+        onFocus={(e) => {
+          if (!disabled) {
+            e.currentTarget.style.borderColor = '#2563eb';
+            e.currentTarget.style.backgroundColor = '#ffffff';
+          }
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = 'transparent';
+          e.currentTarget.style.backgroundColor = 'transparent';
+        }}
+        onClick={(e) => { if (!disabled) { e.stopPropagation(); setShowEditor(true); } }}
+      />
+ 
+{showTooltip && value && !showEditor && tooltipPos && (
+        <div
+          ref={tooltipRef}
+          style={{
+            position: 'fixed', zIndex: 9999,
+            left: tooltipPos.x, top: tooltipPos.y,
+            transform: 'translateY(-100%)',
+            maxWidth: '400px', minWidth: '200px',
+            padding: '8px 12px',
+            fontSize: '12px', lineHeight: 1.5,
+            color: '#1e293b', backgroundColor: '#ffffff',
+            border: '1px solid #e2e8f0', borderRadius: '6px',
+            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.18)',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            pointerEvents: 'none',
+          }}
+        >
+          {value}
+        </div>
+      )}
 
+      {showEditor && editorPos && (
+        <div
+          ref={editorRef}
+          style={{
+            position: 'fixed', zIndex: 10000,
+            left: editorPos.x, top: editorPos.y,
+            transform: 'translateY(-100%)',
+            width: '400px', maxWidth: '90vw',
+            backgroundColor: '#ffffff',
+            border: '1px solid #e2e8f0', borderRadius: '8px',
+            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.22)',
+            padding: '12px',
+          }}
+        >
+          <textarea
+            ref={textareaRef}
+            value={editorValue}
+            onChange={(e) => setEditorValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onBlur={handleBlur}
+            placeholder="Enter remark..."
+            style={{
+              width: '100%', boxSizing: 'border-box', minHeight: '100px',
+              padding: '8px 10px', fontSize: '12px', fontFamily: 'inherit',
+              color: '#1e293b', backgroundColor: '#ffffff',
+              border: '1px solid #e2e8f0', borderRadius: '6px',
+              outline: 'none', resize: 'vertical',
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '10px' }}>
+            <button
+              type="button"
+              onClick={handleCancel}
+              style={{
+                padding: '6px 14px', fontSize: '12px', fontWeight: 500,
+                color: '#475569', backgroundColor: '#ffffff',
+                border: '1px solid #e2e8f0', borderRadius: '6px',
+                cursor: 'pointer', transition: 'background-color 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              style={{
+                padding: '6px 14px', fontSize: '12px', fontWeight: 500,
+                color: '#ffffff', backgroundColor: '#2563eb',
+                border: 'none', borderRadius: '6px',
+                cursor: 'pointer', transition: 'background-color 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; }}
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+ 
 // Memoized per-hourly-row <tr>. Props are referentially stable across parent
 // renders (handlers are useCallback'd, availableSections/allDefectNames are
 // cached), so typing in one row only re-renders that row instead of all 24.
@@ -1377,27 +1625,11 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td style={{ ...tdLast, padding: '4px 8px', minWidth: '120px', width: '120px' }}>
-        <input
-          type="text"
+        <RemarksField
           value={entry?.remarks ?? ''}
           disabled={fieldsDisabled}
-          onChange={(e) => patchEntry(time, { remarks: e.target.value })}
+          onChange={(v) => patchEntry(time, { remarks: v })}
           placeholder={fieldsDisabled ? '' : 'Remarks'}
-          style={{
-            width: '100%', border: '1px solid transparent', borderRadius: '4px',
-            padding: '4px 6px', fontSize: '12px', color: '#475569',
-            backgroundColor: 'transparent', outline: 'none',
-            transition: 'border-color 0.15s, background-color 0.15s',
-            cursor: fieldsDisabled ? 'not-allowed' : 'text',
-          }}
-          onFocus={(e) => {
-            e.currentTarget.style.borderColor = '#2563eb';
-            e.currentTarget.style.backgroundColor = '#ffffff';
-          }}
-          onBlur={(e) => {
-            e.currentTarget.style.borderColor = 'transparent';
-            e.currentTarget.style.backgroundColor = 'transparent';
-          }}
         />
       </td>
     </tr>
@@ -1810,23 +2042,33 @@ export const QualityControlModule: React.FC = () => {
 
   // Dropdown options for the Hourly Production grid (all four machines). A
   // configured bottle that is a parent with mapped children is listed once
-  // per child, each option showing that child's bottle_name (e.g. parent 35
-  // "100 ml Brute" with child 185 "130 ml 25 mm NECK" shows the child name);
-  // every bottle without children keeps its own name. The option VALUE stays
+  // per child, each option showing BOTH the parent's bottle_name (the "Bottle
+  // Name") and that child's bottle_name (the "Packing Name") — e.g. parent 35
+  // "100 ml Brute" with child 185 "130 ml 25 mm NECK" is shown as
+  // "100 ml Brute · Packing: 130 ml 25 mm NECK"; every bottle without children
+  // keeps its own name and carries no packing name. The option VALUE stays
   // the configured/parent bottle id, so the job identity that is saved, the
   // configuration mapping and every production calculation are unchanged —
-  // only the visible name differs. Keys are unique per child
+  // only the visible label differs. Keys are unique per child
   // (`parentId::childId`) while values intentionally repeat the parent id.
   const bottleOptions = useMemo<BottleOption[]>(() => {
     const opts: BottleOption[] = machineBottles.flatMap((bottle) => {
       const children = childrenByParent.get(bottle.id) ?? [];
       if (children.length === 0) {
-        return [{ key: bottle.id, value: bottle.id, label: bottle.name }];
+        return [{
+          key: bottle.id,
+          value: bottle.id,
+          label: bottle.name,
+          bottleName: bottle.name,
+          packingName: '',
+        }];
       }
       return children.map((child) => ({
         key: `${bottle.id}::${child.id}`,
         value: bottle.id,
-        label: child.name,
+        label: `${bottle.name} · Packing: ${child.name}`,
+        bottleName: bottle.name,
+        packingName: child.name,
       }));
     });
     return opts.sort((a, b) =>

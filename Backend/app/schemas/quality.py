@@ -147,6 +147,13 @@ class QualityJobRowSchema(BaseModel):
     job's start/end clock time: a slot between 12:00 AM and 8:59 AM belongs to
     the previous production date, so its date part is that production date,
     never the next calendar day.
+
+    job_start_time is the start of the PERIOD the segment's first hourly entry
+    covers — the previous displayed key of that machine's production-timeline
+    grid, manual splits included — exactly the start the Quality Table's Time
+    column shows for the same row (9:00 AM for a first entry in 9:00–10:00 AM,
+    12:35 PM for a first entry in 12:35–1:00 PM), never a shift start, the
+    report date or a rounded hour.
     """
     machine_no: int
     job_id: str
