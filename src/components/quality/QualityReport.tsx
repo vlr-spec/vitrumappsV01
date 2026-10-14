@@ -108,6 +108,23 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
 };
 
 /**
+ * Weight Efficiency % — draw based only.
+ *
+ *   Weight Efficiency % = (Actual Total Draw / Total Draw as per Speed) × 100
+ *
+ * Kept as a dedicated function so the existing unit-based efficiency
+ * calculations (calcUnitEfficiency and every caller) stay untouched.
+ * Returns null when the as-per-speed draw is zero, missing or non-finite so
+ * callers render '—' instead of dividing by zero.
+ */
+const calcWeightEfficiency = (actualDraw: number, asPerSpeedDraw: number): number | null => {
+  const actual = Number(actualDraw);
+  const expected = Number(asPerSpeedDraw);
+  if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
+  return (actual / expected) * 100;
+};
+
+/**
  * Applicable weight of one hourly record — stored weight_avg when present,
  * otherwise the same F/M/R average the Quality Module computes from the
  * machine's gob type.
@@ -475,6 +492,8 @@ interface MachineReportRow {
   packingName: string;
   weight: number;
   speed: number;
+  /** Actual runtime of this job segment in minutes. */
+  runtimeMinutes: number;
   asPerSpeedUnits: number;
   asPerSpeedDraw: number;
   shiftUnits: number[];
@@ -686,6 +705,24 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   const [jobLoadedKey, setJobLoadedKey] = useState<string | null>(null);
   const [jobRowsOk, setJobRowsOk] = useState(false);
 
+  // Hovered remark tooltip — follows the cursor and is shown on the LEFT side
+  // of it. `text` is the remark to display; `x`/`y` are the last cursor
+  // viewport coordinates. Null when no remark is hovered. Read-only affordance
+  // only: remark editing behaviour is unchanged.
+  const [remarkTip, setRemarkTip] = useState<{ text: string; x: number; y: number } | null>(null);
+
+  // A scroll under a hovering cursor would leave the fixed tooltip floating at
+  // stale viewport coordinates — dismiss it on any scroll instead.
+  useEffect(() => {
+    if (!remarkTip) return;
+    const hide = () => setRemarkTip(null);
+    window.addEventListener('scroll', hide, true);
+    return () => window.removeEventListener('scroll', hide, true);
+  }, [remarkTip]);
+
+  // Flip the tooltip above the cursor when there is no room below it in the viewport.
+  const remarkTipFlip = remarkTip !== null && remarkTip.y + 240 > window.innerHeight;
+
   // Print area — the only part of the page the Print button sends to the
   // printer.
   const printAreaRef = useRef<HTMLDivElement | null>(null);
@@ -896,6 +933,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         // Total Expected Production Units) × 100 — units only.
         const overallEff = calcUnitEfficiency(totalUnits, theoreticalTotal);
 
+        const runtimeMinutes = Math.round(run.points.reduce((sum, p) => sum + p.durationHours * 60, 0));
+
         out.push({
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
@@ -903,6 +942,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           packingName: packingNameFor(run.bottleId),
           weight,
           speed,
+          runtimeMinutes,
           asPerSpeedUnits: theoreticalTotal,
           asPerSpeedDraw,
           shiftUnits,
@@ -917,24 +957,26 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     return out;
   }, [dayHourly, machines, bottles, packingNameFor]);
 
-  // Total row — Efficiency % is weighted from total actual / total expected
-  // production units, never an average of the row Efficiency % values and
-  // never weight/draw. Unit/production totals above it are straight sums, and
-  // each Total Efficiency % below re-applies calcUnitEfficiency to those sums,
-  // so a short run (e.g. Machine 2's 160-min segment) can never count equally
-  // with a long run (e.g. its 780-min segment).
-  const totals = useMemo(() => {
+// Total row — Efficiency % is weighted from total actual / total expected
+// production units, never an average of the row Efficiency % values and
+// never weight/draw. Unit/production totals above it are straight sums, and
+// each Total Efficiency % below re-applies calcUnitEfficiency to those sums,
+// so a short run (e.g. Machine 2's 160-min segment) can never count equally
+// with a long run (e.g. its 780-min segment).
+const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
     const shiftTheoretical = [0, 0, 0];
     let asPerSpeedUnits = 0;
     let asPerSpeedDraw = 0;
     let actualUnits = 0;
     let actualDraw = 0;
+    let runtimeMinutes = 0;
     for (const r of rows) {
       asPerSpeedUnits += r.asPerSpeedUnits;
       asPerSpeedDraw += r.asPerSpeedDraw;
       actualUnits += r.actualUnits;
       actualDraw += r.actualDraw;
+      runtimeMinutes += r.runtimeMinutes;
       r.shiftUnits.forEach((u, i) => {
         shiftUnits[i] += u;
       });
@@ -950,10 +992,16 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     // calcUnitEfficiency — never NaN, Infinity or a division by zero.
     const shiftEff = [0, 1, 2].map((i) => calcUnitEfficiency(shiftUnits[i], shiftTheoretical[i]));
     const overallEff = calcUnitEfficiency(actualUnits, asPerSpeedUnits);
-    return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff };
+    return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff, runtimeMinutes };
   }, [rows]);
 
   const hasData = rows.some((r) => r.asPerSpeedUnits > 0 || r.actualUnits > 0);
+
+  // Weight Efficiency % for the selected day — (Actual Total Draw / Total Draw
+  // as per Speed) × 100, computed from the existing report totals above.
+  // Null-safe: a zero/missing as-per-speed draw renders as '—', never NaN,
+  // Infinity or a division by zero. Existing efficiency calculations are untouched.
+  const weightEfficiency = calcWeightEfficiency(totals.actualDraw, totals.asPerSpeedDraw);
 
   // Job-wise production summary — one row per machine + Job ID applicable to
   // the selected production date: the API rows when the job endpoint answered,
@@ -1069,7 +1117,32 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       <style>{`
         .dppr-table tbody tr:hover td { background-color: #f8fafc; }
         .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
+        .dppr-remark-text { display: block; white-space: normal; overflow-wrap: break-word; }
+        .dppr-remark-tip {
+          display: none;
+          position: absolute;
+          bottom: calc(100% + 8px);
+          right: 200px;
+          width: 320px;
+          max-width: 60vw;
+          max-height: 200px;
+          overflow-y: auto;
+          white-space: normal;
+          overflow-wrap: break-word;
+          word-break: break-word;
+          text-align: left;
+          background-color: #ffffff;
+          color: #1e293b;
+          border: 1px solid #cbd5e1;
+          border-radius: 8px;
+          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+          padding: 12px 14px;
+          font-size: 13px;
+          line-height: 1.55;
+          z-index: 60;
+        }
         @media print {
+          .dppr-remark-tip { display: none !important; }
           .dppr-table tbody tr:hover td { background-color: transparent; }
           .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
 
@@ -1206,7 +1279,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
         {/* Report table */}
         <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1450px' }}>
+          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1520px' }}>
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th rowSpan={2} style={{ ...thStyle(), width: '54px', borderBottom: `2px solid ${C.border}` }}>M/c No</th>
@@ -1214,6 +1287,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                 <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packing Name</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>MIN</th>
                 <th colSpan={2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>As Per Speed</th>
                 <th colSpan={3} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Actual Production</th>
                 <th colSpan={2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Actual Total</th>
@@ -1245,6 +1319,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                   </td>
                   <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
                   <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
+                  <td style={td}>{r.runtimeMinutes > 0 ? r.runtimeMinutes : '—'}</td>
                   <td style={td}>{fmtUnits(r.asPerSpeedUnits)}</td>
                   <td style={td}>{fmt3(r.asPerSpeedDraw)}</td>
                   <td style={td}>{fmtUnits(r.shiftUnits[0])}</td>
@@ -1264,6 +1339,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                 <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
                 <td style={td} />
                 <td style={td} />
+                <td style={td}></td>
                 <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.asPerSpeedUnits)}</td>
                 <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.asPerSpeedDraw)}</td>
                 <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[0])}</td>
@@ -1286,9 +1362,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           </div>
         )}
 
+        {/* Weight Efficiency — displayed in the space between the main report
+            table and the Job-wise Production Summary, from the existing
+            report totals above: (Actual Total Draw / Total Draw as per
+            Speed) × 100, formatted to two decimals. Existing efficiency
+            calculations are unchanged. */}
+        <div style={{ padding: '12px 14px', textAlign: 'center' }}>
+          <span style={{ fontSize: '13.5px', fontWeight: 700, color: '#1e293b' }}>
+            Weight Efficiency = {weightEfficiency === null ? '—' : `${weightEfficiency.toFixed(2)}%`}
+          </span>
+        </div>
+
         {/* Job-wise production summary — same date filter, same load/refresh,
             same card, printed with the report. One row per machine + Job ID. */}
-        <div>
+        <div style={{ marginTop: '4px' }}>
           <div
             style={{
               padding: '9px 12px',
@@ -1335,7 +1422,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                       <td style={td}>{r.dateText}</td>
                       <td style={td}>{r.timeText}</td>
                       <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.units)}</td>
-                      <td style={{ ...tdLast, textAlign: 'left', whiteSpace: 'normal' }}>{r.remark}</td>
+                      <td style={{ ...tdLast, textAlign: 'left', whiteSpace: 'normal' }}>
+                        {r.remark ? (
+                          <span
+                            className="dppr-remark-text"
+                            onMouseEnter={(e) => setRemarkTip({ text: r.remark, x: e.clientX, y: e.clientY })}
+                            onMouseMove={(e) => setRemarkTip({ text: r.remark, x: e.clientX, y: e.clientY })}
+                            onMouseLeave={() => setRemarkTip(null)}
+                          >
+                            {r.remark}
+                          </span>
+                        ) : (
+                          r.remark
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1350,6 +1450,32 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           )}
         </div>
       </div>
+
+      {/* Remark hover tooltip — fixed to the viewport on the LEFT side of the
+          cursor (its right edge sits 12px left of the cursor) and follows the
+          cursor while a remark is hovered; flips above the cursor when there
+          is no room below. Screen only: the print stylesheet hides it. */}
+      {remarkTip && (
+        <div
+          className="dppr-remark-tip"
+          role="tooltip"
+          style={{
+            position: 'fixed',
+            left: remarkTip.x,
+            top: remarkTip.y + (remarkTipFlip ? -12 : 14),
+            transform: remarkTipFlip
+              ? 'translate(calc(-100% - 12px), -100%)'
+              : 'translateX(calc(-100% - 12px))',
+            display: 'block',
+            bottom: 'auto',
+            right: 'auto',
+            margin: 0,
+            zIndex: 9999,
+          }}
+        >
+          {remarkTip.text}
+        </div>
+      )}
     </div>
   );
 };
