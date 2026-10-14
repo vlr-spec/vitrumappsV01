@@ -65,6 +65,18 @@ const C = {
   white: '#ffffff',
 };
 
+/**
+ * Very light pastel row background per machine — Daily Production Performance
+ * Report body rows only. Header, total row, Weight Efficiency strip and the
+ * job-wise table are intentionally left untinted.
+ */
+const MACHINE_ROW_BG: Record<number, string> = {
+  1: '#EFF6FF',
+  2: '#F0FDF4',
+  3: '#FFFBEB',
+  4: '#F5F3FF',
+};
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const pad = (n: number) => String(n).padStart(2, '0');
 const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -1115,8 +1127,12 @@ const totals = useMemo(() => {
     // wrapper only adds spacing — no page padding (avoids double inset).
     <div className="dppr-print-root" ref={printAreaRef} style={{ marginTop: '16px' }}>
       <style>{`
-        .dppr-table tbody tr:hover td { background-color: #f8fafc; }
+        .dppr-table tbody tr:not(.dppr-m1):not(.dppr-m2):not(.dppr-m3):not(.dppr-m4):hover td { background-color: #f8fafc; }
         .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
+        .dppr-table tbody tr.dppr-m1:hover td { background-color: #EFF6FF; }
+        .dppr-table tbody tr.dppr-m2:hover td { background-color: #F0FDF4; }
+        .dppr-table tbody tr.dppr-m3:hover td { background-color: #FFFBEB; }
+        .dppr-table tbody tr.dppr-m4:hover td { background-color: #F5F3FF; }
         .dppr-remark-text { display: block; white-space: normal; overflow-wrap: break-word; }
         .dppr-remark-tip {
           display: none;
@@ -1309,7 +1325,11 @@ const totals = useMemo(() => {
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.rowKey}>
+                <tr
+                  key={r.rowKey}
+                  className={`dppr-m${r.machineNo}`}
+                  style={{ backgroundColor: MACHINE_ROW_BG[r.machineNo] ?? 'transparent', printColorAdjust: 'exact' }}
+                >
                   <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
                   <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.bottleName || undefined}>
                     {r.bottleName || '—'}
@@ -1367,7 +1387,7 @@ const totals = useMemo(() => {
             report totals above: (Actual Total Draw / Total Draw as per
             Speed) × 100, formatted to two decimals. Existing efficiency
             calculations are unchanged. */}
-        <div style={{ padding: '12px 14px', textAlign: 'center' }}>
+        <div style={{ padding: '12px 14px', textAlign: 'right' }}>
           <span style={{ fontSize: '13.5px', fontWeight: 700, color: '#1e293b' }}>
             Weight Efficiency = {weightEfficiency === null ? '—' : `${weightEfficiency.toFixed(2)}%`}
           </span>
