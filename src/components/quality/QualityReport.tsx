@@ -1098,6 +1098,41 @@ const totals = useMemo(() => {
     // on an earlier date) keeps the endpoint's own start — never a default.
     const startLabels = jobStartLabels(dayHourly);
 
+    // Date + machine-wise remarks for the selected production date: each
+    // machine shows only its own remarks recorded in this date's hourly
+    // records, across all of that machine's jobs, in production-timeline
+    // (chronological) order with serial numbering. Job ID is never used for
+    // grouping here. Joined as one sentence-wise line in the same row cell.
+    const remarkByMachine = new Map<number, string>();
+    for (const machineNo of MACHINE_NOS) {
+      const byTime = dayHourly[String(machineNo)] ?? {};
+      const ordered = getReportOrderedKeys(byTime);
+      const texts: string[] = [];
+      const seen = new Set<string>();
+      for (const key of ordered) {
+        const t = String((byTime[key] as QualityHourlyEntry | undefined)?.remarks ?? '').trim();
+        if (t && !seen.has(t)) {
+          seen.add(t);
+          texts.push(t);
+        }
+      }
+      if (texts.length === 0) {
+        for (const s of source) {
+          if (s.machineNo !== machineNo) continue;
+          const raw = String(s.remark ?? '').trim();
+          if (!raw) continue;
+          for (const line of raw.split('\n')) {
+            const cleaned = line.replace(/^\s*\d+\.\s*/, '').trim() || line.trim();
+            if (cleaned && !seen.has(cleaned)) {
+              seen.add(cleaned);
+              texts.push(cleaned);
+            }
+          }
+        }
+      }
+      remarkByMachine.set(machineNo, texts.map((t, idx) => `${idx + 1}. ${t}`).join('  '));
+    }
+
     return source
       .map((s) => {
         // The displayed start is the segment's first production entry on the
@@ -1119,7 +1154,7 @@ const totals = useMemo(() => {
           timeText: fmtTime12(startDate),
           startSort: overnightShift(startDate),
           units: s.units,
-          remark: s.remark,
+          remark: remarkByMachine.get(s.machineNo) ?? '',
         };
       })
       .sort((a, b) => a.machineNo - b.machineNo || b.startSort.getTime() - a.startSort.getTime());

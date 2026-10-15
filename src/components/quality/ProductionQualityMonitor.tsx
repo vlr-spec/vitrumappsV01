@@ -3755,9 +3755,9 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       {/* Page title row — stable Quality Module header (never scrolls away) */}
       <div className="no-print" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#1e293b', letterSpacing: '-0.01em' }}>
+          {/* <h1 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#1e293b', letterSpacing: '-0.01em' }}>
             Hourly Production Monitor
-          </h1>
+          </h1> */}
           {/* <p style={{ margin: '2px 0 0', fontSize: '12px', color: C.textMuted }}>
             Hourly quality log — {dateLabel}{loadedDates[dateKey] ? '' : ' (loading…)'}
           </p> */}
