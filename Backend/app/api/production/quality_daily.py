@@ -278,6 +278,37 @@ def _entry_units(entry: HourlyProduction) -> int:
     return int(bottles) if bottles > 0 else 0
 
 
+def _format_job_remarks(entries: List[Tuple[HourlyProduction, date]]) -> Optional[str]:
+    """Numbered, multi-line remark list for one machine + Job ID segment.
+
+    Remarks are read from the hourly production rows themselves — the
+    ``hourly_production.remarks`` an operator types in the Quality Table's
+    Remarks column — and grouped machine-wise and job-wise, so remarks from
+    different machines or jobs are never mixed. The rows are walked in
+    production-timeline order, so the ``1.``, ``2.``, ``3.`` … numbering
+    follows the order the remarks apply; blank remarks are skipped, an
+    identical remark repeated on several hourly rows is listed once, and each
+    remark's text is preserved exactly as entered (``"\\n"`` separates the
+    lines within the single summary cell). A job with no remarks returns
+    ``None``, so its summary cell stays blank.
+    """
+    ordered = sorted(
+        entries,
+        key=lambda item: _physical_dt(item[1], item[0].production_time) or datetime.max,
+    )
+    texts: List[str] = []
+    seen: set = set()
+    for entry, _production_date in ordered:
+        text = (entry.remarks or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        texts.append(text)
+    if not texts:
+        return None
+    return "\n".join(f"{index}. {text}" for index, text in enumerate(texts, start=1))
+
+
 def _quality_job_id(machine_no: int, production_date: date) -> str:
     """Build the Quality Module Job ID for a brand-new job.
 
@@ -758,7 +789,10 @@ def get_daily_jobs(
                 job_start_time=start_stamp,
                 job_end_time=end_stamp,
                 status=(meta.status if meta is not None else "") or "",
-                remarks=(meta.remarks if meta is not None else None),
+                # All remarks of this machine + Job ID, read from the hourly
+                # production rows and numbered (1., 2., 3. …) in timeline order
+                # — never the (always empty) job-table remark.
+                remarks=_format_job_remarks(entries),
                 production_units=int(units),
             ),
         ))

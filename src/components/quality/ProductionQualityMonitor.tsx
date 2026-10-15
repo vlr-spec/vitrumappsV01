@@ -963,12 +963,30 @@ const RemarksField: React.FC<{
   const tooltipRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Last cursor position, so the tooltip can track the pointer instead of the
+  // input box and sit to its LEFT.
+  const mouseRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
  
   const updateTooltipPos = useCallback(() => {
-    if (inputRef.current) {
-      const rect = inputRef.current.getBoundingClientRect();
-      setTooltipPos({ x: rect.left + 8, y: rect.top - 8 });
-    }
+    const el = tooltipRef.current;
+    const { x: cursorX, y: cursorY } = mouseRef.current;
+    const width = el ? el.offsetWidth : 420;
+    const height = el ? el.offsetHeight : 100;
+    // ≈ 2 inches to the left of the cursor.
+    const GAP = 60;
+    const margin = 8;
+
+    // Prefer the left of the cursor, then clamp so the tooltip never leaves
+    // the viewport.
+    let left = cursorX - width - GAP;
+    if (left < margin) left = margin;
+    if (left + width > window.innerWidth - margin) left = window.innerWidth - width - margin;
+
+    let top = cursorY - height / 2;
+    if (top < margin) top = margin;
+    if (top + height > window.innerHeight - margin) top = window.innerHeight - height - margin;
+
+    setTooltipPos({ x: left, y: top });
   }, []);
  
   const updateEditorPos = useCallback(() => {
@@ -1069,7 +1087,18 @@ const RemarksField: React.FC<{
   }
  
   return (
-    <div style={{ position: 'relative' }}>
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={(e) => {
+        mouseRef.current = { x: e.clientX, y: e.clientY };
+        if (value) { setShowTooltip(true); updateTooltipPos(); }
+      }}
+      onMouseMove={(e) => {
+        mouseRef.current = { x: e.clientX, y: e.clientY };
+        if (value) { setShowTooltip(true); updateTooltipPos(); }
+      }}
+      onMouseLeave={() => setShowTooltip(false)}
+    >
       <input
         type="text"
         value={value}
@@ -1086,8 +1115,6 @@ const RemarksField: React.FC<{
           cursor: disabled ? 'not-allowed' : 'text',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}
-        onMouseEnter={() => { if (!disabled && value) setShowTooltip(true); }}
-        onMouseLeave={() => setShowTooltip(false)}
         onFocus={(e) => {
           if (!disabled) {
             e.currentTarget.style.borderColor = '#2563eb';
@@ -1107,13 +1134,13 @@ const RemarksField: React.FC<{
           style={{
             position: 'fixed', zIndex: 9999,
             left: tooltipPos.x, top: tooltipPos.y,
-            transform: 'translateY(-100%)',
-            maxWidth: '400px', minWidth: '200px',
-            padding: '8px 12px',
-            fontSize: '12px', lineHeight: 1.5,
+            width: '520px', maxWidth: '80vw',
+            maxHeight: '70vh', overflowY: 'auto',
+            padding: '16px 20px',
+            fontSize: '21px', lineHeight: 1.6,
             color: '#1e293b', backgroundColor: '#ffffff',
-            border: '1px solid #e2e8f0', borderRadius: '6px',
-            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.18)',
+            border: '1px solid #e2e8f0', borderRadius: '10px',
+            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.20)',
             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             pointerEvents: 'none',
           }}
@@ -4037,23 +4064,23 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 >          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
             <thead className="qm-sticky-head">
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '38px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '20px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Packing Timeline</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '60px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Packing Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '68px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>DEFECTS</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0, true), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '160px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
               </tr>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>F</th>

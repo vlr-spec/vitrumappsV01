@@ -161,6 +161,11 @@ class QualityJobRowSchema(BaseModel):
     job_start_time: datetime
     job_end_time: Optional[datetime] = None
     status: str = ""
+    # All remarks of this machine + Job ID, read from the hourly production
+    # rows and grouped machine-wise and job-wise into one cell: a numbered
+    # (1., 2., 3., …) newline-separated list in production-timeline order, with
+    # each remark's text preserved exactly as entered. None/blank when the job
+    # has no remarks.
     remarks: Optional[str] = None
     production_units: int = 0
 

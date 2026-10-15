@@ -183,7 +183,9 @@ export interface QualityJobRow {
   job_start_time: string;
   job_end_time: string | null;
   status: string;
-  /** Job-level remark from hpr_job — null/blank when none exists. */
+  /** All remarks of this machine + Job ID, read from the hourly production
+   *  rows and grouped into one cell: a numbered (1., 2., 3., …) newline-
+   *  separated list in production-timeline order. null/blank when none. */
   remarks: string | null;
   production_units: number;
 }

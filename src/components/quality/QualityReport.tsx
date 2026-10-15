@@ -527,6 +527,7 @@ interface JobSourceRow {
   /** Overnight-aware timeline value used only for row ordering. */
   startSort: Date;
   units: number;
+  /** All hourly remarks of this machine + Job ID, numbered in timeline order. */
   remark: string;
 }
 
@@ -544,6 +545,7 @@ interface JobWiseRow {
   timeText: string;
   startSort: Date;
   units: number;
+  /** All hourly remarks of this machine + Job ID, numbered in timeline order. */
   remark: string;
 }
 
@@ -590,6 +592,19 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
       // Zero actual production on the date is never a summary row — the job
       // must have produced to be listed, exactly as on the backend.
       if (startDate && units > 0) {
+        // Aggregate hourly remarks for this job segment (fallback path)
+        const remarks: string[] = [];
+        const seen = new Set<string>();
+        for (let j = i; j < end; j++) {
+          const re = points[j].entry.remarks;
+          if (re && typeof re === 'string') {
+            const t = re.trim();
+            if (t && !seen.has(t)) {
+              seen.add(t);
+              remarks.push(t);
+            }
+          }
+        }
         out.push({
           machineNo,
           jobId,
@@ -597,7 +612,7 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
           startDate,
           startSort: overnightShift(startDate),
           units,
-          remark: '',
+          remark: remarks.length ? remarks.map((t, idx) => `${idx + 1}. ${t}`).join('\n') : '',
         });
       }
       i = end;
@@ -945,7 +960,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         // Total Expected Production Units) × 100 — units only.
         const overallEff = calcUnitEfficiency(totalUnits, theoreticalTotal);
 
-        const runtimeMinutes = Math.round(run.points.reduce((sum, p) => sum + p.durationHours * 60, 0));
+        // MIN — actual production runtime only. A run point counts toward the
+        // runtime only when that hour actually recorded production; an empty
+        // hourly row that merely inherited the job/bottle (e.g. an idle
+        // 8:00–9:00 AM hour) no longer adds time the job did not run. Every
+        // producing row keeps its own duration (1 for an hourly row, fractional
+        // for a manual split), so a job that starts or ends partway through an
+        // hour still counts its exact elapsed minutes through to the next job's
+        // change time. Only the MIN column is affected.
+        const runtimeMinutes = Math.round(
+          run.points.reduce(
+            (sum, p) => (hourlyUnits(p.entry) > 0 ? sum + p.durationHours * 60 : sum),
+            0
+          )
+        );
 
         out.push({
           machineNo,
@@ -1299,8 +1327,8 @@ const totals = useMemo(() => {
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th rowSpan={2} style={{ ...thStyle(), width: '54px', borderBottom: `2px solid ${C.border}` }}>M/c No</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '132px', borderBottom: `2px solid ${C.border}` }}>Bottle Name</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packing Name</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '132px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>MIN</th>
@@ -1334,8 +1362,8 @@ const totals = useMemo(() => {
                   <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.bottleName || undefined}>
                     {r.bottleName || '—'}
                   </td>
-                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.packingName || undefined}>
-                    {r.packingName || '—'}
+                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.bottleName) || undefined}>
+                    {r.packingName || r.bottleName || '—'}
                   </td>
                   <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
                   <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
@@ -1421,8 +1449,8 @@ const totals = useMemo(() => {
                 <thead>
                   <tr style={{ backgroundColor: C.headerBg }}>
                     <th style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>M/c</th>
-                    <th style={{ ...thStyle(), width: '240px', borderBottom: `2px solid ${C.border}` }}>Item Description</th>
-                    <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Packing Name</th>
+                    <th style={{ ...thStyle(), width: '240px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
+                    <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
                     <th style={{ ...thStyle(), width: '130px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
                     <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
                     <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
@@ -1436,8 +1464,8 @@ const totals = useMemo(() => {
                       <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.itemName || undefined}>
                         {r.itemName || '—'}
                       </td>
-                      <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.packingName || undefined}>
-                        {r.packingName || '—'}
+                      <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.itemName) || undefined}>
+                        {r.packingName || r.itemName || '—'}
                       </td>
                       <td style={td}>{r.dateText}</td>
                       <td style={td}>{r.timeText}</td>
@@ -1450,7 +1478,12 @@ const totals = useMemo(() => {
                             onMouseMove={(e) => setRemarkTip({ text: r.remark, x: e.clientX, y: e.clientY })}
                             onMouseLeave={() => setRemarkTip(null)}
                           >
-                            {r.remark}
+                            {r.remark.split('\n').map((line, i) => (
+                              <React.Fragment key={i}>
+                                {i > 0 && <br />}
+                                {line}
+                              </React.Fragment>
+                            ))}
                           </span>
                         ) : (
                           r.remark
@@ -1490,6 +1523,7 @@ const totals = useMemo(() => {
             bottom: 'auto',
             right: 'auto',
             margin: 0,
+            whiteSpace: 'pre-line',
             zIndex: 9999,
           }}
         >
