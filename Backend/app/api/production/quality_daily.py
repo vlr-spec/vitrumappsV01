@@ -278,7 +278,7 @@ def _entry_units(entry: HourlyProduction) -> int:
     return int(bottles) if bottles > 0 else 0
 
 
-def _format_job_remarks(entries: List[Tuple[HourlyProduction, date]]) -> Optional[str]:
+def _format_job_remarks(entries: List[Tuple[HourlyProduction, date]], for_date: Optional[date] = None) -> Optional[str]:
     """Numbered, multi-line remark list for one machine + Job ID segment.
 
     Remarks are read from the hourly production rows themselves — the
@@ -298,7 +298,9 @@ def _format_job_remarks(entries: List[Tuple[HourlyProduction, date]]) -> Optiona
     )
     texts: List[str] = []
     seen: set = set()
-    for entry, _production_date in ordered:
+    for entry, production_date in ordered:
+        if for_date is not None and production_date != for_date:
+            continue
         text = (entry.remarks or "").strip()
         if not text or text in seen:
             continue
@@ -590,7 +592,7 @@ def get_daily_jobs(
     #    original start instead of restarting every day).
     candidate_jobs = {(m, jid) for m, jid, _ in candidates}
     job_ids = list(dict.fromkeys(jid for _, jid, _ in candidates))
-    rows_by_job: Dict[Tuple[int, str], List[Tuple[HourlyProduction, date]]] = {}
+    rows_by_job: Dict[Tuple[int, str], List[Tuple[HourlyProduction, datetime.date]]] = {}
     for entry, production_date in (
         db.query(HourlyProduction, HourlyProductionReport.production_date)
         .join(
@@ -659,7 +661,7 @@ def get_daily_jobs(
     #    rows when one job id covers several bottles) so a previous job on a
     #    job-change day still shows its true bottle, start date and time. A
     #    segment with zero actual production in its whole run is not listed.
-    split_cache: Dict[Tuple[date, int], List[dtime]] = {}
+    split_cache: Dict[Tuple[datetime.date, int], List[dtime]] = {}
     built: List[Tuple[datetime, QualityJobRowSchema]] = []
     for machine_no, jid, bkey in candidates:
         entries = rows_by_job.get((machine_no, jid), [])
@@ -792,7 +794,7 @@ def get_daily_jobs(
                 # All remarks of this machine + Job ID, read from the hourly
                 # production rows and numbered (1., 2., 3. …) in timeline order
                 # — never the (always empty) job-table remark.
-                remarks=_format_job_remarks(entries),
+                remarks=_format_job_remarks(entries, for_date=query_date),
                 production_units=int(units),
             ),
         ))
