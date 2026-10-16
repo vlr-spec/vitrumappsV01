@@ -1,4 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+
+/** Event fired by the header hamburger (mobile only) to open/close the drawer. */
+export const MOBILE_SIDEBAR_EVENT = 'vitrum:toggle-sidebar';
 import {
   LayoutDashboard,
   CalendarDays,
@@ -44,6 +47,18 @@ export const Sidebar: React.FC = () => {
   const { activeModule, setActiveModule } = useERP();
   const { canReadModule, modules, logout } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(true);
+  // Mobile drawer state only: the drawer CSS lives strictly inside the
+  // mobile media query, so this is inert on desktop.
+  const [mobileOpen, setMobileOpen] = useState(false);
+  useEffect(() => {
+    const toggle = () => setMobileOpen((v) => !v);
+    window.addEventListener(MOBILE_SIDEBAR_EVENT, toggle);
+    return () => window.removeEventListener(MOBILE_SIDEBAR_EVENT, toggle);
+  }, []);
+  const goTo = (id: ActiveModule) => {
+    setActiveModule(id);
+    setMobileOpen(false);
+  };
 
   const visibleItems = (() => {
     const visible = NAV_ITEMS.filter((item) => (item.module ? canReadModule(item.module) : true));
@@ -66,15 +81,26 @@ export const Sidebar: React.FC = () => {
     return [...visible.slice(0, settingsAt), ...dynamicItems, ...visible.slice(settingsAt)];
   })();
 
+  // On mobile the open drawer always shows labels (touch has no tooltips).
+  const expanded = !isCollapsed || mobileOpen;
+
   return (
+    <>
+    {mobileOpen && (
+      <div
+        className="sidebar-backdrop vitrum-mobile-open"
+        onClick={() => setMobileOpen(false)}
+        aria-hidden="true"
+      />
+    )}
     <aside
-      className={`bg-white border-r border-slate-200 flex flex-col transition-all duration-300 relative ${
+      className={`app-sidebar bg-white border-r border-slate-200 flex flex-col transition-all duration-300 relative ${
         isCollapsed ? 'w-16' : 'w-64'
-      }`}
+      }${mobileOpen ? ' vitrum-mobile-open' : ''}`}
     >
       <button
         onClick={() => setIsCollapsed(!isCollapsed)}
-        className="absolute -right-3 top-5 w-6 h-6 bg-blue-600 border border-blue-600 rounded-full flex items-center justify-center text-white hover:bg-blue-700 shadow-sm z-20 transition-colors"
+        className="sidebar-collapse-btn absolute -right-3 top-5 w-6 h-6 bg-blue-600 border border-blue-600 rounded-full flex items-center justify-center text-white hover:bg-blue-700 shadow-sm z-20 transition-colors"
         title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
       >
         {isCollapsed ? (
@@ -92,13 +118,13 @@ export const Sidebar: React.FC = () => {
           return (
             <React.Fragment key={item.id}>
               <button
-                onClick={() => setActiveModule(item.id)}
+                onClick={() => goTo(item.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold transition-all ${
                   isActive
                     ? 'bg-blue-600 text-white shadow-xs font-bold'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                } ${isCollapsed ? 'justify-center px-0' : ''}`}
-                title={isCollapsed ? item.label : undefined}
+                } ${expanded ? '' : 'justify-center px-0'}`}
+                title={!expanded ? item.label : undefined}
               >
                 <Icon
                   className={`w-4 h-4 shrink-0 ${
@@ -106,11 +132,11 @@ export const Sidebar: React.FC = () => {
                   }`}
                 />
 
-                {!isCollapsed && (
+                {expanded && (
                   <span className="flex-1 text-left truncate">{item.label}</span>
                 )}
 
-                {!isCollapsed && item.badge && (
+                {expanded && item.badge && (
                   <span
                     className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
                       isActive
@@ -125,14 +151,14 @@ export const Sidebar: React.FC = () => {
 
               {item.id === 'Profile' && (
                 <button
-                  onClick={() => void logout()}
+                  onClick={() => { setMobileOpen(false); void logout(); }}
                   className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors ${
-                    isCollapsed ? 'justify-center px-0' : ''
+                    expanded ? '' : 'justify-center px-0'
                   }`}
-                  title={isCollapsed ? 'Logout' : undefined}
+                  title={!expanded ? 'Logout' : undefined}
                 >
                   <LogOut className="w-4 h-4 shrink-0" />
-                  {!isCollapsed && <span>Logout</span>}
+                  {expanded && <span>Logout</span>}
                 </button>
               )}
             </React.Fragment>
@@ -140,5 +166,6 @@ export const Sidebar: React.FC = () => {
         })}
       </div>
     </aside>
+    </>
   );
 };

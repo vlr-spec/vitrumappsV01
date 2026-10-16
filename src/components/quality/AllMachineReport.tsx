@@ -545,6 +545,7 @@ export const AllMachineReport: React.FC<{ date: Date }> = ({ date }) => {
         )}
 
         <div
+          className="amr-table-wrap"
           style={{
             minWidth: 0,
             width: '100%',

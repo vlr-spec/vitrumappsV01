@@ -564,7 +564,7 @@ export const DashboardModule: React.FC = () => {
   const { machines, bottles } = useERP();
 
   const [date, setDate] = useState<Date>(() => new Date());
-  const [childNameByParent, setChildNameByParent] = useState<Map<string, string>>(() => new Map());
+  const [childNamesByParent, setChildNamesByParent] = useState<Map<string, string[]>>(() => new Map());
   const [hourly, setHourly] = useState<QualityDayHourly>({});
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -595,24 +595,42 @@ export const DashboardModule: React.FC = () => {
           if (list) list.push({ id: m.childBottleId, name: m.childBottleName });
           else grouped.set(m.parentBottleId, [{ id: m.childBottleId, name: m.childBottleName }]);
         }
-        const next = new Map<string, string>();
+        const next = new Map<string, string[]>();
         for (const [parentId, children] of grouped) {
-          if (children.length === 0) continue;
-          const first = [...children].sort((a, b) =>
-            String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
-          )[0];
-          next.set(parentId, first.name);
+          const names = [...new Set(
+            children
+              .map((c) => String(c.name ?? '').trim())
+              .filter((n) => n.length > 0)
+          )].sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: 'base' })
+          );
+          if (names.length === 0) continue;
+          next.set(parentId, names);
         }
-        setChildNameByParent(next);
+        setChildNamesByParent(next);
       })
       .catch(() => { /* packing names stay empty */ });
     return () => { cancelled = true; };
   }, []);
 
-  const packingNameFor = useCallback((bottleId: string): string => {
+  /** Every packing (child) name for a stored (parent/configured) bottle id, or [] if unmapped. */
+  const packingNamesFor = useCallback((bottleId: string): string[] => {
     const id = String(bottleId ?? '').trim();
-    return id ? (childNameByParent.get(id) ?? '') : '';
-  }, [childNameByParent]);
+    return id ? (childNamesByParent.get(id) ?? []) : [];
+  }, [childNamesByParent]);
+
+  /**
+   * Packed Bottle Name display for one report row: every packing name in the
+   * same cell, numbered sequentially ("1. a, 2. b, 3. c"). Falls back to the
+   * row's own production bottle name when no packing name exists.
+   */
+  const formatPackedName = useCallback((packingNames: string[], fallbackBottleName: string): string => {
+    const names = (packingNames ?? [])
+      .map((n) => String(n ?? '').trim())
+      .filter((n) => n.length > 0);
+    if (names.length === 0) return String(fallbackBottleName ?? '');
+    return names.map((n, i) => `${i + 1}. ${n}`).join(', ');
+  }, []);
 
   const loadDay = useCallback(async (targetKey: string) => {
     const token = (requestRef.current += 1);
@@ -781,11 +799,12 @@ export const DashboardModule: React.FC = () => {
           );
         }
 
+        const runBottleName = bottleNameFor(run.bottleId, bottles);
         out.push({
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
-          bottleName: bottleNameFor(run.bottleId, bottles),
-          packingName: packingNameFor(run.bottleId),
+          bottleName: runBottleName,
+          packingName: formatPackedName(packingNamesFor(run.bottleId), runBottleName),
           weight,
           speed,
           runtimeMinutes,
@@ -805,7 +824,7 @@ export const DashboardModule: React.FC = () => {
       });
     }
     return out;
-  }, [dayHourly, machines, bottles, packingNameFor]);
+  }, [dayHourly, machines, bottles, packingNamesFor, formatPackedName]);
 
   const rows = useMemo<MachineReportRow[]>(
     () =>
@@ -976,12 +995,13 @@ export const DashboardModule: React.FC = () => {
           const parsed = parseSlotDate(dateKey, dayStartLabel);
           if (parsed) startDate = parsed;
         }
+        const jobItemName = bottleNameFor(s.bottleId, bottles);
         return {
           key: `${s.machineNo}-${s.jobId}-${s.bottleId}`,
           machineNo: s.machineNo,
           bottleId: s.bottleId,
-          itemName: bottleNameFor(s.bottleId, bottles),
-          packingName: packingNameFor(s.bottleId),
+          itemName: jobItemName,
+          packingName: formatPackedName(packingNamesFor(s.bottleId), jobItemName),
           dateText: fmtDateSlash(startDate),
           timeText: fmtTime12(startDate),
           startSort: overnightShift(startDate),
@@ -990,7 +1010,7 @@ export const DashboardModule: React.FC = () => {
         };
       })
       .sort((a, b) => a.machineNo - b.machineNo || b.startSort.getTime() - a.startSort.getTime());
-  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles, packingNameFor]);
+  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles, packingNamesFor, formatPackedName]);
 
   const machineProdData = useMemo(
     () =>

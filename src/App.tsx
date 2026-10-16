@@ -39,10 +39,10 @@ const MainLayout: React.FC = () => {
       <Header />
 
       {/* Main Body with Collapsible Sidebar & Content Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="app-body flex flex-1 overflow-hidden">
         <Sidebar />
 
-        <main className="flex-1 overflow-y-auto bg-[#F8FAFC] pb-6 flex flex-col justify-between">
+        <main className="app-main flex-1 overflow-y-auto bg-[#F8FAFC] pb-6 flex flex-col justify-between">
           <ErrorBoundary>
             {activeModule === 'Dashboard' && <DashboardModule />}
             {activeModule === 'Production Planning' && <PlanningModule />}
