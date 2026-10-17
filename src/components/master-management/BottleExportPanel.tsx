@@ -12,6 +12,8 @@ import { planningRepository } from '../../services/planningRepository';
  *   - production.bottle_master        → Bottle ID, Bottle Name
  *   - production.bottle_configuration → which machine(s) each bottle is set up
  *     on, plus its weight and speeds per section
+ *   - production.bottle_master.group_id (read through the existing parent/child
+ *     mapping APIs) → the Group ID column of the "All Bottle List"
  *
  * bottle_configuration holds one row per (machine, bottle, SECTION). Weight and
  * Cut/Speed are reported from the HIGHEST configured section of each
@@ -23,8 +25,11 @@ import { planningRepository } from '../../services/planningRepository';
  * first row encountered.
  *
  * "All Bottle List" is the exception: it ignores machine configuration
- * completely and lists every row of bottle_master exactly once, with only the
- * Bottle ID and Bottle Name columns.
+ * completely and lists every row of bottle_master exactly once, with the
+ * Bottle ID, Bottle Name and Group ID columns. The group id is the bottle's
+ * existing production.bottle_master.group_id value (a child points at its
+ * parent, a parent points at itself, and a NULL group id exports blank); it is
+ * only read, never written.
  *
  * This panel only ever reads: no bottle master or configuration row is created
  * or modified, so exporting can never produce a duplicate bottle.
@@ -115,10 +120,10 @@ export const BottleExportPanel: React.FC = () => {
   const isBottleList = exportMachine === ALL_BOTTLES;
 
   /**
-   * "All Bottle List" — every bottle in the database, once each, with only the
-   * Bottle ID and Bottle Name columns. Machine configuration is never read, so
-   * a bottle with no configuration rows (and one configured on several machines
-   * or sections) still appears exactly once.
+   * "All Bottle List" — every bottle in the database, once each, with the
+   * Bottle ID, Bottle Name and Group ID columns. Machine configuration is never
+   * read, so a bottle with no configuration rows (and one configured on several
+   * machines or sections) still appears exactly once.
    */
   async function handleBottleListExport() {
     setExporting(true);
@@ -129,12 +134,44 @@ export const BottleExportPanel: React.FC = () => {
         return;
       }
 
+      // The Group ID is the bottle's existing production.bottle_master.group_id
+      // value. The bottle-list API returns only id + name, so the committed
+      // group ids are recovered through the existing parent/child mapping APIs,
+      // which read the very same column (no mapping is created or changed):
+      //   - a child bottle appears in the saved mappings, and the parent it
+      //     points at IS its group_id;
+      //   - a parent bottle (group_id == bottle_id) appears in the parent list;
+      //   - any bottle left over has a NULL group_id and exports as blank.
+      const [mappingsRes, parentsRes] = await Promise.all([
+        planningRepository.fetchParentChildMappings(),
+        planningRepository.fetchParentBottles(),
+      ]);
+      if (!mappingsRes.ok) {
+        alert(mappingsRes.error || 'Failed to fetch bottle group ids.');
+        return;
+      }
+      if (!parentsRes.ok) {
+        alert(parentsRes.error || 'Failed to fetch bottle group ids.');
+        return;
+      }
+      const groupIdByChild = new Map(
+        mappingsRes.mappings.map((m) => [m.childBottleId, m.parentBottleId])
+      );
+      const selfGroupedIds = new Set(parentsRes.bottles.map((b) => b.bottle_id));
+
       // bottle_master is keyed on bottle_id so it is already unique, but key the
       // dedupe on that id anyway so a repeated row can never double up a bottle.
-      const unique = new Map<string, { bottleId: string; bottleName: string }>();
+      const unique = new Map<string, { bottleId: string; bottleName: string; groupId: string }>();
       for (const b of data.bottles) {
         if (!b.bottle_id || unique.has(b.bottle_id)) continue;
-        unique.set(b.bottle_id, { bottleId: b.bottle_id, bottleName: b.bottle_name });
+        const groupId =
+          groupIdByChild.get(b.bottle_id) ??
+          (selfGroupedIds.has(b.bottle_id) ? b.bottle_id : '');
+        unique.set(b.bottle_id, {
+          bottleId: b.bottle_id,
+          bottleName: b.bottle_name,
+          groupId,
+        });
       }
 
       const rows = [...unique.values()].sort((a, b) => compareBottleId(a.bottleId, b.bottleId));
@@ -151,16 +188,21 @@ export const BottleExportPanel: React.FC = () => {
       const worksheet = workbook.addWorksheet('All Bottle List');
       worksheet.views = [{ state: 'frozen', ySplit: 1 }];
 
-      // Bottle ID + Bottle Name only: no machine number, weight, section or
-      // cut/speed, because none of those are part of this listing.
-      worksheet.addRow(['Bottle ID', 'Bottle Name']);
+      // Bottle ID + Bottle Name + Group ID: no machine number, weight, section
+      // or cut/speed, because none of those are part of this listing.
+      worksheet.addRow(['Bottle ID', 'Bottle Name', 'Group ID']);
 
       for (const r of rows) {
         const idNum = Number(r.bottleId);
-        worksheet.addRow([isNaN(idNum) ? r.bottleId : idNum, r.bottleName]);
+        const groupIdNum = Number(r.groupId);
+        // A NULL group_id stays an empty cell; otherwise a numeric id is written
+        // as a number, exactly like Bottle ID.
+        const groupIdCell =
+          r.groupId === '' ? '' : isNaN(groupIdNum) ? r.groupId : groupIdNum;
+        worksheet.addRow([isNaN(idNum) ? r.bottleId : idNum, r.bottleName, groupIdCell]);
       }
 
-      styleWorksheet(worksheet, [14, 42]);
+      styleWorksheet(worksheet, [14, 42, 14]);
 
       const filename = 'Bottle_Master_All_Bottle_List.xlsx';
       await downloadWorkbook(workbook, filename);
@@ -333,7 +375,7 @@ export const BottleExportPanel: React.FC = () => {
           </div>
           <p className="text-[10px] text-gray-400">
             {isBottleList
-              ? 'Every bottle in the database is listed once, with Bottle ID and Bottle Name only. Machine configuration is not included.'
+              ? 'Every bottle in the database is listed once, with Bottle ID, Bottle Name and Group ID. Machine configuration is not included.'
               : isAll
                 ? 'One row per machine-bottle configuration, across all machines. Weight and Cut/Speed come from the highest section configured on each machine.'
                 : exportMachine

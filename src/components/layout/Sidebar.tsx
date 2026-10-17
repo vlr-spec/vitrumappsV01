@@ -33,7 +33,7 @@ interface MenuNavItem {
 
 const NAV_ITEMS: MenuNavItem[] = [
   { id: 'Dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'Production Planning', label: 'Production Planning', icon: CalendarDays, module: 'Production Planning', badge: 'Excel' },
+  { id: 'Production Planning', label: 'Production Planning', icon: CalendarDays, module: 'Production Planning'},
   { id: 'Master Management', label: 'Master Management', icon: Cpu, module: 'Master Management' },
   { id: 'Quality Control', label: 'Hourly Production', icon: ClipboardCheck, module: 'Quality Control' },
   { id: 'Settings', label: 'Settings', icon: Sliders },
