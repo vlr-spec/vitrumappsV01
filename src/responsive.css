@@ -1,0 +1,228 @@
+/**
+ * responsive.css — Vitrum Glass ERP mobile-only responsive overrides.
+ *
+ * STRICT RULE: every rule in this file lives inside a `max-width` media
+ * query, so the desktop / PC browser UI (layout, styling, spacing, tables,
+ * colors, fonts, positions) is never affected. No backend, database,
+ * calculation, save, lock or business logic is touched here — this file only
+ * re-flows existing components for narrow viewports.
+ *
+ * Strategy per broken area:
+ * - Page shell: kill page-level horizontal overflow (`overflow-x: clip` does
+ *   NOT create a scroll container, so sticky table headers keep working).
+ * - Sidebar: off-canvas drawer on mobile, toggled by the header hamburger
+ *   (`.mobile-nav-toggle`, hidden on desktop).
+ * - Wide tables: keep their readable desktop min-widths and scroll inside
+ *   their own dedicated container (`overflow: auto` + `-webkit-overflow-
+ *   scrolling`), so the page itself never grows wider than the viewport and
+ *   headers stay aligned with their cells while scrolling.
+ */
+
+/* Hidden on desktop by default; revealed only inside the mobile queries. */
+.mobile-nav-toggle {
+  display: none;
+}
+.sidebar-backdrop {
+  display: none;
+}
+
+/* ─── Tablets / large phones and below ─────────────────────────────── */
+@media (max-width: 768px) {
+  /* Page must never become wider than the viewport. `clip` (unlike
+     `hidden`/`auto`) creates no scroll container, so `position: sticky`
+     table headers elsewhere keep resolving against the page scroll. */
+  html,
+  body {
+    overflow-x: clip;
+  }
+  #root {
+    min-width: 0;
+  }
+
+  /* ── App shell ── */
+  .app-body {
+    overflow: visible;
+  }
+  .app-main {
+    overflow: visible !important;
+    min-width: 0 !important;
+  }
+
+  /* ── Sidebar drawer (mobile only) ── */
+  .app-sidebar {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    height: 100dvh !important;
+    z-index: 60 !important;
+    width: min(78vw, 260px) !important;
+    transform: translateX(-110%) !important;
+    transition: transform 0.25s ease !important;
+    box-shadow: none !important;
+  }
+  .app-sidebar.vitrum-mobile-open {
+    transform: translateX(0) !important;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.25) !important;
+  }
+  .app-sidebar.vitrum-mobile-open .sidebar-collapse-btn {
+    display: none !important;
+  }
+  .sidebar-backdrop.vitrum-mobile-open {
+    display: block !important;
+    position: fixed !important;
+    inset: 0 !important;
+    background: rgba(15, 23, 42, 0.45) !important;
+    z-index: 55 !important;
+  }
+  .mobile-nav-toggle {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    background: #ffffff;
+    color: #1e293b;
+    cursor: pointer;
+  }
+
+  /* ── Header fits narrow screens ── */
+  .app-header {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    gap: 8px;
+  }
+  .brand-block {
+    min-width: 0 !important;
+    gap: 8px !important;
+  }
+  .brand-block h1 {
+    font-size: 14px !important;
+  }
+
+  /* ── Hourly Production Monitor ── */
+  .print-container {
+    padding: 12px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-width: 100% !important;
+  }
+  .qm-content-scroll {
+    overflow: visible !important;
+  }
+  /* Card fits the viewport; the TABLE keeps its readable desktop min-width
+     and scrolls inside .qm-table-scroll (headers stay aligned). */
+  .qm-table-card {
+    min-width: 0 !important;
+  }
+  .qm-table-scroll {
+    overflow: auto !important;
+    max-height: 75dvh !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Title + Print/Export toolbar wraps instead of clipping. */
+  .qm-title-row {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+  /* Machine tabs stay tappable and scroll horizontally, never clipped. */
+  .qm-navbar-scroll > button,
+  .qm-navbar-scroll > label {
+    min-height: 44px;
+  }
+  /* Bottle dropdown escapes the narrow scrolled cell: viewport-anchored
+     panel showing the full "packing - bottle" label, searchable input. */
+  .bottle-dropdown-panel {
+    position: fixed !important;
+    top: 120px !important;
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: 55dvh !important;
+    z-index: 80 !important;
+  }
+  .bottle-dropdown-panel input {
+    font-size: 16px !important;
+    min-height: 44px;
+  }
+  /* Touch-friendly grid controls (Remarks inputs included). */
+  .qm-table-scroll tbody button,
+  .qm-table-scroll tfoot button {
+    min-width: 40px !important;
+    min-height: 40px !important;
+  }
+  .qm-table-scroll input[type='checkbox'] {
+    width: 20px !important;
+    height: 20px !important;
+  }
+  .qm-table-scroll input[type='text'],
+  .qm-table-scroll input[type='number'],
+  .qm-table-scroll select,
+  .qm-table-scroll textarea {
+    min-height: 36px;
+  }
+
+  /* ── Reports: headers/toolbars wrap, tables scroll in their own box ── */
+  .dppr-head-row,
+  .dswr-head-row {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+  .dppr-print-root,
+  .dswr-print-root,
+  .dash-print-root {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .dswr-table-scroll {
+    overflow: auto !important;
+    max-height: 75dvh !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  .amr-table-wrap {
+    overflow: auto !important;
+    max-height: 75dvh !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* DPPR / dashboard tables already own an overflow-x scroller on desktop;
+     just guarantee momentum scrolling on touch devices. */
+  .dppr-table-scroll,
+  .dash-table-scroll {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Dialogs / popups stay inside small screens ── */
+  [role='dialog'] {
+    max-height: calc(100dvh - 32px) !important;
+    overflow-y: auto !important;
+  }
+}
+
+/* ─── Small phones (320–430px) ─────────────────────────────────────── */
+@media (max-width: 480px) {
+  .print-container {
+    padding: 8px !important;
+  }
+  .brand-sub {
+    display: none !important;
+  }
+  .app-header {
+    height: 56px !important;
+  }
+  /* Keep KPI cards readable: 2 compact columns instead of 6 squeezed. */
+  .dash-kpi-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  .dash-print-root {
+    padding: 10px 10px 14px !important;
+  }
+  /* Date/month pickers and toolbar buttons use full rows, never clipped. */
+  .qm-navbar-scroll > label,
+  .qm-navbar-scroll > div {
+    flex-shrink: 0;
+  }
+}

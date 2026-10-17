@@ -672,17 +672,18 @@ const jobStartLabels = (dayHourly: QualityDayHourly): Map<string, string> => {
 export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   const { machines, bottles } = useERP();
 
-  // ── Packing Name ──────────────────────────────────────────────────────────
-  // The Quality Table stores the configured/parent bottle id, so the "Packing
-  // Name" of a report row is the bottle_name of that bottle's mapped child,
-  // read read-only from the SAME existing parent/child mapping API the Quality
-  // grid already uses (production.bottle_master.group_id). No new database
-  // field, table or endpoint is introduced. A parent with several mapped
-  // children uses the alphabetically-first child — exactly the rule the grid's
-  // saved-row display uses — so the report and the grid always agree. A bottle
-  // without children has no packing name (rendered as '—'). Fetched once per
-  // mount; on failure the report still renders, just without packing names.
-  const [childNameByParent, setChildNameByParent] = useState<Map<string, string>>(() => new Map());
+  // ── Packing Names ─────────────────────────────────────────────────────────
+  // The Quality Table stores the configured/parent bottle id, so the "Packed
+  // Bottle Name" of a report row lists EVERY bottle_name mapped to that
+  // parent as a child, read read-only from the SAME existing parent/child
+  // mapping API the Quality grid already uses
+  // (production.bottle_master.group_id). No new database field, table or
+  // endpoint is introduced. All children stay in the same report row,
+  // numbered sequentially ("1. name, 2. name, ..."); a single child renders
+  // as "1. name". A bottle without children falls back to its own production
+  // bottle name. Fetched once per mount; on failure the report still renders,
+  // using the production bottle name as the fallback.
+  const [childNamesByParent, setChildNamesByParent] = useState<Map<string, string[]>>(() => new Map());
   useEffect(() => {
     let cancelled = false;
     planningRepository
@@ -695,25 +696,42 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           if (list) list.push({ id: m.childBottleId, name: m.childBottleName });
           else grouped.set(m.parentBottleId, [{ id: m.childBottleId, name: m.childBottleName }]);
         }
-        const next = new Map<string, string>();
+        const next = new Map<string, string[]>();
         for (const [parentId, children] of grouped) {
-          if (children.length === 0) continue;
-          const first = [...children].sort((a, b) =>
-            String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
-          )[0];
-          next.set(parentId, first.name);
+          const names = [...new Set(
+            children
+              .map((c) => String(c.name ?? '').trim())
+              .filter((n) => n.length > 0)
+          )].sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: 'base' })
+          );
+          if (names.length === 0) continue;
+          next.set(parentId, names);
         }
-        setChildNameByParent(next);
+        setChildNamesByParent(next);
       })
       .catch(() => { /* keep the report correct without packing names */ });
     return () => { cancelled = true; };
   }, []);
 
-  /** Packing name for a stored (parent/configured) bottle id, or '' if unmapped. */
-  const packingNameFor = useCallback((bottleId: string): string => {
+  /** Every packing (child) name for a stored (parent/configured) bottle id, or [] if unmapped. */
+  const packingNamesFor = useCallback((bottleId: string): string[] => {
     const id = String(bottleId ?? '').trim();
-    return id ? (childNameByParent.get(id) ?? '') : '';
-  }, [childNameByParent]);
+    return id ? (childNamesByParent.get(id) ?? []) : [];
+  }, [childNamesByParent]);
+
+  /**
+   * Packed Bottle Name display for one report row: every packing name in the
+   * same cell, numbered sequentially ("1. a, 2. b, 3. c"). Falls back to the
+   * row's own production bottle name when no packing name exists.
+   */
+  const formatPackedName = useCallback((packingNames: string[], fallbackBottleName: string): string => {
+    const names = (packingNames ?? [])
+      .map((n) => String(n ?? '').trim())
+      .filter((n) => n.length > 0);
+    if (names.length === 0) return String(fallbackBottleName ?? '');
+    return names.map((n, i) => `${i + 1}. ${n}`).join(', ');
+  }, []);
 
   const [hourly, setHourly] = useState<QualityDayHourly>({});
   // The date the stored `hourly` was loaded for. Rows are only ever built
@@ -975,11 +993,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           )
         );
 
+        const bottleName = bottleNameFor(run.bottleId, bottles);
         out.push({
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
-          bottleName: bottleNameFor(run.bottleId, bottles),
-          packingName: packingNameFor(run.bottleId),
+          bottleName,
+          packingName: formatPackedName(packingNamesFor(run.bottleId), bottleName),
           weight,
           speed,
           runtimeMinutes,
@@ -995,7 +1014,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       }
     }
     return out;
-  }, [dayHourly, machines, bottles, packingNameFor]);
+  }, [dayHourly, machines, bottles, packingNamesFor, formatPackedName]);
 
 // Total row — Efficiency % is weighted from total actual / total expected
 // production units, never an average of the row Efficiency % values and
@@ -1144,12 +1163,13 @@ const totals = useMemo(() => {
           const parsed = parseSlotDate(dateKey, dayStartLabel);
           if (parsed) startDate = parsed;
         }
+        const itemName = bottleNameFor(s.bottleId, bottles);
         return {
           key: `${s.machineNo}-${s.jobId}-${s.bottleId}`,
           machineNo: s.machineNo,
           bottleId: s.bottleId,
-          itemName: bottleNameFor(s.bottleId, bottles),
-          packingName: packingNameFor(s.bottleId),
+          itemName,
+          packingName: formatPackedName(packingNamesFor(s.bottleId), itemName),
           dateText: fmtDateSlash(startDate),
           timeText: fmtTime12(startDate),
           startSort: overnightShift(startDate),
@@ -1158,7 +1178,7 @@ const totals = useMemo(() => {
         };
       })
       .sort((a, b) => a.machineNo - b.machineNo || b.startSort.getTime() - a.startSort.getTime());
-  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles, packingNameFor]);
+  }, [jobLoadedKey, jobRowsOk, jobRows, dateKey, dayHourly, bottles, packingNamesFor, formatPackedName]);
 
   const thStyle = (last = false): React.CSSProperties => ({
     padding: '7px 6px',
@@ -1259,7 +1279,7 @@ const totals = useMemo(() => {
 
 
         {/* Header: title · shared report date (date controls live in the HRP bar above) */}
-        <div
+        <div className="dppr-head-row"
 
 
 

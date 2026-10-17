@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import officialLogo from './assets/logo.ts';
 import './index.css';
+import './responsive.css';
 
 const favicon = document.createElement('link');
 favicon.rel = 'icon';

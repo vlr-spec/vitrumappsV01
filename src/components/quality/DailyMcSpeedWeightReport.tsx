@@ -545,6 +545,7 @@ export const DailyMcSpeedWeightReport: React.FC<{ date: Date }> = ({ date }) => 
         }}
       >
         <div
+          className="dswr-head-row"
           style={{
             display: 'flex',
             alignItems: 'center',

@@ -794,19 +794,18 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
 // One selectable bottle. `value` is the bottle id that is actually stored and
 // saved (the configured/parent bottle, so configuration mappings and saved
 // production data keep working unchanged); `label` is the combined name shown
-// to the operator. When a configured bottle is a parent whose mapped children
-// define the packing name, one option is listed per child showing BOTH the
-// parent's bottle name (the "Bottle Name") and that child's bottle_name (the
-// "Packing Name"). The parent id is used only for identity/config, never
-// changed. `key` is unique per option (`parentId::childId`); `value` repeats
-// the parent id by design.
+// to the operator with the Packing Name on the LEFT and the Bottle Name on
+// the RIGHT ("packing1 / packing2 - Bottle Name"). A parent with several
+// mapped children lists ONE option joining every child name with " / " (no
+// duplicate bottle options); a bottle without children shows its own name
+// with no separator. `key` and `value` are both the parent id by design.
 interface BottleOption {
   key: string;
   value: string;
   label: string;
   /** The configured/parent bottle name — the "Bottle Name" shown to the user. */
   bottleName: string;
-  /** The mapped child bottle name — the "Packing Name"; empty when unmapped. */
+  /** All mapped child names joined with " / " — the "Packing Name(s)"; empty when unmapped. */
   packingName: string;
 }
 
@@ -859,7 +858,13 @@ const BottleSearchSelect: React.FC<{
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
-    return options.filter((o) => o.label.toLowerCase().includes(q));
+    // Searchable by both packing name and bottle name (the label already
+    // contains both, but match the parts explicitly too).
+    return options.filter((o) =>
+      o.label.toLowerCase().includes(q) ||
+      o.bottleName.toLowerCase().includes(q) ||
+      o.packingName.toLowerCase().includes(q)
+    );
   }, [options, query]);
 
   return (
@@ -892,6 +897,7 @@ const BottleSearchSelect: React.FC<{
       </button>
       {open && !disabled && (
         <div
+          className="bottle-dropdown-panel"
           style={{
             position: 'absolute', top: '100%', left: 0, zIndex: 60, marginTop: '2px',
             width: '400px', maxWidth: '70vw',
@@ -926,6 +932,7 @@ const BottleSearchSelect: React.FC<{
                 <div
                   key={o.key}
                   onMouseDown={(e) => { e.preventDefault(); onChange(o.value); setOpen(false); }}
+                  title={o.label || undefined}
                   style={{
                     padding: '6px 10px', fontSize: '12px', color: C.textMain, cursor: 'pointer',
                     whiteSpace: 'normal', wordBreak: 'break-word',
@@ -933,10 +940,7 @@ const BottleSearchSelect: React.FC<{
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
                   onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
                 >
-                  <span style={{ fontWeight: 500 }}>{o.bottleName}</span>
-                  {o.packingName && (
-                    <span style={{ color: '#272d36' }}>{`  ·  Packing: ${o.packingName}`}</span>
-                  )}
+                  <span style={{ fontWeight: 500 }}>{o.label}</span>
                 </div>
               ))
             )}
@@ -2067,36 +2071,42 @@ export const QualityControlModule: React.FC = () => {
     [getBottlesForMachine, sectionKey]
   );
 
-  // Dropdown options for the Hourly Production grid (all four machines). A
-  // configured bottle that is a parent with mapped children is listed once
-  // per child, each option showing BOTH the parent's bottle_name (the "Bottle
-  // Name") and that child's bottle_name (the "Packing Name") — e.g. parent 35
-  // "100 ml Brute" with child 185 "130 ml 25 mm NECK" is shown as
-  // "100 ml Brute · Packing: 130 ml 25 mm NECK"; every bottle without children
-  // keeps its own name and carries no packing name. The option VALUE stays
+  // Dropdown options for the Hourly Production grid (all four machines). One
+  // option per configured bottle — never duplicated when a bottle has several
+  // mapped children. A parent with children shows every child (packing) name
+  // joined with " / " on the LEFT and the parent's bottle_name on the RIGHT —
+  // e.g. parent "100 ml Brute" with children "130 ml 25 mm NECK" and
+  // "140 ml 28 mm NECK" is shown as
+  // "130 ml 25 mm NECK / 140 ml 28 mm NECK - 100 ml Brute"; a bottle without
+  // children shows its own name with no separator. The option VALUE stays
   // the configured/parent bottle id, so the job identity that is saved, the
   // configuration mapping and every production calculation are unchanged —
-  // only the visible label differs. Keys are unique per child
-  // (`parentId::childId`) while values intentionally repeat the parent id.
+  // only the visible label differs.
   const bottleOptions = useMemo<BottleOption[]>(() => {
-    const opts: BottleOption[] = machineBottles.flatMap((bottle) => {
+    const opts: BottleOption[] = machineBottles.map((bottle) => {
       const children = childrenByParent.get(bottle.id) ?? [];
-      if (children.length === 0) {
-        return [{
+      const names = [...new Set(
+        children
+          .map((child) => String(child.name ?? '').trim())
+          .filter((n) => n.length > 0)
+      )].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+      if (names.length === 0) {
+        return {
           key: bottle.id,
           value: bottle.id,
           label: bottle.name,
           bottleName: bottle.name,
           packingName: '',
-        }];
+        };
       }
-      return children.map((child) => ({
-        key: `${bottle.id}::${child.id}`,
+      const packingJoined = names.join(' / ');
+      return {
+        key: bottle.id,
         value: bottle.id,
-        label: `${bottle.name} · Packing: ${child.name}`,
+        label: `${packingJoined} - ${bottle.name}`,
         bottleName: bottle.name,
-        packingName: child.name,
-      }));
+        packingName: packingJoined,
+      };
     });
     return opts.sort((a, b) =>
       a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
@@ -3753,7 +3763,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         </p>
       </div>
       {/* Page title row — stable Quality Module header (never scrolls away) */}
-      <div className="no-print" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' }}>
+      <div className="no-print qm-title-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' }}>
         <div>
           {/* <h1 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#1e293b', letterSpacing: '-0.01em' }}>
             Hourly Production Monitor
