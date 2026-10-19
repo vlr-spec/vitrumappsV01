@@ -1,4 +1,5 @@
-export const API_BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+export const API_BASE_URL = API_BASE;
 
 const REQUEST_TIMEOUT_MS = 30000;
 
@@ -7,7 +8,8 @@ const REQUEST_TIMEOUT_MS = 30000;
  * All calls go through here so we have one place to manage headers and error handling.
  */
 export const apiFetch = async (endpoint: string, options: RequestInit = {}) => {
-    const url = endpoint.startsWith("http") ? endpoint : `${API_BASE_URL}${endpoint}`;
+    const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = endpoint.startsWith("http") ? endpoint : `${API_BASE}${cleanEndpoint}`;
 
     const headers = {
         "Content-Type": "application/json",
