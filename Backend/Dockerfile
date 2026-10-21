@@ -1,4 +1,7 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
+
+# Patch OS-level vulnerabilities in the base image
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # Set Python environment variables
 ENV PYTHONDONTWRITEBYTECODE=1

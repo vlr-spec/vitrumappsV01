@@ -14,6 +14,33 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-16 — Snyk Security Vulnerability Remediations (Containers & Dependencies)
+- **Problem:**
+  - Snyk security scans detected container vulnerabilities (outdated base image in `Backend/Dockerfile`, vulnerable `zlib 1.3.2-r0` in frontend container) and 13 unique open-source issues in `package.json` / lockfiles including `proxy-addr` (Critical), `qs` (High/Medium), `brace-expansion` (High/Medium), `dompurify` (Medium XSS), and `traverse` (Medium prototype pollution).
+- **Root Cause:**
+  - Base images had older unpatched OS package snapshots.
+  - Unused dependencies (`@google/genai`, `dotenv`, `express`, `@types/express`) were lingering in `package.json` with 0 actual code usage.
+  - Older lockfile pins satisfied existing semver ranges but lacked recent security patch releases.
+- **Fix:**
+  - `Backend/Dockerfile`: Pinned base to `python:3.11-slim-trixie` and added an OS package upgrade layer (`RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*`).
+  - `Dockerfile`: Fixed build stage casing (`as build` → `AS build`) and added `RUN apk upgrade --no-cache` to upgrade `zlib` to `1.3.2-r1`.
+  - `package.json`: Removed unused `@google/genai`, `dotenv`, `express`, and `@types/express` packages, eliminating `proxy-addr` (Critical) and `qs` (High/Medium).
+  - `package.json`: Added a scoped override for `jspdf` to use `dompurify >= 3.4.16` (resolved to `3.4.17`), resolving both `dompurify` XSS vulnerabilities.
+  - `package-lock.json` & `bun.lock`: Updated transitives to resolve `brace-expansion` to `1.1.21` (1.x) & `2.1.7` (2.x) and `traverse` to `0.3.10` within existing parent semver ranges.
+  - Bundle audit: Verified that `unzipper`, `inflight`, `glob`, and `archiver` are completely absent from client bundles in `dist/`.
+- **Files Changed:**
+  - `Backend/Dockerfile`
+  - `Dockerfile`
+  - `package.json`
+  - `package-lock.json`
+  - `bun.lock`
+  - `Changes.md`
+  - `CHANGELOG.md`
+- **API or DB Impact:**
+  - Zero API, database schema, or application logic impact. All 40 pytest backend tests and frontend Vite builds pass cleanly.
+
+---
+
 ### 2026-10-05 — Documentation Cleanup & Codebase Synchronization
 - **Problem:**
   - `DOCUMENTATION.md` contained massive duplication (sections 3-6 repeated), conflicting statements regarding implemented quality features, broken markdown formatting, environment-specific CI paths, and lacked documentation for entire database schemas (`hpr.*`, `auth.*`, `job_master`, `machine_job_sequence`).
