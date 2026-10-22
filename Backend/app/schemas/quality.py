@@ -65,6 +65,16 @@ class QualityHourlyEntrySchema(BaseModel):
     # dedicated lock endpoint does), so a client cannot unlock a row by simply
     # echoing is_locked = false in a save payload.
     is_locked: Optional[bool] = False
+    # Actual start/end labels ("3:00 PM" / "3:40 PM") of the period this hourly
+    # row covers. The frontend sends them whenever a Layer Out Time adjustment
+    # shifts the interval away from the default order-derived one. They are
+    # persisted WITHOUT any schema change by embedding the interval's real
+    # duration into the row's own production_time timestamp (see
+    # save_daily_quality / get_daily_quality) and returned on reads so the
+    # adjusted timeline — and the Layer Out minutes reconstructed from it —
+    # survives Save → Refresh → Reload.
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
 
     @field_validator(
         "bottle_id",
