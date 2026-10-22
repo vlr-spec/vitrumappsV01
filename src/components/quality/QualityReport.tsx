@@ -102,21 +102,23 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
 };
 
 /**
- * Shift/Overall Efficiency % — production-UNITS based only.
+ * Efficiency % of one hourly production segment — production-UNITS based only.
  *
- *   Shift Efficiency %   = (Shift Actual Production Units / Shift Expected Production Units) × 100
- *   Overall Efficiency % = (Total Actual Production Units / Total Expected Production Units) × 100
+ *   Efficiency % = (Segment Actual Production Units / Segment Expected Units) × 100
  *
  * "Expected Production Units" is the As-Per-Speed theoretical quantity
  * (Speed/min × 60 × Machine Gob × Duration/Hours). Weight, draw and weight
  * efficiency are never used here. Returns null when expected units are zero,
- * missing or non-finite so callers render '—' instead of dividing by zero.
+ * missing or non-finite so callers omit the segment. Actual production can
+ * exceed the rated speed, but the report follows the Quality grid's rule and
+ * never displays an efficiency above 100%.
  */
 const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number | null => {
   const actual = Number(actualUnits);
   const expected = Number(expectedUnits);
   if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
-  return (actual / expected) * 100;
+  const efficiency = (actual / expected) * 100;
+  return Number.isFinite(efficiency) ? Math.min(100, efficiency) : null;
 };
 
 /**
@@ -127,13 +129,25 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
  * Kept as a dedicated function so the existing unit-based efficiency
  * calculations (calcUnitEfficiency and every caller) stay untouched.
  * Returns null when the as-per-speed draw is zero, missing or non-finite so
- * callers render '—' instead of dividing by zero.
+ * callers render '—' instead of dividing by zero, and caps at 100% like the
+ * Quality grid.
  */
 const calcWeightEfficiency = (actualDraw: number, asPerSpeedDraw: number): number | null => {
   const actual = Number(actualDraw);
   const expected = Number(asPerSpeedDraw);
   if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
-  return (actual / expected) * 100;
+  const efficiency = (actual / expected) * 100;
+  return Number.isFinite(efficiency) ? Math.min(100, efficiency) : null;
+};
+
+/**
+ * Simple average of the row-level efficiencies, matching the Quality grid's
+ * summary calculation. Unlike a weighted actual/expected ratio, every hourly
+ * segment contributes once regardless of how many minutes it ran.
+ */
+const averageEfficiency = (values: number[]): number | null => {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
 /**
@@ -509,11 +523,13 @@ interface MachineReportRow {
   asPerSpeedUnits: number;
   asPerSpeedDraw: number;
   shiftUnits: number[];
-  shiftTheoretical: number[];
   actualUnits: number;
   actualDraw: number;
   shiftEff: (number | null)[];
   overallEff: number | null;
+  /** Per-hour segment efficiencies, averaged exactly like the Quality grid. */
+  shiftEffValues: number[][];
+  overallEffValues: number[];
 }
 
 /** One machine + Job ID before name/format resolution — shared by the job
@@ -904,7 +920,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
       for (const run of splitMachineRuns(machineNo, byTime)) {
         const shiftUnits = [0, 0, 0];
-        const shiftTheoretical = [0, 0, 0];
+        const shiftEffValues: number[][] = [[], [], []];
+        const overallEffValues: number[] = [];
         let totalUnits = 0;
         let theoreticalTotal = 0;
         let weightSum = 0;
@@ -931,9 +948,22 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           const theoretical = calculateTheoreticalBottles(speed, gob, durationHours);
 
           shiftUnits[idx] += units;
-          shiftTheoretical[idx] += theoretical;
           totalUnits += units;
           theoreticalTotal += theoretical;
+
+          // Per-hour segment efficiency, the same value the Quality grid shows
+          // for this row. The grid only calculates a row with a bottle,
+          // packing size and cartons, so segments missing any of those have no
+          // grid efficiency and are excluded from the average.
+          const packingSize = parseInt(entry.packing_size ?? '', 10);
+          const cartons = parseInt(entry.cartons ?? '', 10);
+          const gridUnits =
+            entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
+          const pointEff = gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null;
+          if (pointEff !== null) {
+            shiftEffValues[idx].push(pointEff);
+            overallEffValues.push(pointEff);
+          }
 
           if (weight !== null) {
             weightSum += weight * durationHours;
@@ -965,18 +995,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         // Actual Total Draw = Actual Total Units × Weight / 1,000,000
         const actualDraw = (weight * totalUnits) / 1_000_000;
 
-        // Shift Efficiency % (UNITS based only — never weight/draw/weight-efficiency):
-        //   Shift I/II/III Efficiency % = (Shift Actual Production Units /
-        //   Shift Expected Production Units) × 100, where Expected = that
-        //   shift's As-Per-Speed theoretical units. Every hour of the shift is
-        //   summed first (all of them here, and across the bottle rows the
-        //   Total row adds up again), so an hourly Eff% value is never copied
-        //   and several bottles in one shift are simply added. Zero or missing
-        //   expected units yield null (rendered as '—'), never a division by zero.
-        const shiftEff = shiftUnits.map((u, i) => calcUnitEfficiency(u, shiftTheoretical[i]));
-        // Overall Efficiency % = (Total Actual Production Units /
-        // Total Expected Production Units) × 100 — units only.
-        const overallEff = calcUnitEfficiency(totalUnits, theoreticalTotal);
+        // Efficiency % — the simple average of this run's per-hour segment
+        // efficiencies, exactly like the Quality grid's summary. A weighted
+        // actual/expected ratio would let a long segment outweigh a short one
+        // and disagree with the grid; every producing segment contributes once.
+        const shiftEff = shiftEffValues.map(averageEfficiency);
+        const overallEff = averageEfficiency(overallEffValues);
 
         // MIN — actual production runtime only. A run point counts toward the
         // runtime only when that hour actually recorded production; an empty
@@ -1005,26 +1029,28 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           asPerSpeedUnits: theoreticalTotal,
           asPerSpeedDraw,
           shiftUnits,
-          shiftTheoretical,
           actualUnits: totalUnits,
           actualDraw,
           shiftEff,
           overallEff,
+          shiftEffValues,
+          overallEffValues,
         });
       }
     }
     return out;
   }, [dayHourly, machines, bottles, packingNamesFor, formatPackedName]);
 
-// Total row — Efficiency % is weighted from total actual / total expected
-// production units, never an average of the row Efficiency % values and
-// never weight/draw. Unit/production totals above it are straight sums, and
-// each Total Efficiency % below re-applies calcUnitEfficiency to those sums,
-// so a short run (e.g. Machine 2's 160-min segment) can never count equally
-// with a long run (e.g. its 780-min segment).
+// Total row — quantities above are straight sums, but Efficiency % is the
+// simple average of every producing hourly segment's efficiency, exactly as
+// the Quality grid's summary calculates it. It is never a weighted
+// actual/expected ratio and never weight/draw. Collecting the per-segment
+// values (rather than averaging each run's average) keeps a machine with two
+// jobs weighted by its hours, just like the grid.
 const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
-    const shiftTheoretical = [0, 0, 0];
+    const shiftEffValues: number[][] = [[], [], []];
+    const overallEffValues: number[] = [];
     let asPerSpeedUnits = 0;
     let asPerSpeedDraw = 0;
     let actualUnits = 0;
@@ -1039,18 +1065,13 @@ const totals = useMemo(() => {
       r.shiftUnits.forEach((u, i) => {
         shiftUnits[i] += u;
       });
-      r.shiftTheoretical.forEach((t, i) => {
-        shiftTheoretical[i] += t;
+      r.shiftEffValues.forEach((values, i) => {
+        shiftEffValues[i].push(...values);
       });
+      overallEffValues.push(...r.overallEffValues);
     }
-    // Total Shift Efficiency % = (Total Shift Actual Units /
-    // Total Shift Expected Units) × 100 per shift, aggregated across every run
-    // in that shift. Total Overall Efficiency % = (Total Actual Units /
-    // Total Expected Units) × 100 over the full 24-hour reporting period.
-    // Zero or missing expected units yield null (rendered as '—') via
-    // calcUnitEfficiency — never NaN, Infinity or a division by zero.
-    const shiftEff = [0, 1, 2].map((i) => calcUnitEfficiency(shiftUnits[i], shiftTheoretical[i]));
-    const overallEff = calcUnitEfficiency(actualUnits, asPerSpeedUnits);
+    const shiftEff = shiftEffValues.map(averageEfficiency);
+    const overallEff = averageEfficiency(overallEffValues);
     return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff, runtimeMinutes };
   }, [rows]);
 
@@ -1378,12 +1399,11 @@ const totals = useMemo(() => {
 
         {/* Report table */}
         <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1520px' }}>
+          <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '1388px' }}>
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th rowSpan={2} style={{ ...thStyle(), width: '54px', borderBottom: `2px solid ${C.border}` }}>M/c No</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '132px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Bottle Name</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>MIN</th>
@@ -1414,9 +1434,6 @@ const totals = useMemo(() => {
                   style={{ backgroundColor: MACHINE_ROW_BG[r.machineNo] ?? 'transparent', printColorAdjust: 'exact' }}
                 >
                   <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
-                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.bottleName || undefined}>
-                    {r.bottleName || '—'}
-                  </td>
                   <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.bottleName) || undefined}>
                     {r.packingName || r.bottleName || '—'}
                   </td>
@@ -1439,7 +1456,7 @@ const totals = useMemo(() => {
 
               {/* Total row — weighted from totals, never an average of efficiencies */}
               <tr className="dppr-total" style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
+                <td style={{ ...td, fontWeight: 700 }} colSpan={2}>Total</td>
                 <td style={td} />
                 <td style={td} />
                 <td style={td}></td>
@@ -1500,12 +1517,11 @@ const totals = useMemo(() => {
 
           {jobLoadedKey === dateKey && jobWiseRows.length > 0 && (
             <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-              <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '940px' }}>
+              <table className="dppr-table" style={{ width: '100%', borderCollapse: 'collapse', minWidth: '700px' }}>
                 <thead>
                   <tr style={{ backgroundColor: C.headerBg }}>
                     <th style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>M/c</th>
-                    <th style={{ ...thStyle(), width: '240px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
-                    <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
+                    <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Bottle Name</th>
                     <th style={{ ...thStyle(), width: '130px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
                     <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
                     <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
@@ -1516,9 +1532,6 @@ const totals = useMemo(() => {
                   {jobWiseRows.map((r) => (
                     <tr key={r.key}>
                       <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
-                      <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.itemName || undefined}>
-                        {r.itemName || '—'}
-                      </td>
                       <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.itemName) || undefined}>
                         {r.packingName || r.itemName || '—'}
                       </td>

@@ -215,6 +215,194 @@ def _slot_from_timeline_minutes(mins: int) -> dtime:
     return dtime(total // 60, total % 60)
 
 
+def _label_from_timeline_minutes(mins: int) -> str:
+    """Canonical 12-hour grid label of a production-timeline minute offset,
+    including negative offsets of the day's first row ("8:00 AM", "7:10 AM")."""
+    total = (9 * 60 + mins) % (24 * 60)
+    hour = total // 60
+    return f"{hour % 12 or 12}:{total % 60:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+# Sanity ceiling of a row's directly stored period (12 hours) — every valid
+# Layer Out Time adjustment, split segment and third-shift carry-in stays well
+# inside it. Periods long enough only to occur on a production day's FIRST row
+# (a previous day's third shift extended beyond its 8 AM key by 61-119 minutes
+# spans 1381-1439 minutes) cannot fit the microsecond field and are stored
+# with the _PERIOD_MINUTES_OVERFLOW marker offset instead.
+_PERIOD_MINUTES_MAX = 720
+_PERIOD_MINUTES_OVERFLOW = 1320  # encoded value => period = value + 1320
+_PERIOD_MINUTES_HARD_MAX = 1440
+
+
+def _period_minutes_from_labels(
+    period_start: Optional[str],
+    period_end: Optional[str],
+) -> Optional[int]:
+    """Duration (minutes) of the period the payload row covers, parsed from the
+    frontend's period_start / period_end labels; None when absent or invalid.
+
+    This is the ONLY place the adjusted timeline of a save reaches the
+    database: the duration is embedded into the row's own production_time
+    timestamp (see _encoded_entry_dt) so the Layer Out Time of every shift
+    survives Save, Refresh and Reload without any schema change and without
+    storing the value separately.
+    """
+    if not period_start or not period_end:
+        return None
+    raw = str(period_start).strip()
+    raw_end = str(period_end).strip()
+    if not raw or not raw_end:
+        return None
+    try:
+        start = _timeline_minutes(_parse_time_string(raw))
+        end = _timeline_minutes(_parse_time_string(raw_end))
+    except ValueError:
+        return None
+    diff = end - start
+    # A first row ("8:00 AM" -> "9:00 AM") and every midnight transition wrap;
+    # one production day forward repairs both.
+    if diff <= 0:
+        diff += 24 * 60
+    # 1440 = degenerate zero-length wrap (start label == end label) -> no info.
+    if diff <= 0 or diff >= _PERIOD_MINUTES_HARD_MAX:
+        return None
+    return diff
+
+
+def _encoded_entry_dt(
+    production_date: date,
+    slot: dtime,
+    period_minutes: Optional[int],
+) -> datetime:
+    """The production_time datetime this row is persisted under.
+
+    Unadjusted rows keep their historical shape unchanged: production date +
+    the grid's time-of-day key (seconds and microseconds zero). When the row's
+    actual covered period is NOT the plain full hour — a Layer Out Time
+    adjustment, a split segment or the previous day's carried-in third-shift
+    interval — the period's real duration in minutes is embedded in the
+    timestamp's MICROSECOND field (minutes*1000, or an overflow-marker encoding
+    minutes*1000+500 for periods beyond one microsecond field).
+
+    Embedding it there instead of adding a column keeps the database schema
+    unchanged, keeps the row identity (machine + normalized time-of-day) that
+    the upsert, the lock endpoint and the unique constraint rely on, and keeps
+    every existing read path correct: they all normalize the timestamp to the
+    minute (via _norm_time) and never observe the embedded duration. The value
+    is therefore not stored separately — it rides inside the row's own saved
+    start/end timestamp.
+    """
+    key_dt = datetime.combine(production_date, slot).replace(second=0, microsecond=0)
+    if period_minutes is None or (
+        period_minutes == 60 and period_minutes < _PERIOD_MINUTES_HARD_MAX
+    ):
+        return key_dt
+    minutes = int(period_minutes)
+    if minutes <= 0 or minutes >= _PERIOD_MINUTES_HARD_MAX:
+        return key_dt
+    if minutes <= _PERIOD_MINUTES_MAX:
+        # Plain duration, always a multiple of 1000 microseconds.
+        return key_dt.replace(microsecond=minutes * 1000)
+    # Beyond the microsecond field: period value - overflow marker (the +500
+    # half-microsecond marks the offset encoding; the plain encoding is always
+    # a whole multiple of 1000, so the two can never be confused).
+    encoded = minutes - _PERIOD_MINUTES_OVERFLOW
+    if encoded <= 0 or encoded >= _PERIOD_MINUTES_HARD_MAX:
+        return key_dt
+    return key_dt.replace(microsecond=encoded * 1000 + 500)
+
+
+def _stored_period_minutes(production_time: Any) -> Optional[int]:
+    """Period duration (minutes) embedded in one row's persisted
+    production_time — the inverse of _encoded_entry_dt; None for plain rows
+    and for timestamp shapes nothing here wrote (default-shaped rows)."""
+    us: Optional[int] = None
+    if isinstance(production_time, datetime):
+        us = production_time.microsecond
+    elif isinstance(production_time, dtime):
+        us = production_time.microsecond
+    else:
+        raw = str(production_time).strip()
+        if not raw:
+            return None
+        try:
+            us = datetime.fromisoformat(raw).microsecond
+        except ValueError:
+            return None
+    if us <= 0:
+        return None
+    if us % 1000 == 500:
+        minutes = (us - 500) // 1000 + _PERIOD_MINUTES_OVERFLOW
+    elif us % 1000 == 0:
+        minutes = us // 1000
+    else:
+        return None
+    if minutes <= 0 or minutes >= _PERIOD_MINUTES_HARD_MAX:
+        return None
+    return minutes
+
+
+# Time-of-day keys of the shifts' LAST hourly row (4 PM = shift 1, 12 AM =
+# shift 2, 8 AM = shift 3). Only these rows' periods end past their own key
+# when a Layer Out Time adjustment is embedded: their interval anchors at the
+# previous displayed key, while every other row anchors at its own key.
+_SHIFT_END_SLOTS = {
+    dtime(16, 0),
+    dtime(0, 0),
+    dtime(8, 0),
+}
+
+
+def _machine_period_slots(
+    entries: List[HourlyProduction],
+) -> Dict[Tuple[int, dtime], Tuple[str, str]]:
+    """Re-derived actual period labels of every hourly row, per machine.
+
+    Walks the machine's rows in production-timeline order and chains each row's
+    start to the previous row's end; a row whose persisted timestamp embeds a
+    duration (Layer Out Time adjustment, split segment, previous-day carry-in)
+    ends that duration after its start, every other row ends at its own grid
+    key. The result reproduces exactly the adjusted timeline the frontend
+    built: a 3:00 PM hour entered with 40 Layer Out minutes reads back as
+    3:00 PM -> 3:40 PM and the next row starts at 3:40 PM — from the saved
+    timestamps alone, with no additional storage.
+    """
+    out: Dict[Tuple[int, dtime], Tuple[str, str]] = {}
+    by_machine: Dict[int, List[Tuple[dtime, Optional[int]]]] = {}
+    for entry in entries:
+        slot = _norm_time(entry.production_time)
+        if slot is None:
+            continue
+        by_machine.setdefault(int(entry.machine_no), []).append(
+            (slot, _stored_period_minutes(entry.production_time))
+        )
+    for machine_no, row_list in by_machine.items():
+        row_list.sort(key=lambda item: _timeline_minutes(item[0]))
+        prev_end: Optional[int] = None
+        for slot, minutes in row_list:
+            key = _timeline_minutes(slot)
+            if prev_end is None:
+                # No earlier row to chain from. An isolated shift-ending row
+                # anchors at the previous hour key and covers its adjusted
+                # duration there ([3:00 PM, 3:40 PM] for 40 minutes) — the
+                # labels the complete grid stamps; every other key's period is
+                # exactly as long as its embedded duration, ending at own key
+                # ([8:10 AM, 9:00 AM] for the previous day's carry-in).
+                start = key - 60 if (minutes is not None and slot in _SHIFT_END_SLOTS) else (
+                    key - minutes if minutes is not None else key - 60
+                )
+                end = start + minutes if minutes is not None else key
+            else:
+                start = prev_end
+                end = start + minutes if minutes is not None else key
+            out[(machine_no, slot)] = (
+                _label_from_timeline_minutes(start),
+                _label_from_timeline_minutes(end),
+            )
+            prev_end = end
+    return out
+
+
 def _period_start_stamp(
     db: Session,
     stamp: datetime,
@@ -387,6 +575,13 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
         selectinload(HourlyProduction.defects)
     ).filter_by(report_id=report.report_id).all()
 
+    # The persisted row keys plus the durations embedded in their
+    # production_time timestamps reconstruct the adjusted timeline: after
+    # loading saved records, period_start / period_end are returned per row
+    # (Layer Out Time adjustments included) so the frontend can rebuild the
+    # schedule and its Leher Out inputs without any additional storage.
+    period_slots = _machine_period_slots(entries)
+
     for entry in entries:
         m = str(entry.machine_no)
         response.hourly.setdefault(m, {})
@@ -404,6 +599,8 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
         # packing_category is stored as comma separated string? Frontend expects array
         pc = entry.packing_category.split(",") if entry.packing_category else []
         pc = [x.strip() for x in pc if x.strip()]
+
+        period_start, period_end = period_slots.get((entry.machine_no, slot), (None, None))
 
         candidate = QualityHourlyEntrySchema(
             entry_id=str(entry.entry_id),
@@ -431,6 +628,8 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
             job_id=entry.job_id,
             split_group_id=getattr(entry, 'split_group_id', None),
             is_locked=bool(getattr(entry, 'is_locked', False)),
+            period_start=period_start,
+            period_end=period_end,
         )
 
         # If duplicate historical rows map onto the same slot, keep whichever
@@ -994,6 +1193,23 @@ def save_daily_quality(
                 entry_dt = datetime.combine(p_date, parsed_time)
                 map_key = (machine_no, parsed_time)
 
+                # The actual period this row covers (Layer Out Time adjustment,
+                # split segment or previous-day third-shift carry-in) rides in
+                # the timestamp itself: the real duration is embedded into
+                # production_time's microsecond field, so the adjusted
+                # timeline is restored straight from the saved timestamps on
+                # the next load — with no schema change and no value stored
+                # separately. Row identity stays (machine, time-of-day to the
+                # minute), so upsert matching, lock matching and the unique
+                # constraint are untouched.
+                entry_dt = _encoded_entry_dt(
+                    p_date,
+                    parsed_time,
+                    _period_minutes_from_labels(
+                        entry_data.period_start, entry_data.period_end
+                    ),
+                )
+
                 # Check if it exists
                 entry = entry_map.get(map_key)
 
@@ -1086,6 +1302,12 @@ def save_daily_quality(
                 else:
                     entry.bottle_id = b_id
                     entry.weight_front = w_f
+                    # The timestamp always mirrors the CURRENT save: a plain
+                    # period (60-minute hour) rewrites the stored value without
+                    # an embedded duration, so a Layer Out Time the operator
+                    # removed since the last save cannot leak back into the
+                    # next reconstruction. Identity (minute key) is unchanged.
+                    entry.production_time = entry_dt
                     entry.weight_middle = w_m
                     entry.weight_rear = w_r
                     entry.weight_avg = w_a
@@ -1147,12 +1369,17 @@ def save_daily_quality(
                     continue
                 del_entry = entry_map.get((del_machine_no, del_parsed))
                 if del_entry is None:
-                    del_dt = datetime.combine(p_date, del_parsed)
-                    del_entry = db.query(HourlyProduction).filter_by(
+                    # Match on the normalized time-of-day, never on the exact
+                    # datetime: a row whose timestamp embeds a period duration
+                    # (Layer Out Time adjustment) otherwise escapes the exact
+                    # equality and the delete silently misses it.
+                    for candidate in db.query(HourlyProduction).filter_by(
                         report_id=report.report_id,
                         machine_no=del_machine_no,
-                        production_time=del_dt,
-                    ).first()
+                    ).all():
+                        if _norm_time(candidate.production_time) == del_parsed:
+                            del_entry = candidate
+                            break
                 if del_entry is not None:
                     # Deleting is a modification too: a locked row can never be
                     # dropped from a save payload, however the client got here.

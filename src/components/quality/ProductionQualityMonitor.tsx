@@ -635,7 +635,7 @@ const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[])
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
-          minWidth: '80px',
+          minWidth: '34px',
           userSelect: 'none',
         }}
       >
@@ -711,6 +711,293 @@ const fromIso = (iso: string): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
+const addDaysIso = (iso: string, delta: number): string => {
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() + delta);
+  return toIso(d);
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer Out Time — per-shift adjustment of the shift's final hourly row.
+// The value is applied to the timeline calculated from the original hourly
+// keys, so changing it always starts from the original schedule (never from a
+// previously adjusted one). Persisting it needs no dedicated storage: the
+// intervals the save stamps onto every row (period_start / period_end) carry
+// the adjusted duration, the backend embeds that duration into the row's own
+// production_time timestamp, and the next load rebuilds these inputs from the
+// periods returned for the saved rows (layerOutInputsFromSavedPeriods) — so
+// Save → Refresh → Reload keeps every entered value and the carried-over
+// previous day's Shift 3 value. In-session values always win over that rebuild
+// (layerOutTouchedRef), as unsaved edits must never be clobbered.
+// ═══════════════════════════════════════════════════════════════════════════
+const LAYER_OUT_MIN_MINUTES = 0;
+const LAYER_OUT_MAX_MINUTES = 119;
+
+/** Last hourly entry (its key is the period END) of every shift. */
+const SHIFT_LAST_HOURLY_KEY: Record<number, string> = {
+  1: '4:00 PM',
+  2: '12:00 AM',
+  3: '8:00 AM',
+};
+
+const SHIFT_BY_LAST_HOURLY_KEY: Record<string, number> = {
+  '4:00 PM': 1,
+  '12:00 AM': 2,
+  '8:00 AM': 3,
+};
+
+type LayerOutInputStore = Record<string, Record<string, Record<string, string>>>;
+type LayerOutValueMap = Record<number, number>;
+
+interface LayerOutSlot {
+  start: string;
+  end: string;
+  startMinutes: number;
+  endMinutes: number;
+  durationMinutes: number;
+}
+
+const parseLayerOutInput = (raw: string | undefined | null): { value: number; error: string } => {
+  const text = String(raw ?? '').trim();
+  if (text === '') return { value: 0, error: '' };
+  if (!/^\d+$/.test(text)) {
+    return {
+      value: 0,
+      error: 'Negative values are not allowed.',
+    };
+  }
+  const n = Number(text);
+  if (!Number.isFinite(n) || n < LAYER_OUT_MIN_MINUTES || n > LAYER_OUT_MAX_MINUTES) {
+    return { value: 0, error: '0 - 119 mins.' };
+  }
+  return { value: n, error: '' };
+};
+
+const layerOutValuesForDateMachine = (
+  inputs: LayerOutInputStore,
+  date: string,
+  machineKey: string,
+): LayerOutValueMap => {
+  const byShift = inputs[date]?.[machineKey] ?? {};
+  const out: LayerOutValueMap = {};
+  for (const shiftId of [1, 2, 3]) {
+    out[shiftId] = parseLayerOutInput(byShift[String(shiftId)]).value;
+  }
+  return out;
+};
+
+/** Formats a production-timeline minute value (9 AM = 0) as a clock label. */
+const formatTimelineMinutes = (mins: number): string =>
+  formatMinutesToLabel(mins + 9 * 60);
+
+/**
+ * The ONE reusable timeline calculation. Starting from the ORIGINAL ordered
+ * hourly/split keys it produces each row's actual [start, end] window:
+ *
+ *  - every row starts exactly when the previous row ends,
+ *  - a shift-ending row lasts the entered Layer Out minutes (0 = normal hour),
+ *  - the next shift's first row starts at that adjusted end,
+ *  - the previous production day's third-shift adjustment is carried into this
+ *    day's first row (``carryInStartMinutes``),
+ *  - a large layer-out value (up to 119 min) may cross its own hour label but is
+ *    clamped before the next key so no invalid/overlapping interval is created.
+ */
+const buildLayerOutTimeline = (
+  orderedKeys: string[],
+  layerOut: LayerOutValueMap,
+  carryInStartMinutes: number | null,
+): Record<string, LayerOutSlot> => {
+  const out: Record<string, LayerOutSlot> = {};
+  if (orderedKeys.length === 0) return out;
+
+  const firstKeyMinutes = toTimelineMinutes(orderedKeys[0]);
+  // A carry-in from the previous day's final row sits in the morning part of
+  // the timeline (e.g. 7:50 AM), i.e. numerically after this day's 9 AM key.
+  // Shift this day's keys by one production day so the intervals stay ordered.
+  const dayOffset =
+    carryInStartMinutes !== null &&
+    firstKeyMinutes !== null &&
+    carryInStartMinutes > firstKeyMinutes
+      ? 24 * 60
+      : 0;
+
+  let previousEnd: number | null = carryInStartMinutes;
+  orderedKeys.forEach((key, index) => {
+    const keyMinutes = toTimelineMinutes(key);
+    if (keyMinutes === null) {
+      const fallback = previousEnd ?? 0;
+      out[key] = {
+        start: key,
+        end: key,
+        startMinutes: fallback,
+        endMinutes: fallback,
+        durationMinutes: 0,
+      };
+      previousEnd = fallback;
+      return;
+    }
+
+    const endPosition = keyMinutes + dayOffset;
+    const startPosition =
+      index === 0
+        ? (previousEnd !== null ? previousEnd : endPosition - 60)
+        : (previousEnd as number);
+
+    let end = endPosition;
+    const shiftId = SHIFT_BY_LAST_HOURLY_KEY[key];
+    if (shiftId) {
+      const layerMinutes = Math.max(
+        LAYER_OUT_MIN_MINUTES,
+        Math.min(LAYER_OUT_MAX_MINUTES, layerOut[shiftId] ?? 0),
+      );
+      if (layerMinutes > 0) {
+        end = startPosition + layerMinutes;
+        // Never run into the next row's own time key. In the normal schedule
+        // LAYER_OUT_MAX_MINUTES keeps the end just before that key; this guard
+        // only matters when a manual split sits after the shift-ending key.
+        if (index + 1 < orderedKeys.length) {
+          const nextMinutes = toTimelineMinutes(orderedKeys[index + 1]);
+          if (nextMinutes !== null) {
+            const nextPosition = nextMinutes + dayOffset;
+            if (nextPosition <= end) {
+              end = Math.max(startPosition, nextPosition - 1);
+            }
+          }
+        }
+      }
+    }
+
+    const durationMinutes = Math.max(0, end - startPosition);
+    out[key] = {
+      start: formatTimelineMinutes(startPosition),
+      end: formatTimelineMinutes(end),
+      startMinutes: startPosition,
+      endMinutes: end,
+      durationMinutes,
+    };
+    previousEnd = end;
+  });
+
+  return out;
+};
+
+/**
+ * Carry-over from the previous production day's third shift. Only the previous
+ * day's Layer Out value affects this day, and its first row always ends at the
+ * next 9 AM key, so the previous day's final end can be calculated without
+ * recursing through older days. Month/year boundaries are normal calendar
+ * arithmetic.
+ */
+const layerOutCarryInStartMinutes = (
+  date: string,
+  machineKey: string,
+  store: Record<string, Record<string, Record<string, QualityHourlyEntry>>>,
+  inputs: LayerOutInputStore,
+): number | null => {
+  const previousDate = addDaysIso(date, -1);
+  const previousLayerOut = layerOutValuesForDateMachine(inputs, previousDate, machineKey);
+  const previousLastShiftLayerOut = previousLayerOut[3] ?? 0;
+  if (previousLastShiftLayerOut <= 0) return null;
+
+  const previousRows = store[previousDate]?.[machineKey] ?? {};
+  const previousKeys = getOrderedDisplayKeys(previousRows);
+  const previousSlots = buildLayerOutTimeline(previousKeys, previousLayerOut, null);
+  const lastKey = previousKeys[previousKeys.length - 1];
+  const lastSlot = lastKey ? previousSlots[lastKey] : undefined;
+  if (lastSlot) return lastSlot.endMinutes;
+
+  const fallbackStart = toTimelineMinutes('7:00 AM');
+  return (fallbackStart ?? 0) + previousLastShiftLayerOut;
+};
+
+const buildLayerOutTimelineForDateMachine = (
+  date: string,
+  machineKey: string,
+  store: Record<string, Record<string, Record<string, QualityHourlyEntry>>>,
+  inputs: LayerOutInputStore,
+): { orderedKeys: string[]; slots: Record<string, LayerOutSlot> } => {
+  const rows = store[date]?.[machineKey] ?? {};
+  const orderedKeys = getOrderedDisplayKeys(rows);
+  const layerOut = layerOutValuesForDateMachine(inputs, date, machineKey);
+  const carryIn = layerOutCarryInStartMinutes(date, machineKey, store, inputs);
+  return { orderedKeys, slots: buildLayerOutTimeline(orderedKeys, layerOut, carryIn) };
+};
+
+/**
+ * A saved row's real period duration (minutes) read back from the period
+ * labels the backend re-emits for it (period_start / period_end — derived from
+ * the duration the save embedded into the row's production_time timestamp).
+ * Null when the row carries no usable period. Labels that straddle midnight
+ * or the 9 AM day start are repaired by one production-day forward step, the
+ * same rule the save-side duration extraction uses.
+ */
+const layerOutDurationFromPeriod = (entry?: QualityHourlyEntry): number | null => {
+  if (!entry?.period_start || !entry?.period_end) return null;
+  const start = toTimelineMinutes(entry.period_start);
+  const end = toTimelineMinutes(entry.period_end);
+  if (start === null || end === null) return null;
+  let diff = end - start;
+  if (diff <= 0) diff += 24 * 60;
+  if (diff <= 0 || diff >= 24 * 60) return null;
+  return diff;
+};
+
+/**
+ * Rebuilds persisted Layer Out state from the periods the backend returned
+ * for a machine's loaded rows — the load-time counterpart of
+ * layerOutCarryInStartMinutes / buildLayerOutTimeline:
+ *
+ *  - perShift: each shift's saved Layer Out value, read from its shift-ending
+ *    row (4 PM / 12 AM / 8 AM). The row's real period duration IS the value;
+ *    a row that covers exactly the default hour (previous key → own key,
+ *    including rows where a following split shortens that default) means "no
+ *    adjustment" and yields none. Durations beyond one Layer Out range are
+ *    ignored — they can only come from missing rows, never an entry.
+ *  - carryMinutes: the previous production day's third-shift end, read from
+ *    this day's FIRST row (its start label is exactly where the previous
+ *    day's final row stopped; the previous day's 8 AM row runs from its 7 AM
+ *    key, so the adjustment is start − 7:00 AM). Values 0 and 60 both mean
+ *    "the previous hour ended exactly at the 8 AM key" and are equivalent on
+ *    every render — neither is reported.
+ *
+ * Rows that still show a period derived only from ordering (never saved with
+ * a real interval) carry no signal: absent values leave the session inputs
+ * untouched, so this rebuild can only ADD persisted knowledge, never drop
+ * it (unsaved session values would be lost on a reload with any implementation,
+ * exactly like unsaved cell edits).
+ */
+const layerOutInputsFromSavedPeriods = (
+  rows: Record<string, QualityHourlyEntry>,
+): { perShift: Record<number, number>; carryMinutes: number | null } => {
+  const perShift: Record<number, number> = {};
+  const orderedKeys = getOrderedDisplayKeys(rows);
+  const zeroSlots = buildLayerOutTimeline(orderedKeys, { 1: 0, 2: 0, 3: 0 }, null);
+
+  for (const [lastKey, shiftId] of Object.entries(SHIFT_BY_LAST_HOURLY_KEY)) {
+    if (!rows[lastKey]) continue;
+    const diff = layerOutDurationFromPeriod(rows[lastKey]);
+    if (diff === null) continue;
+    const defaultDuration = zeroSlots[lastKey]?.durationMinutes ?? 60;
+    if (diff === defaultDuration || diff > LAYER_OUT_MAX_MINUTES) continue;
+    perShift[shiftId] = diff;
+  }
+
+  let carryMinutes: number | null = null;
+  const firstKey = orderedKeys[0];
+  const firstRow = firstKey ? rows[firstKey] : undefined;
+  if (firstRow?.period_start) {
+    const pos = toTimelineMinutes(firstRow.period_start);
+    const base = toTimelineMinutes('7:00 AM');
+    if (pos !== null && base !== null) {
+      const carry = ((pos - base) % (24 * 60) + 24 * 60) % (24 * 60);
+      if (carry >= 1 && carry <= LAYER_OUT_MAX_MINUTES) {
+        carryMinutes = carry;
+      }
+    }
+  }
+  return { perShift, carryMinutes };
+};
+
 type DefectGroup = { group: 'Critical' | 'Major' | 'Minor'; items: string[] };
 
 const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
@@ -730,9 +1017,16 @@ const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1
   if (!e?.bottle_id || !e.packing_size || !e.cartons) return '';
   const bottlesN = parseInt(e.packing_size) * parseInt(e.cartons);
   const speed = parseFloat(e.speed_per_min);
-  const theoretical = calculateTheoreticalBottles(speed, gobCount, durationHours > 0 ? durationHours : 1);
-  if (!bottlesN || theoretical <= 0) return '';
-  return ((bottlesN / theoretical) * 100).toFixed(1);
+  // Actual row duration drives the expected production. A zero/invalid
+  // duration or a missing speed has no meaningful expected output, so the
+  // efficiency is left blank instead of dividing by zero or showing NaN.
+  if (!Number.isFinite(durationHours) || durationHours <= 0) return '';
+  const theoretical = calculateTheoreticalBottles(speed, gobCount, durationHours);
+  if (!Number.isFinite(bottlesN) || bottlesN <= 0 || !Number.isFinite(theoretical) || theoretical <= 0) return '';
+  const efficiency = (bottlesN / theoretical) * 100;
+  if (!Number.isFinite(efficiency)) return '';
+  // Efficiency is never allowed to display above 100%.
+  return Math.min(100, efficiency).toFixed(1);
 };
 
 const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): string => {
@@ -1268,6 +1562,13 @@ const QualityTimeRow = React.memo<{
   toggleRowLock: (time: string, entry?: QualityHourlyEntry) => void;
   /** Column-level lock: when true this row's checkbox cannot be changed. */
   columnLocked?: boolean;
+  /** Layer Out Time (min) for this shift, shown once in the merged shift cell. */
+  layerOutValue?: string;
+  /** Validation message for an invalid Layer Out Time entry. */
+  layerOutError?: string;
+  /** Updates this shift's Layer Out Time (persists with the shift-ending row's
+   *  save, whose stamped interval carries the adjusted duration). */
+  onLayerOutChange?: (shiftId: number, value: string) => void;
 }>(({
   time,
   displayTime,
@@ -1298,6 +1599,9 @@ const QualityTimeRow = React.memo<{
   locked,
   toggleRowLock,
   columnLocked = false,
+  layerOutValue,
+  layerOutError,
+  onLayerOutChange,
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
@@ -1387,10 +1691,95 @@ const QualityTimeRow = React.memo<{
       onMouseLeave={(e) => { setHovered(false); e.currentTarget.style.backgroundColor = baseBg; }}
     >
       {isFirstInShift && (
-        <td rowSpan={rowSpan} style={{ textAlign: 'center', verticalAlign: 'middle', borderRight: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, width: '38px', backgroundColor: SHIFT_CELL_BG[shiftIdx], padding: '0' }}>
-          <div style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)', fontSize: '10.5px', fontWeight: 700, color: SHIFT_CELL_COLOR[shiftIdx], letterSpacing: '0.08em', textTransform: 'uppercase', userSelect: 'none' }}>
+        <td
+          rowSpan={rowSpan}
+          style={{
+            position: 'relative',
+            textAlign: 'center',
+            verticalAlign: 'middle',
+            borderRight: `1px solid ${C.border}`,
+            borderBottom: `1px solid ${C.border}`,
+            width: '48px',
+            minWidth: '48px',
+            maxWidth: '48px',
+            backgroundColor: SHIFT_CELL_BG[shiftIdx],
+            padding: '6px 2px',
+            boxSizing: 'border-box',
+          }}
+        >
+          <div
+            style={{
+              fontSize: '10px',
+              fontWeight: 700,
+              color: SHIFT_CELL_COLOR[shiftIdx],
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              whiteSpace: 'nowrap',
+              lineHeight: 1.2,
+              userSelect: 'none',
+            }}
+          >
             {SHIFT_LABELS[shiftIdx]}
           </div>
+          {layerOutValue !== undefined && (
+            <div
+              style={{
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                bottom: '4px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '1px',
+                padding: '0 2px',
+                boxSizing: 'border-box',
+              }}
+            >
+              <label
+                htmlFor={`layer-out-${shiftIdx + 1}-${time}`}
+                style={{ fontSize: '10px', fontWeight: 700, color: SHIFT_CELL_COLOR[shiftIdx], letterSpacing: '0.02em', whiteSpace: 'nowrap', userSelect: 'none', lineHeight: 1.1 }}
+              >
+                Lehr Out
+              </label>
+              <input
+                id={`layer-out-${shiftIdx + 1}-${time}`}
+                type="number"
+                min={LAYER_OUT_MIN_MINUTES}
+                max={LAYER_OUT_MAX_MINUTES}
+                step={1}
+                value={layerOutValue}
+                disabled={!canEdit}
+                onChange={(e) => onLayerOutChange?.(shiftIdx + 1, e.target.value)}
+                placeholder="0"
+                title={layerOutError || "Minutes from the start of the shift's final hour to layer out (0–119). Persists with the row save: lock & check the row checkbox to keep it across refreshes."}
+                style={{
+                  width: '38px',
+                  minWidth: 0,
+                  maxWidth: '38px',
+                  boxSizing: 'border-box',
+                  padding: '2px 1px',
+                  fontSize: '18px',
+                  textAlign: 'center',
+                  color: C.textMain,
+                  backgroundColor: '#ffffff',
+                  border: `1px solid ${layerOutError ? '#fca5a5' : C.border}`,
+                  borderRadius: '4px',
+                  outline: 'none',
+                  cursor: canEdit ? 'text' : 'not-allowed',
+                  opacity: canEdit ? 1 : 0.6,
+                }}
+              />
+              {layerOutError && (
+                <span
+                  title={layerOutError}
+                  style={{ fontSize: '7px', lineHeight: 1.1, color: '#b91c1c', width: '100%', textAlign: 'center', wordBreak: 'break-word' }}
+                >
+                  {layerOutError}
+                </span>
+              )}
+            </div>
+          )}
         </td>
       )}
 
@@ -1609,7 +1998,7 @@ const QualityTimeRow = React.memo<{
         <NumInput value={entry?.speed_per_min ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { speed_per_min: v })} />
       </td>
 
-      <td style={{ ...tdCenter, padding: '4px 6px' }}>
+      <td style={{ ...tdCenter, padding: '4px 2px' }}>
         <PackingMultiSelect
           selected={entry?.packing_category ?? []}
           disabled={fieldsDisabled}
@@ -1695,6 +2084,17 @@ export const QualityControlModule: React.FC = () => {
 
   // ── Store: unsaved edits are kept per date + machine in memory ───────────
   const [productionStore, setProductionStore] = useState<Record<string, Record<string, Record<string, QualityHourlyEntry>>>>({});
+  // Layer Out Time inputs, keyed by date -> machine -> shift. Kept across
+  // date navigation so a third-shift entry can carry into the following day's
+  // first row. The values themselves are not stored in the database: after a
+  // save they are rebuilt from the persisted row periods
+  // (layerOutInputsFromSavedPeriods) whenever a date reloads.
+  const [layerOutInputs, setLayerOutInputs] = useState<LayerOutInputStore>({});
+  // Shift inputs edited during THIS session ("dateKey|machine|shift"). Rebuilds
+  // after a load must never overwrite a value the operator just typed but has
+  // not re-saved through a row lock yet — the stored periods still hold the
+  // previous save's state.
+  const layerOutTouchedRef = useRef<Set<string>>(new Set());
   const [shiftStore, setShiftStore] = useState<Record<string, QualityShiftMap>>({});
   const [savedFlags, setSavedFlags] = useState<Record<string, boolean>>({});
   const [loadedDates, setLoadedDates] = useState<Record<string, boolean>>({});
@@ -1757,6 +2157,11 @@ export const QualityControlModule: React.FC = () => {
   useEffect(() => {
     productionStoreRef.current = productionStore;
   }, [productionStore]);
+
+  const layerOutInputsRef = useRef(layerOutInputs);
+  useEffect(() => {
+    layerOutInputsRef.current = layerOutInputs;
+  }, [layerOutInputs]);
 
   const shiftStoreRef = useRef(shiftStore);
   useEffect(() => {
@@ -1922,6 +2327,42 @@ export const QualityControlModule: React.FC = () => {
           mergedDate[mKey] = stampSplitPeriods(byTime);
         }
         return { ...prev, [dateKey]: mergedDate };
+      });
+      // ── Rebuild the persisted Layer Out state ──────────────────────────
+      // The periods the backend just returned for the saved rows carry every
+      // persisted adjustment: the real interval duration of each shift-ending
+      // row (its Layer Out value) and of the day's first row (the previous
+      // day's third-shift carry). Rebuilding from them keeps the Leher Out
+      // inputs across Save → Refresh → Reload. Values touched in this session
+      // are never overwritten — their period may not be re-saved yet.
+      setLayerOutInputs((prev) => {
+        let next = prev;
+        const write = (forDate: string, machineKey: string, shiftKey: string, value: string) => {
+          const byDate = { ...(next[forDate] ?? {}) };
+          byDate[machineKey] = { ...(byDate[machineKey] ?? {}), [shiftKey]: value };
+          next = { ...next, [forDate]: byDate };
+        };
+        const serverDate = hourly ?? {};
+        const previousDate = addDaysIso(dateKey, -1);
+        for (const [mKey, machineRows] of Object.entries(serverDate)) {
+          if (!machineRows || typeof machineRows !== 'object') continue;
+          const { perShift, carryMinutes } = layerOutInputsFromSavedPeriods(machineRows);
+          const machineKey = String(mKey);
+          for (const [shiftKey, minutes] of Object.entries(perShift)) {
+            if (layerOutTouchedRef.current.has(`${dateKey}|${machineKey}|${shiftKey}`)) continue;
+            const strValue = String(minutes);
+            if ((next[dateKey]?.[machineKey]?.[shiftKey] ?? '') === strValue) continue;
+            write(dateKey, machineKey, shiftKey, strValue);
+          }
+          if (carryMinutes !== null
+            && !layerOutTouchedRef.current.has(`${previousDate}|${machineKey}|3`)) {
+            const strCarry = String(carryMinutes);
+            if ((next[previousDate]?.[machineKey]?.['3'] ?? '') !== strCarry) {
+              write(previousDate, machineKey, '3', strCarry);
+            }
+          }
+        }
+        return next === prev ? prev : next;
       });
     }).catch((err) => {
       inFlightRef.current[dateKey] = undefined;
@@ -2167,19 +2608,58 @@ export const QualityControlModule: React.FC = () => {
   const [splitValue, setSplitValue] = useState<string>('');
   const [splitError, setSplitError] = useState<string>('');
 
+  const setLayerOutInput = useCallback((shiftId: number, value: string) => {
+    if (!canEdit) return;
+    const machineKey = String(activeMachine);
+    // Restore-safety: this shift's value now belongs to the session until the
+    // row save+lock persists it (its period carries the adjusted interval).
+    layerOutTouchedRef.current.add(`${dateKey}|${machineKey}|${String(shiftId)}`);
+    // The row-checkbox save persists ONE row — the shift-ending one, whose
+    // saved interval captures the adjustment. Mark it touched so the save
+    // includes this row (and stamps the adjusted period into the payload).
+    markTouched(dateKey, machineKey, SHIFT_LAST_HOURLY_KEY[shiftId] ?? '');
+    setLayerOutInputs((prev) => ({
+      ...prev,
+      [dateKey]: {
+        ...(prev[dateKey] ?? {}),
+        [machineKey]: {
+          ...(prev[dateKey]?.[machineKey] ?? {}),
+          [String(shiftId)]: value,
+        },
+      },
+    }));
+  }, [canEdit, dateKey, activeMachine, markTouched]);
+
   // Chronological display order: the 24 hourly rows plus any split rows
   // inserted immediately after their parent hour.
   const displayKeys = useMemo(() => getOrderedDisplayKeys(activeRows), [activeRows]);
+  // The single source of truth for every displayed/saved interval. It starts
+  // from the original key order on every render, so changing a Layer Out Time
+  // never adds to a previous adjustment.
+  const timelineSlots = useMemo(() => {
+    const layerOut = layerOutValuesForDateMachine(
+      layerOutInputs,
+      dateKey,
+      String(activeMachine),
+    );
+    const carryIn = layerOutCarryInStartMinutes(
+      dateKey,
+      String(activeMachine),
+      productionStore,
+      layerOutInputs,
+    );
+    return buildLayerOutTimeline(displayKeys, layerOut, carryIn);
+  }, [displayKeys, layerOutInputs, dateKey, activeMachine, productionStore]);
   const durationByKey = useMemo(() => {
     const map: Record<string, number> = {};
     for (const k of displayKeys) {
-      map[k] = durationHoursFromEntry(
-        activeRows[k],
-        getDurationHoursForKey(displayKeys, k),
-      );
+      const slot = timelineSlots[k];
+      map[k] = slot
+        ? slot.durationMinutes / 60
+        : durationHoursFromEntry(activeRows[k], getDurationHoursForKey(displayKeys, k));
     }
     return map;
-  }, [displayKeys, activeRows]);
+  }, [displayKeys, timelineSlots, activeRows]);
   const shiftIdxByKey = useMemo(() => {
     const map: Record<string, number> = {};
     const hourlyShift = new Map<string, number>(PRODUCTION_TIMES.map((pt) => [pt.time, pt.shift_id - 1]));
@@ -2209,13 +2689,34 @@ export const QualityControlModule: React.FC = () => {
     return counts;
   }, [displayKeys, shiftIdxByKey]);
 
+  /** Builds the current layer-out-adjusted timeline for any machine row map. */
+  const timelineForRows = useCallback((rows: Record<string, QualityHourlyEntry | undefined>) => {
+    const ordered = getOrderedDisplayKeys(rows);
+    const layerOut = layerOutValuesForDateMachine(
+      layerOutInputsRef.current,
+      dateKey,
+      String(activeMachine),
+    );
+    const carryIn = layerOutCarryInStartMinutes(
+      dateKey,
+      String(activeMachine),
+      productionStoreRef.current,
+      layerOutInputsRef.current,
+    );
+    return { ordered, slots: buildLayerOutTimeline(ordered, layerOut, carryIn) };
+  }, [dateKey, activeMachine]);
+
   // Split dialog labels: the interval the selected row displays and its start
   // bound — the exact range the split point must fall inside.
   const splitDialogTitle = splitTarget
-    ? getIntervalDisplayForKey(displayKeys, splitTarget, activeRows[splitTarget])
+    ? (timelineSlots[splitTarget]
+        ? formatIntervalDisplayLabel(timelineSlots[splitTarget].start, timelineSlots[splitTarget].end)
+        : getIntervalDisplayForKey(displayKeys, splitTarget, activeRows[splitTarget]))
     : '';
   const splitDialogStart = splitTarget
-    ? (getPeriodStartForKey(displayKeys, splitTarget, activeRows[splitTarget]) ?? splitTarget)
+    ? (timelineSlots[splitTarget]?.start
+        ?? getPeriodStartForKey(displayKeys, splitTarget, activeRows[splitTarget])
+        ?? splitTarget)
     : '';
 
   const openSplitDialog = useCallback((time: string) => {
@@ -2225,8 +2726,8 @@ export const QualityControlModule: React.FC = () => {
     // the following hour: the row keyed "11:00 AM" shows "10:00 - 11:00 AM",
     // so the split point must lie strictly inside that range.
     const byMachine = productionStoreRef.current?.[dateKey]?.[String(activeMachine)] ?? {};
-    const ordered = getOrderedDisplayKeys(byMachine);
-    const startTime = getPeriodStartForKey(ordered, time, byMachine[time]);
+    const { ordered, slots } = timelineForRows(byMachine);
+    const startTime = slots[time]?.start ?? getPeriodStartForKey(ordered, time, byMachine[time]);
     const tStart = startTime ? toTimelineMinutes(startTime) : null;
     const tEnd = toTimelineMinutes(time);
     if (!startTime || tStart === null || tEnd === null || tStart >= tEnd) return;
@@ -2243,7 +2744,7 @@ export const QualityControlModule: React.FC = () => {
       setSplitValue('');
     }
     setSplitError('');
-  }, [canEdit, dateKey, activeMachine]);
+  }, [canEdit, dateKey, activeMachine, timelineForRows]);
 
   const closeSplitDialog = useCallback(() => {
     setSplitTarget(null);
@@ -2355,9 +2856,11 @@ export const QualityControlModule: React.FC = () => {
     const mStr = String(activeMachine);
     const rowsNow = productionStoreRef.current?.[dateKey]?.[mStr] ?? {};
     // The split point must lie strictly inside the row's DISPLAYED period
-    // ([period start, own time)) — the same interval the Time column shows.
-    const ordered = getOrderedDisplayKeys(rowsNow);
-    const startTime = getPeriodStartForKey(ordered, splitTarget, rowsNow[splitTarget]);
+    // ([period start, own time)) — the same interval the Time column shows,
+    // including a Layer Out Time adjustment.
+    const { ordered, slots } = timelineForRows(rowsNow);
+    const startTime = slots[splitTarget]?.start
+      ?? getPeriodStartForKey(ordered, splitTarget, rowsNow[splitTarget]);
     const tParent = startTime ? toTimelineMinutes(startTime) : null;
     const tNext = toTimelineMinutes(splitTarget);
     if (!startTime || tParent === null || tNext === null || tParent >= tNext) {
@@ -2466,7 +2969,7 @@ export const QualityControlModule: React.FC = () => {
     });
     closeSplitDialog();
     toast.success(`Split ${formatIntervalDisplayLabel(startTime, splitTarget)} at ${splitKey} (${newGroup})`);
-  }, [splitTarget, splitValue, canEdit, dateKey, activeMachine, markTouched, closeSplitDialog]);
+  }, [splitTarget, splitValue, canEdit, dateKey, activeMachine, markTouched, closeSplitDialog, timelineForRows]);
 
   // ── Row lock (Machine 1–4 tables only) ─────────────────────────────────
   // The lock lives in the DATABASE (hourly_production.is_locked), never in
@@ -3070,10 +3573,11 @@ export const QualityControlModule: React.FC = () => {
     const byMachine = store[date] ?? {};
     for (const [mStr, timeMap] of Object.entries(byMachine)) {
       const mNum = parseInt(mStr, 10) || activeMachine;
-      // Duration per row for this machine (hourly = 1, splits = fractional).
-      const ordered = getOrderedDisplayKeys(timeMap);
-      const durByTime: Record<string, number> = {};
-      for (const k of ordered) durByTime[k] = getDurationHoursForKey(ordered, k);
+      // Duration per row for this machine, derived from the SAME layer-out
+      // adjusted timeline the table displays (hourly = 1 normally, fractional
+      // at a layer-out boundary, split segments = their real span).
+      const { orderedKeys: ordered, slots: timeline } =
+        buildLayerOutTimelineForDateMachine(date, mStr, store, layerOutInputsRef.current);
       // Split-group inheritance: the hourly row immediately following a split
       // is that split's second segment, so it carries the split's group when
       // it has none of its own (e.g. it was created after the split). The
@@ -3111,17 +3615,21 @@ export const QualityControlModule: React.FC = () => {
         } else if (touchedOnly && !isTouched && !meaningful && !entry.entry_id) {
           continue;
         }
-        // Actual period: previous displayed row → own time (first row = 1h).
+        // Actual period from the adjusted timeline (falls back to ordering when
+        // a key cannot be parsed).
         const idx = ordered.indexOf(time);
-        const periodStart = idx > 0 ? ordered[idx - 1] : time;
+        const slot = timeline[time];
+        const periodStart = slot?.start ?? (idx > 0 ? ordered[idx - 1] : time);
+        const periodEnd = slot?.end ?? time;
+        const durationHours = slot ? slot.durationMinutes / 60 : 0;
         (out[mStr] ??= {})[time] = {
           ...entry,
           report_id: date,
           weight_avg: calcRowAvgFor(entry, mNum),
           bottles_in_nos: calcBottlesInNosFor(entry),
-          efficiency_percentage: calcEffFor(entry, mNum, durByTime[time] ?? 1),
+          efficiency_percentage: calcEffFor(entry, mNum, durationHours),
           period_start: periodStart,
-          period_end: time,
+          period_end: periodEnd,
           split_group_id: (entry.split_group_id ?? '').trim() || inheritedGroup[time] || '',
         } as QualityHourlyEntry;
       }
@@ -3359,7 +3867,7 @@ rows.push(dateAndDay);
 
     const header = [
       'Shift', 'Time', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
-      'AVG', 'Speed/Min', 'Packing Category', 'Packing Size', 'Cartons', 'Bottles in Nos.',
+      'AVG', 'Speed/Min', 'Pack Type', 'Pack size', 'Cartons', 'Bottles in Nos.',
       'QTY EFF%', 'SQC', 'QC Hold', 'NUM', 'Defects', 'Remarks',
     ];
     rows.push(header.join(','));
@@ -3370,7 +3878,10 @@ rows.push(dateAndDay);
     // efficiency uses the same per-row duration the table itself uses.
     for (const key of displayKeys) {
       const e = productionStore[dateKey]?.[String(activeMachine)]?.[key];
-      const timeLabel = getIntervalDisplayForKey(displayKeys, key, e);
+      const slot = timelineSlots[key];
+      const timeLabel = slot
+        ? formatIntervalDisplayLabel(slot.start, slot.end)
+        : getIntervalDisplayForKey(displayKeys, key, e);
       const shiftLabel = SHIFT_LABELS[(e?.shift_id ?? 0) - 1]
         ?? SHIFT_LABELS[shiftIdxByKey[key] ?? 0]
         ?? '';
@@ -3499,8 +4010,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         { content: 'Weight (gms)', colSpan: hasM ? 3 : 2, styles: { halign: 'center' } },
         { content: 'Average', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Speed/Min', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Packing Category', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Packing Size', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'Pack Type', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'Pack size', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Cartons', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Bottles', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'QTY EFF%', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
@@ -3521,7 +4032,10 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       for (const key of displayKeys) {
         const e = byTime[key];
         const defectNames = defectNamesFor(e);
-        const timeLabel = getIntervalDisplayForKey(displayKeys, key, e);
+        const slot = timelineSlots[key];
+        const timeLabel = slot
+          ? formatIntervalDisplayLabel(slot.start, slot.end)
+          : getIntervalDisplayForKey(displayKeys, key, e);
         const shiftIdx = e?.shift_id ? Math.max(0, Math.min(2, e.shift_id - 1)) : (shiftIdxByKey[key] ?? 0);
         bodyMeta.push({ shiftIdx, grouped: !!(e?.split_group_id ?? '').trim() });
         body.push([
@@ -4074,15 +4588,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 >          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
             <thead className="qm-sticky-head">
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '20px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '60px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Packing Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nCategory'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Packing\nSize'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Pack\nsize'}</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
@@ -4118,7 +4632,13 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                   const split = isSplitKey(time);
                   const pos = displayKeys.indexOf(time);
                   const prevKey = pos > 0 ? displayKeys[pos - 1] : time;
-                  const displayTime = getIntervalDisplayForKey(displayKeys, time, entry);
+                  const slot = timelineSlots[time];
+                  const displayTime = slot
+                    ? formatIntervalDisplayLabel(slot.start, slot.end)
+                    : getIntervalDisplayForKey(displayKeys, time, entry);
+                  const shiftId = shiftIdx + 1;
+                  const layerOutRaw = layerOutInputs[dateKey]?.[String(activeMachine)]?.[String(shiftId)] ?? '';
+                  const layerOutError = parseLayerOutInput(layerOutRaw).error;
 
                   return (
                     <QualityTimeRow
@@ -4126,11 +4646,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                       time={time}
                       displayTime={displayTime}
                       isSplitRow={split}
-                      canSplit={canSplitHour(displayKeys, time, entry)}
+                      canSplit={
+                        !split &&
+                        time !== PRODUCTION_TIMES[0].time &&
+                        (slot?.durationMinutes ?? 0) > 0
+                      }
                       rowSpan={shiftBlockCounts[shiftIdx] ?? 8}
                       durationHours={durationByKey[time] ?? 1}
-                      periodStart={entry?.period_start ?? prevKey}
-                      periodEnd={entry?.period_end ?? time}
+                      periodStart={slot?.start ?? entry?.period_start ?? prevKey}
+                      periodEnd={slot?.end ?? entry?.period_end ?? time}
                       onSplit={openSplitDialog}
                       onDeleteSplit={deleteSplitRow}
                       shiftIdx={shiftIdx}
@@ -4152,6 +4676,9 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                       locked={rowLocked}
                       toggleRowLock={toggleRowLock}
                       columnLocked={columnLocked}
+                      layerOutValue={isFirstInShift ? layerOutRaw : undefined}
+                      layerOutError={isFirstInShift ? layerOutError : undefined}
+                      onLayerOutChange={isFirstInShift ? setLayerOutInput : undefined}
                     />
                   );
                 });
@@ -4207,7 +4734,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 unchanged. */}
             <tfoot>
               <tr style={{ backgroundColor: columnLocked ? '#e8e8e8' : '#f8fafc', borderTop: `2px solid ${C.border}` }}>
-                <td style={{ width: '38px', borderRight: `1px solid ${C.border}` }} />
+                <td style={{ width: '48px', borderRight: `1px solid ${C.border}` }} />
                 <td style={{ width: '34px', padding: '8px 2px', textAlign: 'center', verticalAlign: 'middle', backgroundColor: columnLocked ? '#e8e8e8' : undefined }}>
                   <input
                     type="checkbox"

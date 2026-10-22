@@ -113,6 +113,16 @@ export interface QualityEntryPayload {
   remarks: string | null;
   defect_ids: string[];
   job_id: string | null;
+  /**
+   * Actual covered interval of the row ("3:00 PM" / "3:40 PM") when it is NOT
+   * the plain full hour: sent for Layer Out Time adjustments, split segments
+   * and the previous day's third-shift carry-in. The backend embeds the
+   * interval's duration into the row's own production_time timestamp and
+   * re-emits both labels on the next load, so the adjusted timeline persists
+   * without any change to the database columns.
+   */
+  period_start?: string | null;
+  period_end?: string | null;
   /** Logical split-group identifier (e.g. "SG001") — persisted verbatim, never calculated. */
   split_group_id: string | null;
   /**
@@ -240,6 +250,11 @@ const toStrOrEmpty = (v: unknown): string => {
   return String(v);
 };
 
+const toStrOrNull = (v: unknown): string | null => {
+  const str = toStrOrEmpty(v).trim();
+  return str || null;
+};
+
 const toPackingArray = (v: unknown): string[] => {
   if (Array.isArray(v)) return v.map((x) => toStrOrEmpty(x)).filter(Boolean);
   if (typeof v === 'string' && v.trim()) {
@@ -266,9 +281,13 @@ const toDefectArray = (v: unknown): string[] => {
 };
 
 /** Maps a string-based form entry to the database-shaped payload.
- * period_start/period_end are frontend-only (derived from row ordering) and
- * are intentionally NOT sent: the backend identifies rows by production_time
- * and derives the same period from ordering, so no schema change is needed.
+ * period_start / period_end ARE sent whenever the row covers an adjusted
+ * interval (Layer Out Time / Leher Out adjustment, split segment or the
+ * previous day's third-shift carry-in): the backend embeds the interval's
+ * real duration into the row's own production_time timestamp and returns the
+ * exact start/end labels on the next load, so the adjusted timeline and the
+ * Leher Out minutes reconstructed from it survive Refresh without any schema
+ * change and without storing the value separately.
  * split_group_id IS sent: it is the persisted logical grouping of one split's
  * time segments (each keeps its own entry_id and row).
  */
@@ -296,6 +315,8 @@ const toDbEntry = (entry: QualityHourlyEntry): QualityEntryPayload => ({
   remarks: toStrOrEmpty(entry.remarks) || null,
   defect_ids: toDefectArray(entry.defect_ids),
   job_id: entry.job_id || null,
+  period_start: toStrOrNull(entry.period_start),
+  period_end: toStrOrNull(entry.period_end),
   split_group_id: entry.split_group_id?.trim() ? entry.split_group_id.trim() : null,
   is_locked: entry.is_locked === true,
 });
