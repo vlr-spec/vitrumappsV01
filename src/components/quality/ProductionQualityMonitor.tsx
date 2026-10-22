@@ -1087,17 +1087,16 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
 // ── Hourly Production bottle dropdown ───────────────────────────────────────
 // One selectable bottle. `value` is the bottle id that is actually stored and
 // saved (the configured/parent bottle, so configuration mappings and saved
-// production data keep working unchanged); `label` is the combined name shown
-// to the operator with the Packing Name on the LEFT and the Bottle Name on
-// the RIGHT ("packing1 / packing2 - Bottle Name"). A parent with several
-// mapped children lists ONE option joining every child name with " / " (no
-// duplicate bottle options); a bottle without children shows its own name
-// with no separator. `key` and `value` are both the parent id by design.
+// production data keep working unchanged); `label` is the name shown to the
+// operator. A parent with several mapped children lists ONE option showing
+// ONLY the child (packing) names joined with " / " — the parent's bottle_name
+// is never displayed (no duplicate bottle options); a bottle without children
+// shows its own name. `key` and `value` are both the parent id by design.
 interface BottleOption {
   key: string;
   value: string;
   label: string;
-  /** The configured/parent bottle name — the "Bottle Name" shown to the user. */
+  /** The configured/parent bottle name — used by the search filter only. */
   bottleName: string;
   /** All mapped child names joined with " / " — the "Packing Name(s)"; empty when unmapped. */
   packingName: string;
@@ -1759,10 +1758,10 @@ const QualityTimeRow = React.memo<{
                   maxWidth: '38px',
                   boxSizing: 'border-box',
                   padding: '2px 1px',
-                  fontSize: '18px',
+                  fontSize: '15px',
                   textAlign: 'center',
                   color: C.textMain,
-                  backgroundColor: '#ffffff',
+                  backgroundColor: 'transparent',
                   border: `1px solid ${layerOutError ? '#fca5a5' : C.border}`,
                   borderRadius: '4px',
                   outline: 'none',
@@ -2514,12 +2513,12 @@ export const QualityControlModule: React.FC = () => {
 
   // Dropdown options for the Hourly Production grid (all four machines). One
   // option per configured bottle — never duplicated when a bottle has several
-  // mapped children. A parent with children shows every child (packing) name
-  // joined with " / " on the LEFT and the parent's bottle_name on the RIGHT —
+  // mapped children. A parent with children shows ONLY the child (packing)
+  // names joined with " / " — the parent's bottle_name is NOT displayed:
   // e.g. parent "100 ml Brute" with children "130 ml 25 mm NECK" and
   // "140 ml 28 mm NECK" is shown as
-  // "130 ml 25 mm NECK / 140 ml 28 mm NECK - 100 ml Brute"; a bottle without
-  // children shows its own name with no separator. The option VALUE stays
+  // "130 ml 25 mm NECK / 140 ml 28 mm NECK"; a bottle without
+  // children shows its own name. The option VALUE stays
   // the configured/parent bottle id, so the job identity that is saved, the
   // configuration mapping and every production calculation are unchanged —
   // only the visible label differs.
@@ -2544,7 +2543,7 @@ export const QualityControlModule: React.FC = () => {
       return {
         key: bottle.id,
         value: bottle.id,
-        label: `${packingJoined} - ${bottle.name}`,
+        label: packingJoined,
         bottleName: bottle.name,
         packingName: packingJoined,
       };

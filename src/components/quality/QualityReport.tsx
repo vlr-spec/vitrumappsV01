@@ -694,9 +694,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   // parent as a child, read read-only from the SAME existing parent/child
   // mapping API the Quality grid already uses
   // (production.bottle_master.group_id). No new database field, table or
-  // endpoint is introduced. All children stay in the same report row,
-  // numbered sequentially ("1. name, 2. name, ..."); a single child renders
-  // as "1. name". A bottle without children falls back to its own production
+  // endpoint is introduced. All children stay in the same report row, shown
+  // without any serial number; a single child renders just its name. A
+  // bottle without children falls back to its own production
   // bottle name. Fetched once per mount; on failure the report still renders,
   // using the production bottle name as the fallback.
   const [childNamesByParent, setChildNamesByParent] = useState<Map<string, string[]>>(() => new Map());
@@ -738,15 +738,15 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
   /**
    * Packed Bottle Name display for one report row: every packing name in the
-   * same cell, numbered sequentially ("1. a, 2. b, 3. c"). Falls back to the
-   * row's own production bottle name when no packing name exists.
+   * same cell, plain names without any serial number ("a, b, c"). Falls back
+   * to the row's own production bottle name when no packing name exists.
    */
   const formatPackedName = useCallback((packingNames: string[], fallbackBottleName: string): string => {
     const names = (packingNames ?? [])
       .map((n) => String(n ?? '').trim())
       .filter((n) => n.length > 0);
     if (names.length === 0) return String(fallbackBottleName ?? '');
-    return names.map((n, i) => `${i + 1}. ${n}`).join(', ');
+    return names.join(', ');
   }, []);
 
   const [hourly, setHourly] = useState<QualityDayHourly>({});
