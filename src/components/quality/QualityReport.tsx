@@ -1002,20 +1002,29 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         const shiftEff = shiftEffValues.map(averageEfficiency);
         const overallEff = averageEfficiency(overallEffValues);
 
-        // MIN — actual production runtime only. A run point counts toward the
-        // runtime only when that hour actually recorded production; an empty
-        // hourly row that merely inherited the job/bottle (e.g. an idle
-        // 8:00–9:00 AM hour) no longer adds time the job did not run. Every
-        // producing row keeps its own duration (1 for an hourly row, fractional
-        // for a manual split), so a job that starts or ends partway through an
-        // hour still counts its exact elapsed minutes through to the next job's
-        // change time. Only the MIN column is affected.
-        const runtimeMinutes = Math.round(
-          run.points.reduce(
-            (sum, p) => (hourlyUnits(p.entry) > 0 ? sum + p.durationHours * 60 : sum),
-            0
-          )
-        );
+        // MIN — actual production runtime in minutes within the production day,
+        // calculated from the run's actual start to end time using timeline positions.
+        // Each key label is the END of its own period, so the run's window is
+        // [first label − first duration, last label]: the first point's duration
+        // locates the run's start, and the last label is the run's end. Every
+        // split segment is a separate point with its own duration, so a split of
+        // any length is included whole and adjacent jobs partition the day
+        // without gaps or double-counting — a machine running the full day
+        // totals exactly 1,440 minutes. Timeline minutes are continuous across
+        // midnight, and the value is clamped to the production day's 1,440.
+        let runtimeMinutes = 0;
+        const first = run.points[0];
+        const last = run.points[run.points.length - 1];
+        if (first && last) {
+          const firstMin = toReportTimelineMinutes(first.slot.time) ?? 0;
+          const lastMin = toReportTimelineMinutes(last.slot.time) ?? firstMin;
+          const startMin = firstMin - first.durationHours * 60;
+          runtimeMinutes = Math.round(Math.max(0, Math.min(1440, lastMin - startMin)));
+        } else {
+          runtimeMinutes = Math.round(
+            run.points.reduce((sum, p) => sum + p.durationHours * 60, 0)
+          );
+        }
 
         const bottleName = bottleNameFor(run.bottleId, bottles);
         out.push({

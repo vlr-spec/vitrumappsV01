@@ -3271,10 +3271,15 @@ export const QualityControlModule: React.FC = () => {
   const copyRowDown = useCallback((time: string) => {
     if (!canEdit) return;
     if (!isActiveEntryTime(time)) return;
-    const idx = PRODUCTION_TIMES.findIndex((pt) => pt.time === time);
+    // Target the continuation row from the ACTUAL display timeline, never from
+    // an array position. Every row's own key is the END of its interval (hourly
+    // rows and split segments alike), so the next row strictly after the
+    // source's own time is the one the job continues into — including a split
+    // segment carved out of the next hour. Skipping a blank split row would
+    // jump the job over that segment and wrongly extend it in the later one.
+    const tSrc = toTimelineMinutes(time);
+    if (tSrc === null) return;
     // Checkbox save only: the extended row stays in memory until its checkbox is checked.
-    // Split sources (idx === -1) copy into the next empty HOURLY slot after
-    // their timeline position; hourly sources keep the exact existing order.
     setProductionStore((prev) => {
       const machineKey = String(activeMachine);
       const source = prev[dateKey]?.[machineKey]?.[time];
@@ -3282,16 +3287,14 @@ export const QualityControlModule: React.FC = () => {
       const markRow = (date: string, mKey: string, tKey: string) => {
         markTouched(date, mKey, tKey);
       };
-      const hourlyAfter = (srcTime: string): { time: string; shift_id: number }[] => {
-        const tSrc = toTimelineMinutes(srcTime);
-        return PRODUCTION_TIMES.filter((pt) => {
-          const tPt = toTimelineMinutes(pt.time);
-          return tSrc !== null && tPt !== null && (idx >= 0 ? PRODUCTION_TIMES.indexOf(pt) > idx : tPt > tSrc);
+      const byMachine = prev[dateKey]?.[machineKey] ?? {};
+      const rowsAfter = (): string[] =>
+        getOrderedDisplayKeys(byMachine).filter((key) => {
+          const tKey = toTimelineMinutes(key);
+          return tKey !== null && tKey > tSrc;
         });
-      };
-      for (const slot of hourlyAfter(time)) {
-        const nextTime = slot.time;
-        const target = prev[dateKey]?.[machineKey]?.[nextTime];
+      for (const nextTime of rowsAfter()) {
+        const target = byMachine[nextTime];
         // A locked slot is never written into — it would be an edit the
         // backend rejects. Keep looking for the next free, unlocked slot.
         if (!target?.bottle_id && !target?.is_locked) {
@@ -3299,17 +3302,19 @@ export const QualityControlModule: React.FC = () => {
           // The extended row continues the same job (same Job ID via spread);
           // periods are re-stamped so the target keeps its own duration.
           // A "+" extension is a NEW hour, never part of the source's split:
-          // the split group is not inherited.
+          // the source's group is not inherited. A split row that is itself
+          // the continuation keeps its own group so the split stays paired.
+          const hourlySlot = PRODUCTION_TIMES.find((pt) => pt.time === nextTime);
           const nextByMachine = stampSplitPeriods({
-            ...(prev[dateKey]?.[machineKey] ?? {}),
+            ...byMachine,
             [nextTime]: {
               ...source,
               packing_category: [...(source.packing_category ?? [])],
               defect_ids: [...(source.defect_ids ?? [])],
               production_time: nextTime,
-              entry_id: '',
-              shift_id: slot.shift_id,
-              split_group_id: '',
+              entry_id: target?.entry_id ?? '',
+              shift_id: target?.shift_id ?? hourlySlot?.shift_id ?? source.shift_id,
+              split_group_id: (target?.split_group_id ?? '').trim(),
               // New rows are always created unlocked, even when the row they
               // were copied from is locked.
               is_locked: false,
@@ -3324,12 +3329,14 @@ export const QualityControlModule: React.FC = () => {
           };
         }
       }
-      const isLastHourly = idx === PRODUCTION_TIMES.length - 1;
-      const isLastDisplay = (() => {
-        const rows = prev[dateKey]?.[machineKey] ?? {};
-        return time === activeJobEntryTime(rows) && getOrderedDisplayKeys(rows).slice(-1)[0] === time;
-      })();
-      if (isLastHourly || (idx < 0 && isLastDisplay)) {
+      // No row starts after the source: it is the final interval of the
+      // production day, so the continuation belongs to the next day's first
+      // slot. Derived from the timeline, not from the source's array index.
+      const lastHourlyMinutes = toTimelineMinutes(
+        PRODUCTION_TIMES[PRODUCTION_TIMES.length - 1].time,
+      );
+      const isLastTimeline = lastHourlyMinutes !== null && tSrc >= lastHourlyMinutes;
+      if (isLastTimeline) {
         const nextDate = new Date(`${dateKey}T00:00:00`);
         nextDate.setDate(nextDate.getDate() + 1);
         const nextDateKey = toIso(nextDate);
@@ -3525,7 +3532,7 @@ export const QualityControlModule: React.FC = () => {
       if (!isNaN(ct)) totalCartons += ct;
       const ps = parseInt(e?.packing_size ?? '');
       if (!isNaN(ct) && ps > 0) totalBottles += ps * ct;
-      const eff = parseFloat(calcEffFor(e, activeMachine, durationByKey[k] ?? 1));
+      const eff = parseFloat(String(e?.efficiency_percentage ?? ''));
       if (!isNaN(eff)) effVals.push(eff);
     }
     return {
@@ -3533,7 +3540,7 @@ export const QualityControlModule: React.FC = () => {
       totalBottles,
       avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
     };
-  }, [activeRows, activeMachine, calcEffFor, displayKeys, durationByKey]);
+  }, [activeRows, activeMachine, displayKeys, durationByKey]);
 
   // ── Save / Export / Print ────────────────────────────────────────────────
   /**
