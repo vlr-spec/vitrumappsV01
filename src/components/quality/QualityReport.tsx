@@ -109,16 +109,16 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
  * "Expected Production Units" is the As-Per-Speed theoretical quantity
  * (Speed/min × 60 × Machine Gob × Duration/Hours). Weight, draw and weight
  * efficiency are never used here. Returns null when expected units are zero,
- * missing or non-finite so callers omit the segment. Actual production can
- * exceed the rated speed, but the report follows the Quality grid's rule and
- * never displays an efficiency above 100%.
+ * missing or non-finite so callers omit the segment. The exact calculated
+ * value is returned — actual production can exceed the rated speed, so values
+ * above 100% display uncapped, like the Quality grid.
  */
 const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number | null => {
   const actual = Number(actualUnits);
   const expected = Number(expectedUnits);
   if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
   const efficiency = (actual / expected) * 100;
-  return Number.isFinite(efficiency) ? Math.min(100, efficiency) : null;
+  return Number.isFinite(efficiency) ? efficiency : null;
 };
 
 /**
@@ -129,15 +129,15 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
  * Kept as a dedicated function so the existing unit-based efficiency
  * calculations (calcUnitEfficiency and every caller) stay untouched.
  * Returns null when the as-per-speed draw is zero, missing or non-finite so
- * callers render '—' instead of dividing by zero, and caps at 100% like the
- * Quality grid.
+ * callers render '—' instead of dividing by zero, and shows the exact
+ * calculated percentage like the Quality grid — no cap at 100%.
  */
 const calcWeightEfficiency = (actualDraw: number, asPerSpeedDraw: number): number | null => {
   const actual = Number(actualDraw);
   const expected = Number(asPerSpeedDraw);
   if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
   const efficiency = (actual / expected) * 100;
-  return Number.isFinite(efficiency) ? Math.min(100, efficiency) : null;
+  return Number.isFinite(efficiency) ? efficiency : null;
 };
 
 /**

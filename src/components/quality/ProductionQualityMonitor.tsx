@@ -1025,8 +1025,9 @@ const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1
   if (!Number.isFinite(bottlesN) || bottlesN <= 0 || !Number.isFinite(theoretical) || theoretical <= 0) return '';
   const efficiency = (bottlesN / theoretical) * 100;
   if (!Number.isFinite(efficiency)) return '';
-  // Efficiency is never allowed to display above 100%.
-  return Math.min(100, efficiency).toFixed(1);
+  // Efficiency is displayed exactly as calculated, including values above
+  // 100% — actual output may exceed the rated speed.
+  return efficiency.toFixed(1);
 };
 
 const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): string => {
@@ -1568,6 +1569,9 @@ const QualityTimeRow = React.memo<{
   /** Updates this shift's Layer Out Time (persists with the shift-ending row's
    *  save, whose stamped interval carries the adjusted duration). */
   onLayerOutChange?: (shiftId: number, value: string) => void;
+  /** True when the shift's final hourly row's save checkbox is checked: the
+   *  Lehr Out input of this shift is locked (read-only) until it is unchecked. */
+  layerOutLocked?: boolean;
 }>(({
   time,
   displayTime,
@@ -1601,8 +1605,10 @@ const QualityTimeRow = React.memo<{
   layerOutValue,
   layerOutError,
   onLayerOutChange,
+  layerOutLocked = false,
 }) => {
   const hasHold = Number(entry?.qc_hold ?? 0) > 0;
+  const layerOutDisabled = !canEdit || layerOutLocked;
   const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
   // Split-group highlight: every row carrying a split_group_id (the split
   // segment and its grouped hourly row alike) shares one subtle background. It
@@ -1748,10 +1754,10 @@ const QualityTimeRow = React.memo<{
                 max={LAYER_OUT_MAX_MINUTES}
                 step={1}
                 value={layerOutValue}
-                disabled={!canEdit}
+                disabled={layerOutDisabled}
                 onChange={(e) => onLayerOutChange?.(shiftIdx + 1, e.target.value)}
                 placeholder="0"
-                title={layerOutError || "Minutes from the start of the shift's final hour to layer out (0–119). Persists with the row save: lock & check the row checkbox to keep it across refreshes."}
+                title={layerOutError || (layerOutLocked ? 'Lehr Out is locked — uncheck the final hour row checkbox to edit it.' : "Minutes from the start of the shift's final hour to layer out (0–119). Persists with the row save: lock & check the row checkbox to keep it across refreshes.")}
                 style={{
                   width: '38px',
                   minWidth: 0,
@@ -1765,8 +1771,8 @@ const QualityTimeRow = React.memo<{
                   border: `1px solid ${layerOutError ? '#fca5a5' : C.border}`,
                   borderRadius: '4px',
                   outline: 'none',
-                  cursor: canEdit ? 'text' : 'not-allowed',
-                  opacity: canEdit ? 1 : 0.6,
+                  cursor: layerOutDisabled ? 'not-allowed' : 'text',
+                  opacity: layerOutDisabled ? 0.6 : 1,
                 }}
               />
               {layerOutError && (
@@ -4638,6 +4644,12 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                   const shiftId = shiftIdx + 1;
                   const layerOutRaw = layerOutInputs[dateKey]?.[String(activeMachine)]?.[String(shiftId)] ?? '';
                   const layerOutError = parseLayerOutInput(layerOutRaw).error;
+                  // Lehr Out lock: the shift's own final hourly row — the one
+                  // whose checkbox save persists this shift's Lehr Out value —
+                  // decides. Checked (saved) locks the input for this shift
+                  // only; unchecked opens it again. Each shift is independent.
+                  const layerOutLocked = isFirstInShift
+                    && !!activeRows[SHIFT_LAST_HOURLY_KEY[shiftId]]?.is_locked;
 
                   return (
                     <QualityTimeRow
@@ -4678,6 +4690,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                       layerOutValue={isFirstInShift ? layerOutRaw : undefined}
                       layerOutError={isFirstInShift ? layerOutError : undefined}
                       onLayerOutChange={isFirstInShift ? setLayerOutInput : undefined}
+                      layerOutLocked={isFirstInShift ? layerOutLocked : undefined}
                     />
                   );
                 });
