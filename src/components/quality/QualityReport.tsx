@@ -34,6 +34,11 @@ import {
   hasMeaningfulData,
 } from '../../services/qualityRepository';
 import { getGobCountFromDB, calculateTheoreticalBottles } from '../../utils/calculations';
+import {
+  buildLayerOutTimeline,
+  layerOutInputsFromSavedPeriods,
+  LayerOutSlot,
+} from '../../utils/layerOutTimeline';
 
 // ─── Hourly HPR slots — mirrors the Quality Module's 24-slot shift mapping ──
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
@@ -282,10 +287,26 @@ const getReportOrderedKeys = (byTime: Record<string, QualityHourlyEntry | undefi
   return list;
 };
 
-/** Actual production duration in hours of one key: (own − previous) / 60, else 1. */
-const durationHoursForReportKey = (orderedKeys: string[], key: string): number => {
+/**
+ * Actual production duration in hours of one key: (own − previous) / 60, else 1.
+ * Uses actual period_start/period_end when present, otherwise the ordering-derived
+ * position. Supports split entries of any duration without missing or double-counting.
+ */
+const durationHoursForReportKey = (
+  orderedKeys: string[],
+  key: string,
+  slots?: Record<string, { startMinutes: number; endMinutes: number }>
+): number => {
   const idx = orderedKeys.indexOf(key);
-  if (idx <= 0) return 1;
+  if (idx <= 0) {
+    if (slots && key in slots) {
+      const s = slots[key];
+      if (s && s.endMinutes !== null && s.endMinutes !== undefined && s.startMinutes !== null && s.startMinutes !== undefined) {
+        return (s.endMinutes - s.startMinutes) / 60 || 1;
+      }
+    }
+    return 1;
+  }
   const tPrev = toReportTimelineMinutes(orderedKeys[idx - 1]);
   const tOwn = toReportTimelineMinutes(key);
   if (tPrev === null || tOwn === null) return 1;
@@ -313,6 +334,12 @@ interface HourPoint {
   entry: QualityHourlyEntry;
   /** Actual production duration in hours (1 for hourly rows, fractional for split segments). */
   durationHours: number;
+}
+
+/** Timeline slot for one report key: actual start/end in production-day minutes. */
+interface TimelineSlot {
+  startMinutes: number;
+  endMinutes: number;
 }
 
 /** One continuous machine + bottle/job/speed period inside a single production date. */
@@ -410,7 +437,8 @@ const runKeysFor = (points: HourPoint[]): string[] => {
  */
 const splitMachineRuns = (
   machineNo: number,
-  byTime: Record<string, QualityHourlyEntry>
+  byTime: Record<string, QualityHourlyEntry>,
+  timelineSlots?: Record<string, TimelineSlot>
 ): JobRun[] => {
   const ordered = getReportOrderedKeys(byTime);
   const points: HourPoint[] = [];
@@ -420,7 +448,7 @@ const splitMachineRuns = (
     points.push({
       slot: { time: key, shift_id: shiftIdForReportKey(key) },
       entry: entry as QualityHourlyEntry,
-      durationHours: durationHoursForReportKey(ordered, key),
+      durationHours: durationHoursForReportKey(ordered, key, timelineSlots),
     });
   }
 
@@ -912,13 +940,53 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   // bottle/job actually changed inside the window — never from a previous or
   // future day's part of a continuous job. Every figure below is summed from
   // that row's window records only.
+  // Timeline slots are computed from period_start/period_end labels using the
+  // shared Lehr Out timeline (buildLayerOutTimeline) which correctly handles
+  // midnight crossings, variable Lehr Out times, and previous-day carry-in
+  // with absolute timeline minutes (not modulo 1440).
   const rows = useMemo<MachineReportRow[]>(() => {
     const out: MachineReportRow[] = [];
     for (const machineNo of MACHINE_NOS) {
       const gob = machineGob(machineNo, machines);
       const byTime = dayHourly[String(machineNo)] ?? {};
 
-      for (const run of splitMachineRuns(machineNo, byTime)) {
+      // Build ordered keys and reconstruct Layer Out timeline from saved periods
+      const orderedKeys = getReportOrderedKeys(byTime);
+      const { perShift } = layerOutInputsFromSavedPeriods(byTime, orderedKeys);
+
+      // Compute absolute carry-in start minutes from first row's saved period.
+      // layerOutInputsFromSavedPeriods returns carryMinutes as Lehr Out value (e.g., 40),
+      // but buildLayerOutTimeline needs absolute timeline position (e.g., 1360).
+      // For first row (9:00 AM key at timeline 0), its period_end is at 1440 in
+      // continuous timeline. If period_start="7:40 AM", period_end="9:00 AM",
+      // duration=80min, so carryInStartMinutes = 1440 - 80 = 1360.
+      let carryInStartMinutes: number | null = null;
+      const firstKey = orderedKeys[0];
+      const firstRow = firstKey ? byTime[firstKey] : undefined;
+      if (firstRow?.period_start && firstRow?.period_end) {
+        const start = toReportTimelineMinutes(firstRow.period_start);
+        const end = toReportTimelineMinutes(firstRow.period_end);
+        if (start !== null && end !== null) {
+          let diff = end - start;
+          if (diff <= 0) diff += 24 * 60;
+          if (diff > 0 && diff < 24 * 60) {
+            carryInStartMinutes = 1440 - diff;
+          }
+        }
+      }
+
+      const timelineSlots = buildLayerOutTimeline(orderedKeys, perShift, carryInStartMinutes);
+
+      // Convert to TimelineSlot format for splitMachineRuns
+      const timelineSlotsByKey: Record<string, TimelineSlot> = {};
+      for (const [key, slot] of Object.entries(timelineSlots)) {
+        timelineSlotsByKey[key] = {
+          startMinutes: slot.startMinutes,
+          endMinutes: slot.endMinutes,
+        };
+      }
+
+      for (const run of splitMachineRuns(machineNo, byTime, timelineSlotsByKey)) {
         const shiftUnits = [0, 0, 0];
         const shiftEffValues: number[][] = [[], [], []];
         const overallEffValues: number[] = [];
@@ -1015,11 +1083,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         let runtimeMinutes = 0;
         const first = run.points[0];
         const last = run.points[run.points.length - 1];
-        if (first && last) {
-          const firstMin = toReportTimelineMinutes(first.slot.time) ?? 0;
-          const lastMin = toReportTimelineMinutes(last.slot.time) ?? firstMin;
-          const startMin = firstMin - first.durationHours * 60;
-          runtimeMinutes = Math.round(Math.max(0, Math.min(1440, lastMin - startMin)));
+        if (run.points.length > 0 && first && last) {
+          const firstSlot = timelineSlotsByKey ? timelineSlotsByKey[first.slot.time] : undefined;
+          const lastSlot = timelineSlotsByKey ? timelineSlotsByKey[last.slot.time] : undefined;
+          if (firstSlot && lastSlot) {
+            const startMin = firstSlot.startMinutes;
+            const endMin = lastSlot.endMinutes;
+            runtimeMinutes = Math.round(Math.max(0, Math.min(1440, endMin - startMin)));
+          } else {
+            // Fallback: use ordering-derived positions when no actual period data.
+            const firstMin = toReportTimelineMinutes(first.slot.time) ?? 0;
+            const lastMin = toReportTimelineMinutes(last.slot.time) ?? firstMin;
+            const startMin = firstMin - first.durationHours * 60;
+            runtimeMinutes = Math.round(Math.max(0, Math.min(1440, lastMin - startMin)));
+          }
         } else {
           runtimeMinutes = Math.round(
             run.points.reduce((sum, p) => sum + p.durationHours * 60, 0)

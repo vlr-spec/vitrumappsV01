@@ -355,6 +355,7 @@ _SHIFT_END_SLOTS = {
 
 def _machine_period_slots(
     entries: List[HourlyProduction],
+    carry_in: Optional[Dict[int, int]] = None,
 ) -> Dict[Tuple[int, dtime], Tuple[str, str]]:
     """Re-derived actual period labels of every hourly row, per machine.
 
@@ -366,6 +367,10 @@ def _machine_period_slots(
     built: a 3:00 PM hour entered with 40 Layer Out minutes reads back as
     3:00 PM -> 3:40 PM and the next row starts at 3:40 PM — from the saved
     timestamps alone, with no additional storage.
+
+    If ``carry_in`` is provided (machine_no -> absolute timeline minutes of the
+    previous production day's end), the first row of each machine chains from
+    that value instead of defaulting to a 60-minute hour.
     """
     out: Dict[Tuple[int, dtime], Tuple[str, str]] = {}
     by_machine: Dict[int, List[Tuple[dtime, Optional[int]]]] = {}
@@ -379,20 +384,22 @@ def _machine_period_slots(
     for machine_no, row_list in by_machine.items():
         row_list.sort(key=lambda item: _timeline_minutes(item[0]))
         prev_end: Optional[int] = None
+        # If carry-in is provided for this machine, the first row's absolute
+        # end position is 1440 (9:00 AM with dayOffset), so its start is
+        # 1440 - duration. We initialize prev_end to the carry-in value so the
+        # first iteration uses it as the chain start.
+        if carry_in and machine_no in carry_in:
+            prev_end = carry_in[machine_no]
         for slot, minutes in row_list:
             key = _timeline_minutes(slot)
             if prev_end is None:
-                # No earlier row to chain from. An isolated shift-ending row
-                # anchors at the previous hour key and covers its adjusted
-                # duration there ([3:00 PM, 3:40 PM] for 40 minutes) — the
-                # labels the complete grid stamps; every other key's period is
-                # exactly as long as its embedded duration, ending at own key
-                # ([8:10 AM, 9:00 AM] for the previous day's carry-in).
+                # No carry-in and no earlier row: default to 60-minute hour
                 start = key - 60 if (minutes is not None and slot in _SHIFT_END_SLOTS) else (
                     key - minutes if minutes is not None else key - 60
                 )
                 end = start + minutes if minutes is not None else key
             else:
+                # Chain from previous end (either carry-in or previous row)
                 start = prev_end
                 end = start + minutes if minutes is not None else key
             out[(machine_no, slot)] = (
@@ -575,12 +582,47 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
         selectinload(HourlyProduction.defects)
     ).filter_by(report_id=report.report_id).all()
 
+    # Compute previous day's end time per machine for carry-in correction.
+    # This ensures the first row (9:00 AM) gets the correct period_start/period_end
+    # based on the previous day's actual Shift 3 end (including Lehr Out).
+    prev_date = query_date - timedelta(days=1)
+    prev_report = db.query(HourlyProductionReport).filter_by(production_date=prev_date).first()
+    carry_in: Dict[int, int] = {}  # machine_no -> absolute timeline minutes
+    if prev_report:
+        prev_entries = db.query(HourlyProduction).filter(
+            HourlyProduction.report_id == prev_report.report_id
+        ).all()
+        by_machine_prev: Dict[int, List[Tuple[dtime, Optional[int]]]] = {}
+        for pe in prev_entries:
+            slot = _norm_time(pe.production_time)
+            if slot is None:
+                continue
+            by_machine_prev.setdefault(int(pe.machine_no), []).append(
+                (slot, _stored_period_minutes(pe.production_time))
+            )
+        for m_no, row_list in by_machine_prev.items():
+            row_list.sort(key=lambda item: _timeline_minutes(item[0]))
+            prev_end: Optional[int] = None
+            for slot, minutes in row_list:
+                key = _timeline_minutes(slot)
+                if prev_end is None:
+                    start = key - 60 if (minutes is not None and slot in _SHIFT_END_SLOTS) else (
+                        key - minutes if minutes is not None else key - 60
+                    )
+                    end = start + minutes if minutes is not None else key
+                else:
+                    start = prev_end
+                    end = start + minutes if minutes is not None else key
+                prev_end = end
+            if prev_end is not None:
+                carry_in[m_no] = prev_end
+
     # The persisted row keys plus the durations embedded in their
     # production_time timestamps reconstruct the adjusted timeline: after
     # loading saved records, period_start / period_end are returned per row
     # (Layer Out Time adjustments included) so the frontend can rebuild the
     # schedule and its Leher Out inputs without any additional storage.
-    period_slots = _machine_period_slots(entries)
+    period_slots = _machine_period_slots(entries, carry_in)
 
     for entry in entries:
         m = str(entry.machine_no)
@@ -1182,6 +1224,41 @@ def save_daily_quality(
             for key, e in entry_map.items()
         }
 
+        # Pre-load previous day's last row end times per machine for carry-in correction
+        # This ensures the first row (9:00 AM) gets the correct duration even when
+        # the frontend doesn't have the previous day's data loaded.
+        prev_date = p_date - timedelta(days=1)
+        prev_report = db.query(HourlyProductionReport).filter_by(production_date=prev_date).first()
+        prev_last_end: Dict[int, Optional[int]] = {}  # machine_no -> absolute timeline minutes
+        if prev_report:
+            prev_entries = db.query(HourlyProduction).filter(
+                HourlyProduction.report_id == prev_report.report_id
+            ).all()
+            by_machine_prev: Dict[int, List[Tuple[dtime, Optional[int]]]] = {}
+            for pe in prev_entries:
+                slot = _norm_time(pe.production_time)
+                if slot is None:
+                    continue
+                by_machine_prev.setdefault(int(pe.machine_no), []).append(
+                    (slot, _stored_period_minutes(pe.production_time))
+                )
+            for m_no, row_list in by_machine_prev.items():
+                row_list.sort(key=lambda item: _timeline_minutes(item[0]))
+                prev_end: Optional[int] = None
+                for slot, minutes in row_list:
+                    key = _timeline_minutes(slot)
+                    if prev_end is None:
+                        start = key - 60 if (minutes is not None and slot in _SHIFT_END_SLOTS) else (
+                            key - minutes if minutes is not None else key - 60
+                        )
+                        end = start + minutes if minutes is not None else key
+                    else:
+                        start = prev_end
+                        end = start + minutes if minutes is not None else key
+                    prev_end = end
+                if prev_end is not None:
+                    prev_last_end[m_no] = prev_end
+
         for machine_str, m_dict in payload.hourly.items():
             machine_no = int(machine_str)
             for time_str, entry_data in m_dict.items():
@@ -1202,13 +1279,23 @@ def save_daily_quality(
                 # separately. Row identity stays (machine, time-of-day to the
                 # minute), so upsert matching, lock matching and the unique
                 # constraint are untouched.
-                entry_dt = _encoded_entry_dt(
-                    p_date,
-                    parsed_time,
-                    _period_minutes_from_labels(
-                        entry_data.period_start, entry_data.period_end
-                    ),
+                period_minutes = _period_minutes_from_labels(
+                    entry_data.period_start, entry_data.period_end
                 )
+                # For the first row (9:00 AM), always use previous day's actual end time
+                # when available, since the backend has authoritative data. This fixes
+                # the case where frontend doesn't have previous day loaded and sends
+                # incorrect period_start/period_end.
+                if parsed_time == dtime(9, 0):
+                    prev_end = prev_last_end.get(machine_no)
+                    if prev_end is not None:
+                        # Previous day's end is in absolute timeline (e.g., 1360 for 7:40 AM).
+                        # Current day's 9:00 AM key is at timeline 0. With dayOffset=1440,
+                        # its absolute position is 1440. Duration = 1440 - prev_end.
+                        corrected = 1440 - prev_end
+                        if 1 <= corrected < _PERIOD_MINUTES_HARD_MAX:
+                            period_minutes = corrected
+                entry_dt = _encoded_entry_dt(p_date, parsed_time, period_minutes)
 
                 # Check if it exists
                 entry = entry_map.get(map_key)
@@ -1398,6 +1485,8 @@ def save_daily_quality(
         # If the current day's first entry (9 AM) has the same bottle, add the
         # previous day's Job ID to old_job_snapshot so the existing algorithm
         # reuses it instead of generating a new one.
+        # Check BOTH existing DB entries (entry_map) AND the incoming payload,
+        # because for a brand new day the 9 AM entry only exists in the payload.
         prev_date = p_date - timedelta(days=1)
         prev_report = db.query(HourlyProductionReport).filter_by(production_date=prev_date).first()
         if prev_report:
@@ -1409,8 +1498,23 @@ def save_daily_quality(
                 prev_time = _norm_time(prev_entry.production_time)
                 if prev_time and prev_time.hour == 8 and prev_time.minute == 0:
                     current_9am_key = (prev_entry.machine_no, dtime(9, 0))
+                    # First check existing DB entry
                     current_9am_entry = entry_map.get(current_9am_key)
-                    if current_9am_entry and current_9am_entry.bottle_id == prev_entry.bottle_id:
+                    # If not in DB (new day), check the incoming payload
+                    payload_9am_entry = None
+                    if current_9am_entry is None:
+                        machine_str = str(prev_entry.machine_no)
+                        if machine_str in payload.hourly:
+                            payload_entry = payload.hourly[machine_str].get("9:00 AM")
+                            if payload_entry and payload_entry.bottle_id is not None:
+                                # Create a minimal object with bottle_id for comparison
+                                class PayloadEntry:
+                                    def __init__(self, bottle_id):
+                                        self.bottle_id = bottle_id
+                                payload_9am_entry = PayloadEntry(payload_entry.bottle_id)
+                    # Use whichever entry exists (DB or payload)
+                    check_entry = current_9am_entry or payload_9am_entry
+                    if check_entry and check_entry.bottle_id == prev_entry.bottle_id:
                         old_job_snapshot[current_9am_key] = (prev_entry.job_id, prev_entry.bottle_id)
 
         # Step 4.5: Compute canonical job_id and upsert HPR Job rows

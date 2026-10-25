@@ -7,7 +7,7 @@ import React from 'react';
 import { ERPProvider, useERP } from './context/ERPContext';
 import { Header } from './components/layout/Header';
 import { Sidebar } from './components/layout/Sidebar';
-import { DashboardModule } from './components/dashboard/DashboardModule';
+// import { DashboardModule } from './components/dashboard/DashboardModule';
 import { PlanningModule } from './components/planning/PlanningModule';
 import { MachinesModule } from './components/master-management/MachinesModule';
 import { QualityControlModule } from './components/quality/ProductionQualityMonitor';
@@ -44,7 +44,7 @@ const MainLayout: React.FC = () => {
 
         <main className="app-main flex-1 overflow-y-auto bg-[#F8FAFC] pb-6 flex flex-col justify-between">
           <ErrorBoundary>
-            {activeModule === 'Dashboard' && <DashboardModule />}
+            {/* {activeModule === 'Dashboard' && <DashboardModule />} */}
             {activeModule === 'Production Planning' && <PlanningModule />}
             {activeModule === 'Master Management' && <MachinesModule />}
             {activeModule === 'Quality Control' && <QualityControlModule />}

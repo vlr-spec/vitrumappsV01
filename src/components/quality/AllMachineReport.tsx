@@ -139,10 +139,26 @@ const getReportOrderedKeys = (byTime: Record<string, QualityHourlyEntry | undefi
   return list;
 };
 
-/** Actual production duration in hours of one key: (own − previous) / 60, else 1. */
-const durationHoursForReportKey = (orderedKeys: string[], key: string): number => {
+/**
+ * Actual production duration in hours of one key: (own − previous) / 60, else 1.
+ * Uses actual period_start/period_end when present, otherwise the ordering-derived
+ * position. Supports split entries of any duration without missing or double-counting.
+ */
+const durationHoursForReportKey = (
+  orderedKeys: string[],
+  key: string,
+  slots?: Record<string, { startMinutes: number; endMinutes: number }>
+): number => {
   const idx = orderedKeys.indexOf(key);
-  if (idx <= 0) return 1;
+  if (idx <= 0) {
+    if (slots && key in slots) {
+      const s = slots[key];
+      if (s && s.endMinutes !== null && s.endMinutes !== undefined && s.startMinutes !== null && s.startMinutes !== undefined) {
+        return (s.endMinutes - s.startMinutes) / 60 || 1;
+      }
+    }
+    return 1;
+  }
   const tPrev = toReportTimelineMinutes(orderedKeys[idx - 1]);
   const tOwn = toReportTimelineMinutes(key);
   if (tPrev === null || tOwn === null) return 1;
@@ -201,7 +217,8 @@ const runKeysFor = (points: HourPoint[]): string[] => {
 
 const splitMachineRuns = (
   machineNo: number,
-  byTime: Record<string, QualityHourlyEntry>
+  byTime: Record<string, QualityHourlyEntry>,
+  timelineSlots?: Record<string, { startMinutes: number; endMinutes: number }>
 ): JobRun[] => {
   const ordered = getReportOrderedKeys(byTime);
   const points: HourPoint[] = [];
@@ -211,7 +228,7 @@ const splitMachineRuns = (
     points.push({
       slot: { time: key, shift_id: shiftIdForReportKey(key) },
       entry: entry as QualityHourlyEntry,
-      durationHours: durationHoursForReportKey(ordered, key),
+      durationHours: durationHoursForReportKey(ordered, key, timelineSlots),
     });
   }
   if (points.length === 0) {
@@ -326,10 +343,26 @@ export const AllMachineReport: React.FC<{ date: Date }> = ({ date }) => {
       const key = toIso(d);
       const dayHourly = dayData[key] ?? {};
 
+      // Compute timeline slots from period_start/period_end labels so the report
+      // uses actual intervals (including Lehr Out adjustments and splits).
+      const timelineSlotsByKey: Record<string, { startMinutes: number; endMinutes: number }> = {};
+      for (const machineNo of MACHINE_NOS) {
+        const byTime = dayHourly[String(machineNo)] ?? {};
+        for (const [key, entry] of Object.entries(byTime)) {
+          if (entry?.period_start && entry?.period_end) {
+            const start = toReportTimelineMinutes(entry.period_start);
+            const end = toReportTimelineMinutes(entry.period_end);
+            if (start !== null && end !== null && end >= start) {
+              timelineSlotsByKey[key] = { startMinutes: start, endMinutes: end };
+            }
+          }
+        }
+      }
+
       const machineDataList = MACHINE_NOS.map((machineNo) => {
         const gob = machineGob(machineNo, machines);
         const byTime = dayHourly[String(machineNo)] ?? {};
-        const runs = splitMachineRuns(machineNo, byTime);
+        const runs = splitMachineRuns(machineNo, byTime, timelineSlotsByKey);
 
         let totalDraw = 0;
         let totalFinish = 0;
