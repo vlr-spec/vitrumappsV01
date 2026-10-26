@@ -1026,8 +1026,11 @@ const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1
   const efficiency = (bottlesN / theoretical) * 100;
   if (!Number.isFinite(efficiency)) return '';
   // Efficiency is displayed exactly as calculated, including values above
-  // 100% — actual output may exceed the rated speed.
-  return efficiency.toFixed(1);
+  // 100% — actual output may exceed the rated speed. Display rounding only:
+  // the final percentage is formatted to two decimal places; the underlying
+  // value is unchanged (the save path converts this string back to a number,
+  // so persisted data is unaffected by the extra display digit).
+  return efficiency.toFixed(2);
 };
 
 const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): string => {
@@ -3551,7 +3554,7 @@ export const QualityControlModule: React.FC = () => {
     return {
       totalCartons,
       totalBottles,
-      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
+      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(2) : '—',
       totalSqc: sumNumericField('sqc'),
       totalQcHold: sumNumericField('qc_hold'),
       totalNum: sumNumericField('num'),
