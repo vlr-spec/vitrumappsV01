@@ -3526,6 +3526,19 @@ export const QualityControlModule: React.FC = () => {
     let totalCartons = 0;
     let totalBottles = 0;
     const effVals: number[] = [];
+    // SQC / QC HOLD / NUM day totals — a plain sum of the hourly values (not
+    // an average). Blank, null or non-numeric values count as zero; a real 0
+    // still contributes. Each displayed hourly row is counted exactly once.
+    const sumNumericField = (field: 'sqc' | 'qc_hold' | 'num'): number => {
+      let total = 0;
+      for (const k of displayKeys) {
+        const raw = activeRows[k]?.[field];
+        if (raw == null) continue;
+        const v = parseFloat(String(raw));
+        if (!isNaN(v)) total += v;
+      }
+      return total;
+    };
     for (const k of displayKeys) {
       const e = activeRows[k];
       const ct = parseInt(e?.cartons ?? '');
@@ -3539,6 +3552,9 @@ export const QualityControlModule: React.FC = () => {
       totalCartons,
       totalBottles,
       avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
+      totalSqc: sumNumericField('sqc'),
+      totalQcHold: sumNumericField('qc_hold'),
+      totalNum: sumNumericField('num'),
     };
   }, [activeRows, activeMachine, displayKeys, durationByKey]);
 
@@ -4091,6 +4107,9 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       summary[wIdx++] = stats.totalCartons.toLocaleString();
       summary[wIdx++] = stats.totalBottles.toLocaleString();
       summary[wIdx++] = `${stats.avgEff}%`;
+      summary[wIdx++] = stats.totalSqc.toLocaleString();
+      summary[wIdx++] = stats.totalQcHold.toLocaleString();
+      summary[wIdx++] = stats.totalNum.toLocaleString();
       body.push(summary);
       bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
 
@@ -4740,9 +4759,15 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                     {stats.avgEff}%
                   </span>
                 </td>
-                <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
-                <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
-                <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
+                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
+                  {stats.totalSqc.toLocaleString()}
+                </td>
+                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
+                  {stats.totalQcHold.toLocaleString()}
+                </td>
+                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
+                  {stats.totalNum.toLocaleString()}
+                </td>
                 <td colSpan={2} style={{ padding: '8px 10px' }} />
               </tr>
             </tbody>

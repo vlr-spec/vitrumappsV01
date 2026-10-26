@@ -694,14 +694,17 @@ const jobStartLabels = (dayHourly: QualityDayHourly): Map<string, string> => {
     const ordered = getReportOrderedKeys(byTime);
     for (let i = 0; i < ordered.length; i++) {
       const entry = byTime[ordered[i]];
+      if (!entry) continue;
       if (!hasMeaningfulData(entry)) continue;
       const jobId = entryJob(entry);
       if (!jobId) continue;
       const mapKey = `${machineNo}|${jobId}|${entryBottle(entry)}`;
       if (out.has(mapKey)) continue;
-      // Start of this first entry's period: the previous displayed row's time,
-      // or the entry's own label when it is the day's very first row.
-      out.set(mapKey, i > 0 ? ordered[i - 1] : ordered[i]);
+      // Use the actual period_start from the entry if present (has minute granularity,
+      // e.g. "9:17 AM", "12:38 PM"), otherwise fall back to the timeline label for
+      // gap-closing when the entry has no stored period_start.
+      const periodStart = (entry.period_start ?? '').trim();
+      out.set(mapKey, periodStart || (i > 0 ? ordered[i - 1] : ordered[i]));
     }
   }
   return out;
@@ -1019,19 +1022,45 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           totalUnits += units;
           theoreticalTotal += theoretical;
 
-          // Per-hour segment efficiency, the same value the Quality grid shows
-          // for this row. The grid only calculates a row with a bottle,
-          // packing size and cartons, so segments missing any of those have no
-          // grid efficiency and are excluded from the average.
-          const packingSize = parseInt(entry.packing_size ?? '', 10);
-          const cartons = parseInt(entry.cartons ?? '', 10);
-          const gridUnits =
-            entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
-          const pointEff = gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null;
-          if (pointEff !== null) {
-            shiftEffValues[idx].push(pointEff);
-            overallEffValues.push(pointEff);
-          }
+          // Per-hour segment efficiency — use the stored Pieces EFF% value from the
+  // hourly record (the same value the Hourly Production Monitor displays),
+  // as it is the authoritative source. Fall back to the existing calculation
+  // only when the stored value is not available or invalid.
+  //
+  // An entry must have a bottle assignment and valid positive production speed
+  // to be considered a valid efficiency entry (per HPM rules). Do not use
+  // hasMeaningfulData() directly — check the actual assignment fields separately.
+  const hasValidBottle = entryBottle(entry) !== '';
+  const hasValidSpeed = parseNum(entry.speed_per_min) > 0;
+
+  let pointEff: number | null = null;
+
+  // Priority 1: Use the stored efficiency_percentage (authoritative, matches HPM)
+  if (hasValidBottle) {
+    const storedEff = parseFloat(entry.efficiency_percentage ?? '');
+    if (!Number.isNaN(storedEff) && Number.isFinite(storedEff)) {
+      pointEff = storedEff;
+    }
+  }
+
+  // Priority 2: Calculate from units (fallback when stored value unavailable)
+  // Apply the same zero-cartons rules as the Hourly Production Monitor
+  if (pointEff === null && hasValidBottle) {
+    const packingSize = parseInt(entry.packing_size ?? '', 10);
+    const cartons = parseInt(entry.cartons ?? '', 10);
+    const gridUnits =
+      entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
+    // Include zero-percent entries when cartons = 0 but valid bottle, packing size, and speed
+    const validSpeed = parseNum(entry.speed_per_min) > 0;
+    pointEff = entryBottle(entry) && cartons === 0 && packingSize > 0 && validSpeed ? 0 :
+      (gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null);
+  }
+
+  // Include valid entries only (never add blank values)
+  if (pointEff !== null) {
+    shiftEffValues[idx].push(pointEff);
+    overallEffValues.push(pointEff);
+  }
 
           if (weight !== null) {
             weightSum += weight * durationHours;
@@ -1224,39 +1253,50 @@ const totals = useMemo(() => {
     // on an earlier date) keeps the endpoint's own start — never a default.
     const startLabels = jobStartLabels(dayHourly);
 
-    // Date + machine-wise remarks for the selected production date: each
-    // machine shows only its own remarks recorded in this date's hourly
-    // records, across all of that machine's jobs, in production-timeline
-    // (chronological) order with serial numbering. Job ID is never used for
-    // grouping here. Joined as one sentence-wise line in the same row cell.
-    const remarkByMachine = new Map<number, string>();
+    // Date + machine + job-wise remarks for the selected production date: each
+    // job shows only its own remarks recorded in this date's hourly production
+    // entries belonging to that job. Remarks are scoped to the specific machine +
+    // job + bottle combination so they do not leak across jobs on the same machine.
+    // Job ID + bottle ID together form the strongest existing identifier.
+    const remarkByJob = new Map<string, string>();
+    // Build per-job remark map from hourly entries
     for (const machineNo of MACHINE_NOS) {
       const byTime = dayHourly[String(machineNo)] ?? {};
       const ordered = getReportOrderedKeys(byTime);
-      const texts: string[] = [];
-      const seen = new Set<string>();
+      const jobRemarksMap = new Map<string, string[]>(); // key: "${jobId}|${bottleId}", value: [remark texts]
       for (const key of ordered) {
-        const t = String((byTime[key] as QualityHourlyEntry | undefined)?.remarks ?? '').trim();
-        if (t && !seen.has(t)) {
-          seen.add(t);
-          texts.push(t);
+        const entry = byTime[key];
+        if (!entry) continue;
+        const jobId = String(entry.job_id ?? '').trim();
+        const bottleId = String(entry.bottle_id ?? '').trim();
+        if (!jobId && !bottleId) continue; // skip entries without job or bottle identity
+        const remarkKey = `${jobId}|${bottleId}`;
+        const t = String(entry.remarks ?? '').trim();
+        if (t) {
+          if (!jobRemarksMap.has(remarkKey)) jobRemarksMap.set(remarkKey, []);
+          const arr = jobRemarksMap.get(remarkKey)!;
+          if (!arr.includes(t)) arr.push(t);
         }
       }
-      if (texts.length === 0) {
-        for (const s of source) {
-          if (s.machineNo !== machineNo) continue;
-          const raw = String(s.remark ?? '').trim();
-          if (!raw) continue;
-          for (const line of raw.split('\n')) {
-            const cleaned = line.replace(/^\s*\d+\.\s*/, '').trim() || line.trim();
-            if (cleaned && !seen.has(cleaned)) {
-              seen.add(cleaned);
-              texts.push(cleaned);
-            }
+      // Assign remarks to each job-wise source row for this machine
+      for (const s of source) {
+        if (s.machineNo !== machineNo) continue;
+        const remarkKey = `${s.jobId}|${s.bottleId}`;
+        const arr = jobRemarksMap.get(remarkKey) || [];
+        // Deduplicate while preserving order
+        const seen = new Set<string>();
+        const texts: string[] = [];
+        for (const r of arr) {
+          if (!seen.has(r)) {
+            seen.add(r);
+            texts.push(r);
           }
         }
+        const comment = texts.map((t, idx) => `${idx + 1}. ${t}`).join('  ');
+        // Only set remark if this job actually has remarks; otherwise leave blank
+        // We store per-job so different jobs on the same machine get independent remarks
+        remarkByJob.set(`${s.machineNo}|${s.jobId}|${s.bottleId}`, comment);
       }
-      remarkByMachine.set(machineNo, texts.map((t, idx) => `${idx + 1}. ${t}`).join('  '));
     }
 
     return source
@@ -1281,7 +1321,7 @@ const totals = useMemo(() => {
           timeText: fmtTime12(startDate),
           startSort: overnightShift(startDate),
           units: s.units,
-          remark: remarkByMachine.get(s.machineNo) ?? '',
+          remark: remarkByJob.get(`${s.machineNo}|${s.jobId}|${s.bottleId}`) ?? '',
         };
       })
       .sort((a, b) => a.machineNo - b.machineNo || b.startSort.getTime() - a.startSort.getTime());
