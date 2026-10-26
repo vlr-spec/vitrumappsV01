@@ -22,8 +22,8 @@ The Vitrum Glass application is an enterprise production-planning ERP specialize
 ### Core Capabilities
 - **Production Schedule Planning**: Multi-machine calendar scheduling, forward-cascading schedule adjustments, automatic changeover calculation, cumulative good bottle projections, and batch persistence with optimistic concurrency.
 - **Master Data Management**: Machine master configurations (Machines 1–4, Double/Triple Gob, maximum sections), bottle master specifications (catalog names, shared bottle weights), machine-specific section speed calibrations, and factory holiday management.
-- **Quality Control (HPR)**: Hourly inspection registers, three-tier defect categorization (Critical, Major, Minor), weight distribution tracking (Front, Middle, Rear, Average), Weight Efficiency (% WT EFF), carton counts, and shift assignment logging.
-- **Reporting & Exporting**: Branded executive export generation for daily schedules, bottle catalogs, and inspection records to Excel and PDF formats.
+- **Quality Control (HPR)**: Hourly inspection registers, three-tier defect categorization (Critical, Major, Minor), weight distribution tracking (Front, Middle, Rear, Average), Weight Efficiency (% WT EFF), carton counts, and shift assignment logging. Supports per-shift Lehr Out Time tracking (0–119 minutes) with shift-lock protection, cross-shift/cross-midnight timeline carry-in, zero-schema timestamp duration encoding, and uncapped actual efficiency reporting.
+- **Reporting & Exporting**: Branded executive export generation for daily schedules, bottle catalogs, and inspection records to Excel and PDF formats. Includes Daily Production Performance Reports (`QualityReport`) and Multi-Machine Performance Reports (`AllMachineReport`) with timeline-accurate runtime and efficiency calculations.
 - **Dynamic Access Control**: Database-backed permissions governing read and edit capabilities per employee across functional modules.
 
 ### Tech Stack
@@ -325,6 +325,7 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `remarks` (`Text`, nullable)
 - `job_id` (`String(20)`, non-null) — *Model defines `nullable=False`, stored as `""` if unassigned.*
 - **Constraints**: `uq_hpr_machine_hour` on (`production_time`, `machine_no`, `report_id`).
+- **Zero-Schema Duration Encoding**: Non-standard segment durations (arising from Lehr Out Time adjustments, split slots, or 3rd-shift carry-ins) are persisted without schema modification by embedding the real duration in minutes directly into `production_time.microsecond` (`minutes * 1000` for durations <= 720 min, and `(minutes - 1320) * 1000 + 500` for overflow <= 1440 min). Standard 60-minute rows store `0` microseconds. Uniqueness constraints, row identity, lock matching, and queries continue using normalized minute values (`_norm_time`), keeping full compatibility with existing DB indexes.
 - `TODO(verify)`: Check whether live PostgreSQL table constraint `hourly_production_job_id_not_null` enforces `NOT NULL` in all deployed databases or whether any legacy rows allow `NULL`.
 
 #### `hpr.hourly_production_defect`
@@ -497,14 +498,14 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `GET /api/production/quality/daily/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
-  - **Response**: Daily quality report with hourly entries across all 4 machines and 3 shifts.
+  - **Response**: Daily quality report with hourly entries across all 4 machines and 3 shifts. For rows with non-standard durations (Lehr Out adjustments, split segments, prior-day carry-in), returns reconstructed `period_start` and `period_end` labels.
 - `GET /api/production/quality/daily/jobs/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
   - **Response**: Job-wise summary of production and quality runs for the selected manufacturing day.
 - `POST /api/production/quality/daily/`
   - **Guard**: Edit access to `Quality Control`
-  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records.
+  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row, which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries and preserves Job ID continuity across midnight.
 
 ---
 
@@ -549,7 +550,7 @@ Source code is located under `src/`.
 - `src/components/`
   - `planning/`: Calendar grid register, `PlanningDrawer`, `EditMachineModal`, `EndJobModal`.
   - `master-management/`: `MachinesModule`, `BottleMasterPanel`, `BottleExportPanel`, `HolidayMasterPanel`.
-  - `quality/`: `ProductionQualityMonitor` (hourly checks, defects, weight efficiency).
+  - `quality/`: `ProductionQualityMonitor` (hourly checks, defects, weight efficiency, Lehr Out inputs/locks), `QualityReport` (daily performance analysis, shift averages), `AllMachineReport` (cross-machine daily summary).
   - `profile/`: User profile display, password change modal.
   - `layout/`: Top navigation bar, sidebar, and module tab switcher.
 - `src/context/`
@@ -560,6 +561,7 @@ Source code is located under `src/`.
   - `qualityRepository.ts`: Quality defect and daily inspection report fetching and saving.
 - `src/utils/`
   - `api.ts`: Centralized `fetch` wrapper injecting bearer tokens, request timeouts (30s), and error formatting.
+  - `layerOutTimeline.ts`: Shared Lehr Out timeline builder (`buildLayerOutTimeline`) and period decoder (`layerOutInputsFromSavedPeriods`) handling variable durations, split rows, and midnight transitions.
   - `planningCalculations.ts` & `calculations.ts`: Furnace draw, output tonnage, speed, and time estimations.
   - `reportHeader.ts`: Centralized enterprise branding utility providing corporate headers across PDF/Excel exports.
   - `exportData.ts`: Formatted dataset exports for Excel and PDF.

@@ -14,6 +14,94 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-25 — Production Duration Calculation Enhancements in AllMachineReport & QualityReport
+- **Problem:**
+  - `QualityReport` and `AllMachineReport` suffered from duration calculation inaccuracies when custom Lehr Out times or split rows were present. Split segments could be miscalculated or double-counted, previous-day carry-in durations into the 9:00 AM hour were lost when the client lacked cached prior-day data, and midnight crossings could distort `runtimeMinutes`.
+  - On a newly initialized production day, the 9:00 AM entry does not yet exist in the database; if the bottle matched the previous day's final job, the system generated an unnecessary new Job ID instead of continuing the existing run.
+- **Root Cause:**
+  - `durationHoursForReportKey` and `splitMachineRuns` relied purely on nominal hourly spacing without passing actual period interval slots.
+  - Backend carry-in resolution in `save_daily_quality` relied on client-supplied labels rather than querying the previous day's authoritative ending timestamp, and job continuity logic checked only existing database records rather than the incoming payload.
+- **Fix:**
+  - `AllMachineReport.tsx` & `QualityReport.tsx`:
+    - Updated `durationHoursForReportKey` and `splitMachineRuns` to accept actual `timelineSlots` computed from `period_start` and `period_end` via `buildLayerOutTimeline`.
+    - Computed timeline slots using absolute timeline minutes (not modulo 1440), eliminating distortions across midnight and shift boundaries.
+    - Updated `runtimeMinutes` to use actual slot boundaries (`endMin - startMin`) with graceful fallback to index ordering.
+  - `Backend/app/api/production/quality_daily.py`:
+    - Pre-queries the previous day's report in `save_daily_quality` to calculate authoritative carry-in durations for the 9:00 AM entry, ensuring consistent interval calculation even when the frontend lacks previous-day cache.
+    - Extended job continuity logic to check both existing database entries and the incoming payload for 9:00 AM entries, preserving continuous Job IDs across midnight.
+- **Files Changed:**
+  - `Backend/app/api/production/quality_daily.py`
+  - `src/components/quality/AllMachineReport.tsx`
+  - `src/components/quality/QualityReport.tsx`
+  - `src/components/dashboard/DashboardModule.tsx`
+  - `src/App.tsx`
+- **API or DB Impact:**
+  - Zero database schema changes. Full backwards compatibility with existing stored records.
+
+---
+
+### 2026-10-24 — Modular Lehr Out Timeline Utility & Efficiency Reporting Refactor
+- **Problem:**
+  - Lehr Out timeline calculation logic was embedded directly within `ProductionQualityMonitor.tsx`, preventing reuse across reporting components and leading to code duplication and inconsistent timeline math.
+- **Root Cause:**
+  - Timeline logic had evolved organically inside the monitor component and was not decoupled into a shared pure utility module.
+- **Fix:**
+  - Created `src/utils/layerOutTimeline.ts` encapsulating:
+    - `buildLayerOutTimeline`: Constructs ordered start/end timeline slots accounting for variable Lehr Out durations, boundary clamping (0–119 min), midnight transitions, and previous-day carry-in.
+    - `layerOutInputsFromSavedPeriods`: Reconstructs per-shift Lehr Out values and carry-in minutes directly from saved `period_start` and `period_end` labels.
+  - Refactored `ProductionQualityMonitor.tsx` and `QualityReport.tsx` to consume the shared timeline module.
+- **Files Changed:**
+  - `src/utils/layerOutTimeline.ts`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - None. Pure frontend architectural refactoring.
+
+---
+
+### 2026-10-23 — Shift Lehr Out Lock & Uncapped Efficiency Display
+- **Problem:**
+  - Lehr Out inputs remained editable even after the shift's final hourly entry had been saved and locked.
+  - Unit efficiency and weight efficiency across `ProductionQualityMonitor` and `QualityReport` were artificially capped at 100% (`Math.min(100, efficiency)`), masking over-speed and above-rated production performance.
+- **Root Cause:**
+  - Lehr Out inputs had no lock guard tied to row state.
+  - Legacy calculation helpers enforced a hard `Math.min(100, ...)` ceiling.
+- **Fix:**
+  - Tied each shift's Lehr Out input disabled state to its final hourly row's lock state (`layerOutLocked = isFirstInShift && !!activeRows[SHIFT_LAST_HOURLY_KEY[shiftId]]?.is_locked`). Checked/saved final rows lock the input for that shift only.
+  - Removed artificial 100% capping from `calcEffForEntry`, `calcUnitEfficiency`, and `calcWeightEfficiency`, displaying true calculated percentages as-is.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - None.
+
+---
+
+### 2026-10-22 — Lehr Out Time Tracking & Zero-Schema Duration Persistence
+- **Problem:**
+  - Plant operators needed to track variable Lehr Out (annealing lehr clearance) times (0–119 min) for each shift's ending hour (4:00 PM, 12:00 AM, 8:00 AM), shifting subsequent shift start times and carrying 3rd-shift adjustments across the 9:00 AM day boundary.
+  - Storing custom durations historically required adding database columns and running migrations across deployed PostgreSQL instances.
+- **Root Cause:**
+  - `hourly_production` schema lacked duration fields, and standard hourly spacing was assumed.
+- **Fix:**
+  - **Timestamp Microsecond Encoding**: Persisted non-standard segment durations directly into `hourly_production.production_time`'s `microsecond` field (`minutes * 1000` for standard durations <= 720 min, `(minutes - 1320) * 1000 + 500` for overflow <= 1440 min). Standard 60-minute entries keep `0` microseconds.
+  - Query functions continue using `_norm_time` (stripping seconds and microseconds) for row identity, lock matching, and unique constraints `(production_time, machine_no, report_id)`.
+  - Updated deletion matching in `save_daily_quality` to use normalized time-of-day rather than exact datetime equality.
+  - Added `period_start` and `period_end` optional fields to `QualityHourlyEntrySchema` and `QualityEntryPayload`.
+  - Added `VITE_API_BASE_URL` alongside `VITE_API_URL` in `.github/workflows/deploy.yml`.
+- **Files Changed:**
+  - `Backend/app/api/production/quality_daily.py`
+  - `Backend/app/schemas/quality.py`
+  - `src/services/qualityRepository.ts`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+  - `.github/workflows/deploy.yml`
+- **API or DB Impact:**
+  - `GET /api/production/quality/daily/` and `POST /api/production/quality/daily/` support optional `period_start` and `period_end` string labels on hourly rows.
+  - Zero database schema modifications, zero DDL migrations.
+
+---
+
 ### 2026-10-16 — Snyk Security Vulnerability Remediations (Containers & Dependencies)
 - **Problem:**
   - Snyk security scans detected container vulnerabilities (outdated base image in `Backend/Dockerfile`, vulnerable `zlib 1.3.2-r0` in frontend container) and 13 unique open-source issues in `package.json` / lockfiles including `proxy-addr` (Critical), `qs` (High/Medium), `brace-expansion` (High/Medium), `dompurify` (Medium XSS), and `traverse` (Medium prototype pollution).

@@ -45,3 +45,32 @@ This document tracks the recent bug fixes and configuration updates made to the 
   5. **Lockfile Transitive Bumps**: Updated `package-lock.json` and `bun.lock` to resolve `brace-expansion` to `1.1.21` (1.x line) & `2.1.7` (2.x line) and `traverse` to `0.3.10` within their existing parent semver ranges.
   6. **Client Bundle Audit**: Verified that `unzipper`, `inflight`, `glob`, and `archiver` are completely absent from browser bundles in `dist/`.
 - **Files Touched**: `Backend/Dockerfile`, `Dockerfile`, `package.json`, `package-lock.json`, `bun.lock`
+
+## 8. Lehr Out Time Management & Zero-Schema-Change Timeline Persistence
+- **Issue**: Plant operations require tracking variable Lehr Out (annealing lehr clearance) times (0–119 minutes) for each shift's final hour (Shift 1 ending at 4:00 PM, Shift 2 ending at 12:00 AM, Shift 3 ending at 8:00 AM). Changing a shift's final hour duration shifts the start time of the subsequent shift and carries over the 3rd shift's adjustment into the next production day's initial 9:00 AM hour. These custom interval durations needed to survive Save, Refresh, and Page Reload without requiring database schema alterations or DDL migrations in deployed PostgreSQL environments.
+- **Fix**:
+  1. **Zero-Schema Persistence**: Persisted non-standard segment durations directly inside the `microsecond` component of `hourly_production.production_time` (`minutes * 1000` for standard durations up to 720 min, and `(minutes - 1320) * 1000 + 500` for overflow up to 1440 min). Default 60-minute rows retain `0` microseconds. Normalization helpers (`_norm_time`) strip microseconds on row identity checks, uniqueness constraints, and lock validations, ensuring zero regressions on existing database queries.
+  2. **Schema & API Updates**: Extended `QualityHourlyEntrySchema` and `QualityEntryPayload` with optional `period_start` and `period_end` string labels. The backend emits reconstructed period labels on GET `/api/production/quality/daily/`.
+  3. **Delete Logic**: Updated deletion query in `save_daily_quality` to match on normalized time-of-day rather than exact datetime equality so rows with embedded microsecond durations are never skipped during delete operations.
+  4. **Deploy Workflow**: Added `VITE_API_BASE_URL` alongside `VITE_API_URL` in `.github/workflows/deploy.yml`.
+- **Files Touched**: `Backend/app/api/production/quality_daily.py`, `Backend/app/schemas/quality.py`, `src/services/qualityRepository.ts`, `src/components/quality/ProductionQualityMonitor.tsx`, `.github/workflows/deploy.yml`
+
+## 9. Shift Lehr Out Locking & Uncapped Efficiency Reporting
+- **Issue**:
+  1. When an operator saved and locked a shift's final hour row, the Lehr Out minute input for that shift remained editable, allowing accidental desynchronization between entered intervals and locked records.
+  2. Efficiency values in both `ProductionQualityMonitor` and `QualityReport` were artificially capped at 100% via `Math.min(100, efficiency)`. When a production line ran above rated speed, the true operational efficiency was hidden.
+- **Fix**:
+  1. **Lehr Out Lock**: Tied the Lehr Out input's disabled state to the shift's final hour row (`layerOutLocked = isFirstInShift && !!activeRows[SHIFT_LAST_HOURLY_KEY[shiftId]]?.is_locked`). Once saved/locked, the input is read-only until the row is unlocked.
+  2. **Uncapped Efficiency**: Removed the 100% ceiling in `calcEffForEntry`, `calcUnitEfficiency`, and `calcWeightEfficiency`, displaying the exact calculated percentage across the quality monitor, PDF exports, and daily reports.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/QualityReport.tsx`
+
+## 10. Modular Lehr Out Timeline & Multi-Machine / Quality Report Duration Calculations
+- **Issue**:
+  1. Timeline calculation logic was tightly coupled to `ProductionQualityMonitor`, preventing other reporting views (`AllMachineReport`, `QualityReport`) from accurately calculating segment runtimes, shift averages, and midnight crossings.
+  2. In `QualityReport` and `AllMachineReport`, durations for split rows or custom Lehr Out hours reverted to default 1-hour slots or failed across midnight, leading to discrepancies between the monitor and summary reports.
+  3. On a brand-new production day, the 9:00 AM entry does not yet exist in the database; if the bottle matches the previous day's final job, the system generated an unnecessary new Job ID instead of preserving job continuity.
+- **Fix**:
+  1. **Shared Timeline Module**: Created `src/utils/layerOutTimeline.ts` providing pure, reusable functions: `buildLayerOutTimeline` (constructs ordered timeline slots handling variable durations, clamps, and midnight crossings) and `layerOutInputsFromSavedPeriods` (rebuilds per-shift Lehr Out values and carry-in minutes directly from saved period labels).
+  2. **Report Accuracy**: Integrated `buildLayerOutTimeline` and `timelineSlots` parameter into `durationHoursForReportKey`, `splitMachineRuns`, and `runtimeMinutes` across `AllMachineReport.tsx` and `QualityReport.tsx`. Duration calculations now utilize absolute timeline minutes rather than modulo 1440.
+  3. **Backend Carry-In & Job Continuity**: In `save_daily_quality`, pre-queries the previous day's report to compute authoritative carry-in durations for 9:00 AM rows even if the client lacked cached previous-day data. Also checks both database records and incoming payload to preserve continuous Job IDs across midnight.
+- **Files Touched**: `src/utils/layerOutTimeline.ts`, `src/components/quality/AllMachineReport.tsx`, `src/components/quality/QualityReport.tsx`, `Backend/app/api/production/quality_daily.py`
