@@ -14,6 +14,37 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-26 — Quality Control Inspection Day Totals, 2-Decimal Efficiency Display & Job-Scoped Remarks in QualityReport
+- **Problem:**
+  - `ProductionQualityMonitor`:
+    - Summary footer row in the UI table and exported PDF report left SQC, QC Hold, and NUM columns empty as spacer cells, providing operators and supervisors with no aggregate day totals for defect and hold volumes across the 24-hour cycle.
+    - Efficiency percentages in both hourly rows and summary statistics were formatted to one decimal place (`.toFixed(1)`), lacking the two-decimal precision required by plant quality assurance.
+  - `QualityReport`:
+    - Remarks recorded in hourly production entries were aggregated machine-wide (`remarkByMachine`), causing remarks from one job to leak across all other jobs run on the same machine throughout that day.
+    - Job start times derived start labels purely from previous hourly timeline slots without respecting actual minute-granular `period_start` timestamps (e.g., "9:17 AM", "12:38 PM") saved on the entry.
+    - Segment efficiency was recomputed from cartons and theoretical targets rather than honoring the monitor's authoritative saved `efficiency_percentage`, and zero-carton production hours (where lines ran with valid bottle and speed but 0 cartons were packed) were excluded rather than contributing 0% to shift averages.
+- **Root Cause:**
+  - Statistics computation in `QualityControlModule` only summed cartons and bottles, lacking accumulators for numeric inspection metrics, and table/PDF summary formatters hardcoded blank spacer cells.
+  - `calcEffForEntry` and summary `avgEff` used `.toFixed(1)`.
+  - `QualityReport` grouped remarks by machine index rather than a composite key of machine, job, and bottle.
+  - `QualityReport` lacked prioritization for the stored `efficiency_percentage` field and omitted zero-carton valid production rows from efficiency aggregations.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Implemented `sumNumericField` in `QualityControlModule` to calculate plain day sums for `sqc`, `qc_hold`, and `num` across all displayed rows, handling empty/null/non-numeric values gracefully while preserving legitimate 0 and positive counts.
+    - Rendered formatted totals (`toLocaleString()`) in the summary footer row of the interactive UI table and PDF export body.
+    - Updated `calcEffForEntry` and summary `avgEff` to display efficiency percentages rounded to two decimal places (`.toFixed(2)`).
+  - `src/components/quality/QualityReport.tsx`:
+    - Refactored remark handling to build a job-scoped map `remarkByJob` keyed by `${machineNo}|${jobId}|${bottleId}`. Remarks now strictly isolate to their originating job and bottle run, deduplicating chronological numbered entries and remaining empty if no remarks were logged for that specific job.
+    - Updated `jobStartLabels` to check `entry.period_start` directly before falling back to timeline indices, preserving exact minute timestamps.
+    - Updated segment efficiency in `QualityReport` to prioritize the authoritative stored `efficiency_percentage` from the hourly record (matching the Hourly Production Monitor), with fallback calculation that includes 0% efficiency when cartons = 0 on active bottle runs with valid speed.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - Zero database schema changes. Zero API contract changes. Display formatting and report aggregation enhancements only.
+
+---
+
 ### 2026-10-25 — Production Duration Calculation Enhancements in AllMachineReport & QualityReport
 - **Problem:**
   - `QualityReport` and `AllMachineReport` suffered from duration calculation inaccuracies when custom Lehr Out times or split rows were present. Split segments could be miscalculated or double-counted, previous-day carry-in durations into the 9:00 AM hour were lost when the client lacked cached prior-day data, and midnight crossings could distort `runtimeMinutes`.
