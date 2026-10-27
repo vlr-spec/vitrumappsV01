@@ -74,3 +74,16 @@ This document tracks the recent bug fixes and configuration updates made to the 
   2. **Report Accuracy**: Integrated `buildLayerOutTimeline` and `timelineSlots` parameter into `durationHoursForReportKey`, `splitMachineRuns`, and `runtimeMinutes` across `AllMachineReport.tsx` and `QualityReport.tsx`. Duration calculations now utilize absolute timeline minutes rather than modulo 1440.
   3. **Backend Carry-In & Job Continuity**: In `save_daily_quality`, pre-queries the previous day's report to compute authoritative carry-in durations for 9:00 AM rows even if the client lacked cached previous-day data. Also checks both database records and incoming payload to preserve continuous Job IDs across midnight.
 - **Files Touched**: `src/utils/layerOutTimeline.ts`, `src/components/quality/AllMachineReport.tsx`, `src/components/quality/QualityReport.tsx`, `Backend/app/api/production/quality_daily.py`
+
+## 11. Quality Control Day Totals (SQC, QC Hold, NUM), Two-Decimal Efficiency Precision & Job-Scoped Remarks
+- **Issue**:
+  1. In `ProductionQualityMonitor`, the summary footer row in both the interactive UI table and PDF exports left SQC, QC Hold, and NUM columns blank, depriving supervisors of daily aggregate totals for quality inspections, hold counts, and defect volumes.
+  2. Efficiency percentages in `ProductionQualityMonitor` were displayed with only one decimal place (`.toFixed(1)`), which was insufficient for plant quality engineering precision requirements.
+  3. In `QualityReport`, hourly remarks were aggregated at the machine level, causing remarks entered for one job to display across all other jobs on that machine. Additionally, start times ignored custom minute-level `period_start` values, and shift efficiency recalculated from cartons instead of using the authoritative stored `efficiency_percentage` from the Hourly Production Monitor (excluding 0% intervals during line clearings).
+- **Fix**:
+  1. **SQC, QC Hold & NUM Day Totals**: Added `sumNumericField` in `QualityControlModule` to calculate daily sums for `sqc`, `qc_hold`, and `num` across all displayed rows. Rendered formatted totals (`toLocaleString()`) in both the table footer summary row and the exported PDF summary.
+  2. **Two-Decimal Efficiency Display**: Formatted hourly efficiency and summary average efficiency to two decimal places (`.toFixed(2)`) across `ProductionQualityMonitor`, preserving underlying floating-point values for persistence.
+  3. **Job-Scoped Remarks in QualityReport**: Replaced machine-wide remark aggregation with a job-scoped map keyed by `machineNo|jobId|bottleId`. Each job now displays only its own chronological, deduplicated numbered remarks without cross-job pollution.
+  4. **Minute-Granular Period Starts & Authoritative Efficiency**: Updated `jobStartLabels` to use `entry.period_start` directly when present. Updated segment efficiency to prioritize stored `efficiency_percentage` from the hourly record and handle zero-carton runs as 0% efficiency when bottle and speed are valid.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/QualityReport.tsx`
+
