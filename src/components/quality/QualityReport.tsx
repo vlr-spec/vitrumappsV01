@@ -133,6 +133,44 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
 };
 
 /**
+ * Pieces EFF% of one hourly row — the SAME value the Hourly Production
+ * Monitor's "Pieces EFF%" column shows for that row, reproduced here without
+ * touching the monitor: actual bottles (packing size × cartons) ÷ the row's
+ * theoretical As-Per-Speed bottles (speed/min × Machine Gob × real period
+ * duration) × 100. Zero cartons is a real value and contributes a 0%; rows
+ * without a bottle, packing size, cartons, speed or a valid duration return
+ * null so the caller excludes them from the average — exactly the blank-cell
+ * rule of the grid column. Values above 100% stay uncapped, like the grid.
+ */
+const piecesEffForEntry = (
+  e: QualityHourlyEntry | undefined,
+  gobCount: number,
+  durationHours: number
+): number | null => {
+  if (!e?.bottle_id || !e.packing_size || !e.cartons) return null;
+  const packingSize = parseInt(e.packing_size, 10);
+  const cartons = parseInt(e.cartons, 10);
+  const bottlesN = packingSize * cartons;
+  if (cartons === 0 && packingSize > 0) return 0;
+  if (!Number.isFinite(durationHours) || durationHours <= 0) return null;
+  const theoretical = calculateTheoreticalBottles(
+    parseFloat(e.speed_per_min),
+    gobCount,
+    durationHours
+  );
+  if (
+    !Number.isFinite(bottlesN) || bottlesN <= 0 ||
+    !Number.isFinite(theoretical) || theoretical <= 0
+  ) return null;
+  const efficiency = (bottlesN / theoretical) * 100;
+  if (!Number.isFinite(efficiency)) return null;
+  // The grid column stores its cell as efficiency.toFixed(1) — mirror that
+  // exact value so the shift average is the average of the very entries the
+  // Hourly Production Monitor displays.
+  return parseFloat(efficiency.toFixed(1));
+};
+
+/**
  * Weight Efficiency % — draw based only.
  *
  *   Weight Efficiency % = (Actual Total Draw / Total Draw as per Speed) × 100
@@ -722,26 +760,27 @@ interface ShiftWiseRow {
   machineNo: number;
   /** Actual bottles of each shift — null when the shift has no records. */
   actualUnits: (number | null)[];
-  /** Efficiency % of each shift on its own — null when the shift has no valid production data. */
+  /** Efficiency % of each shift — mean of that shift's Pieces EFF% column entries; null when the shift has no valid entries. */
   efficiency: (number | null)[];
-  /** Machine efficiency for the day — mean of the shift efficiencies above. */
+  /** Machine efficiency for the day — the Hourly Production Monitor's Day Avg / Summary value; null when it has none. */
   overallEff: number | null;
 }
 
 /**
- * Whole-number percentage for the Shift-Wise report — "85%", "90%", "91%".
+ * One-decimal percentage for the Shift-Wise report — "85.0%", "88.6%", "93.1%".
  * Display formatting of the shown value only: the underlying calculated
- * figure is never rounded or stored, and the Daily report's two-decimal
- * `fmtEff` formatter is left untouched.
+ * figure is never stored rounded, and the Daily report's formatter is left
+ * untouched. The precision mirrors the Hourly Production Monitor's own
+ * displayed efficiency (grid cells and Day Avg / Summary row).
  */
-const fmtPctWhole = (n: number | null): string => (n === null ? '—' : `${Math.round(n)}%`);
-
+const fmtPctWhole = (n: number | null): string =>
+  (n === null ? '—' : `${n.toFixed(1)}%`);
 /**
  * Builds the Shift-Wise Production & Efficiency Report — a frontend-only
- * calculation that is deliberately separate from the Daily Production
- * Performance Report's rows/totals: it reads the already-loaded hourly
- * records of the selected date and changes nothing else (no new API call, no
- * database or backend change, no shared mutable state).
+ * view that reads the already-loaded hourly records of the selected date and
+ * changes nothing else (no new API call, no database or backend change, no
+ * shared mutable state, and no change to the Hourly Production Monitor's own
+ * calculations).
  *
  * Every meaningful hourly HPR/Quality record of the selected date is grouped
  * by machine and by the report's own shift mapping (shiftIdForReportKey —
@@ -753,37 +792,32 @@ const fmtPctWhole = (n: number | null): string => (n === null ? '—' : `${Math.
  *     Quality Module shows). Never theoretical/As-Per-Speed units and never
  *     draw in tons.
  *
- *   • Efficiency % — the SAME verified per-segment efficiency the Hourly
- *     Production Monitor and this file already use, applied to each machine +
- *     shift INDEPENDENTLY (never one daily figure copied into all three
- *     shifts):
+ *   • Shift Efficiency % (Shift 1 / 2 / 3) — the AVERAGE of that shift's
+ *     "Pieces EFF%" column entries from the Hourly Production Monitor: each
+ *     row's own grid value (actual bottles ÷ As-Per-Speed theoretical bottles
+ *     over the row's REAL timeline duration), reproduced by piecesEffForEntry.
+ *     Zero-carton rows contribute their grid 0%; rows without a bottle,
+ *     packing size, cartons, speed or a valid duration stay blank and are
+ *     omitted from the average — exactly the grid's rules. Only that shift's
+ *     entries are averaged, so a daily figure is never reused across shifts.
+ *     Values above 100% stay uncapped, like the grid.
  *
- *       1. the segment's stored efficiency_percentage (the HPM's authoritative
- *          value = actual bottles ÷ calculateTheoreticalBottles(Speed/min,
- *          Machine Gob, REAL period duration) × 100), when a bottle is
- *          assigned and the stored value is valid;
- *       2. otherwise the production-UNITS formula
- *          calcUnitEfficiency(actual units, expected units) with the same
- *          zero-cartons rules the Hourly Production Monitor applies.
+ *   • Overall EFF% — the machine's "Day Avg / Summary" value taken on the
+ *     SAME rule the Hourly Production Monitor's summary row uses: rows with
+ *     zero cartons contribute their computed Pieces EFF% (a real 0% when a
+ *     bottle and packing size are assigned), every other row contributes its
+ *     STORED efficiency_percentage, and blank/invalid values are omitted; the
+ *     overall figure is the plain average of those applicable entries. It is
+ *     never recalculated from production output or bottle counts.
  *
- *     Segment durations come from the shared Lehr Out timeline
- *     (buildLayerOutTimeline over the rows' saved period_start/period_end —
- *     first-row carry-in and Lehr Out adjustments included), exactly as the
- *     HPM stored them; no shift length or duration is hardcoded. The shift's
- *     figure is the simple average of its own segments' efficiencies, like the
- *     Quality grid's summary — and, being averaged from only that shift's
- *     segments, it can never be a daily value reused across shifts. Values
- *     above 100% stay uncapped, like the grid.
- *
- *   • Overall EFF% — the machine's efficiency for the day: the mean of its
- *     OWN shift efficiencies, (Shift 1 + Shift 2 + Shift 3) ÷ 3 when all
- *     three shifts produced. A shift with no data is left out of the mean
- *     instead of being counted as a false 0% (a machine that ran only two
- *     shifts is judged on those two), and a machine with no efficiency at
- *     all keeps null so the caller renders '—'.
+ * Row durations come from the shared Lehr Out timeline
+ * (buildLayerOutTimeline over the rows' saved period_start/period_end —
+ * first-row carry-in and Lehr Out adjustments included), exactly the
+ * durations the HPM's grid computes its Pieces EFF% cells with; no shift
+ * length or duration is hardcoded.
  *
  * A shift with no records keeps null production, and a shift with no valid
- * efficiency segment keeps null efficiency, so the caller renders '—' instead
+ * Pieces EFF% entry keeps null efficiency, so the caller renders '—' instead
  * of inventing values.
  */
 const buildShiftWiseRows = (
@@ -820,6 +854,7 @@ const buildShiftWiseRows = (
     const hasRecord = [false, false, false];
     const actual = [0, 0, 0];
     const effValues: number[][] = [[], [], []];
+    const dayAvgValues: number[] = [];
 
     for (const key of ordered) {
       const entry = byTime[key];
@@ -829,41 +864,32 @@ const buildShiftWiseRows = (
       hasRecord[idx] = true;
       actual[idx] += hourlyUnits(entry);
 
-      // Segment efficiency — same priority order as the report's grid logic:
-      // the stored HPM value first (authoritative, real period duration),
-      // the production-UNITS formula only when it is unavailable. An entry
-      // must carry a bottle assignment to have a valid efficiency, exactly
-      // as the Hourly Production Monitor requires.
-      const hasValidBottle = entryBottle(entry) !== '';
-      let segmentEff: number | null = null;
+      // Row duration exactly as the HPM grid's durationByKey: the real
+      // minutes of this row's Lehr Out timeline slot (carry-in and
+      // shift-ending adjustments included), so the Pieces EFF% cell we
+      // reproduce below is the very value the monitor displays.
+      const slot = timelineSlots[key];
+      const durationHours = slot
+        ? slot.durationMinutes / 60
+        : durationHoursForReportKey(ordered, key, timelineSlots);
 
-      if (hasValidBottle) {
-        const storedEff = parseFloat(entry.efficiency_percentage ?? '');
-        if (!Number.isNaN(storedEff) && Number.isFinite(storedEff)) {
-          segmentEff = storedEff;
-        }
-      }
+      // Shift efficiency entry — this row's own "Pieces EFF%" column cell
+      // from the Hourly Production Monitor (zero cartons contributes its
+      // grid 0%; a row without a bottle, packing size, cartons, speed or a
+      // valid duration stays blank and is left out of the average).
+      const piecesEff = piecesEffForEntry(entry, gob, durationHours);
+      if (piecesEff !== null) effValues[idx].push(piecesEff);
 
-      if (segmentEff === null && hasValidBottle) {
-        const durationHours = durationHoursForReportKey(ordered, key, timelineSlots);
-        const theoretical = calculateTheoreticalBottles(
-          parseNum(entry.speed_per_min),
-          gob,
-          durationHours
-        );
-        const packingSize = parseInt(entry.packing_size ?? '', 10);
-        const cartons = parseInt(entry.cartons ?? '', 10);
-        const gridUnits = packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
-        const validSpeed = parseNum(entry.speed_per_min) > 0;
-        segmentEff =
-          cartons === 0 && packingSize > 0 && validSpeed
-            ? 0
-            : gridUnits > 0
-              ? calcUnitEfficiency(gridUnits, theoretical)
-              : null;
-      }
-
-      if (segmentEff !== null) effValues[idx].push(segmentEff);
+      // Day Avg / Summary entry — the SAME rule the HPM summary row uses:
+      // zero-carton rows contribute their computed Pieces EFF% (a real 0%
+      // when a bottle and packing size are assigned), every other row
+      // contributes its stored efficiency_percentage; blank/invalid values
+      // are omitted. Never derived from production output or bottle counts.
+      const ct = parseInt(entry.cartons ?? '', 10);
+      const summaryEff: number | null = ct === 0
+        ? piecesEff
+        : parseFloat(String(entry.efficiency_percentage ?? ''));
+      if (summaryEff !== null && !Number.isNaN(summaryEff)) dayAvgValues.push(summaryEff);
     }
 
     const shiftEff = effValues.map(averageEfficiency);
@@ -871,11 +897,11 @@ const buildShiftWiseRows = (
       machineNo,
       actualUnits: hasRecord.map((seen, i) => (seen ? actual[i] : null)),
       efficiency: shiftEff,
-      // Machine efficiency for the day — the mean of this machine's OWN shift
-      // efficiencies. A null shift (no valid data) is excluded from the mean,
-      // never counted as a false 0%; a machine with no efficiency at all
-      // stays null and renders '—'.
-      overallEff: averageEfficiency(shiftEff.filter((v): v is number => v !== null)),
+      // Overall EFF% — taken on the Day Avg / Summary rule above, directly
+      // from the row efficiencies; never a mean of the shift columns and
+      // never recalculated from production output or bottle counts. A machine
+      // with no applicable entry stays null and renders '—'.
+      overallEff: averageEfficiency(dayAvgValues),
     });
   }
   return out;
@@ -1640,92 +1666,139 @@ const totals = useMemo(() => {
           API call, no database or backend change. It shares the card, table
           and scroll classes so the existing print and responsive rules apply
           to it unchanged. */}
-      <div
-        className="dppr-card"
-        style={{
-          backgroundColor: C.white,
-          border: `1px solid ${C.border}`,
-          borderRadius: '10px',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-          overflow: 'hidden',
-          marginBottom: '16px',
-        }}
-      >
-        <div
-          style={{
-            padding: '9px 12px',
-            backgroundColor: C.headerBg,
-            borderBottom: `1px solid ${C.border}`,
-          }}
-        >
-          <h3 style={{ margin: 0, fontSize: '13px', fontWeight: 700, color: '#1e293b' }}>
-            Shift-Wise Production &amp; Efficiency Report
-          </h3>
-        </div>
+      
+{/* Shift-Wise Production & Efficiency Report
+    Frontend-only. Uses existing loaded hourly records.
+    No database, backend, API, or calculation changes. */}
+<div
+  className="dppr-card"
+  style={{
+    backgroundColor: C.white,
+    border: `1px solid ${C.border}`,
+    borderRadius: '10px',
+    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
+    overflow: 'hidden',
+    marginBottom: '16px',
+    width: '50%',
+    maxWidth: '50%',
+    boxSizing: 'border-box',
+    marginLeft: 0,
+    marginRight: 'auto',
+  }}
+>
+  <div
+    style={{
+      padding: '9px 12px',
+      backgroundColor: C.headerBg,
+      borderBottom: `1px solid ${C.border}`,
+    }}
+  >
+    <h3
+      style={{
+        margin: 0,
+        fontSize: '13px',
+        fontWeight: 700,
+        color: '#1e293b',
+      }}
+    >
+      Shift-Wise Production &amp; Efficiency Report
+    </h3>
+  </div>
 
-        <div className="dppr-table-scroll" style={{ overflowX: 'auto' }}>
-          <table
-            className="dppr-table"
-            style={{ width: '100%', borderCollapse: 'collapse', minWidth: '860px' }}
+  <div
+    className="dppr-table-scroll"
+    style={{ overflowX: 'auto', width: '100%' }}
+  >
+    <table
+      className="dppr-table"
+      style={{
+        width: '100%',
+        minWidth: 0,
+        tableLayout: 'fixed',
+        borderCollapse: 'collapse',
+      }}
+    >
+      <thead>
+        <tr>
+          <th
+            rowSpan={2}
+            style={{
+              ...swTh(),
+              width: '16%',
+              borderBottom: `2px solid ${swBorder}`,
+            }}
           >
-            <thead>
-              <tr>
-                <th
-                  rowSpan={2}
-                  style={{ ...swTh(), width: '70px', borderBottom: `2px solid ${swBorder}` }}
-                >
-                  M/C No
-                </th>
-                <th colSpan={3} style={swTh(true)}>
-                  Actual Production
-                </th>
-                <th colSpan={4} style={swTh(true, true)}>
-                  Efficiency %
-                </th>
-              </tr>
-              <tr>
-                <th style={{ ...swThBottom(), width: '112px' }}>Shift 1</th>
-                <th style={{ ...swThBottom(), width: '112px' }}>Shift 2</th>
-                <th style={{ ...swThBottom(), width: '112px' }}>Shift 3</th>
-                <th style={{ ...swThBottom(), width: '96px' }}>Shift 1</th>
-                <th style={{ ...swThBottom(), width: '96px' }}>Shift 2</th>
-                <th style={{ ...swThBottom(), width: '96px' }}>Shift 3</th>
-                <th style={{ ...swThBottom(true), width: '104px' }}>Overall EFF%</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shiftWiseRows.map((r, i) => (
-                <tr
-                  key={r.machineNo}
-                  style={{
-                    backgroundColor: i % 2 === 0 ? C.white : '#f8fafc',
-                    printColorAdjust: 'exact',
-                  }}
-                >
-                  <td style={{ ...swTd, textAlign: 'center', fontWeight: 600 }}>{r.machineNo}</td>
-                  {r.actualUnits.map((v, s) => (
-                    <td key={`prod-${s}`} style={swTd}>
-                      {v === null ? '—' : fmtUnits(v)}
-                    </td>
-                  ))}
-                  {r.efficiency.map((v, s) => (
-                    <td key={`eff-${s}`} style={swTd}>
-                      {fmtPctWhole(v)}
-                    </td>
-                  ))}
-                  <td style={{ ...swTdLast, fontWeight: 600 }}>{fmtPctWhole(r.overallEff)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            M/C No
+          </th>
+          <th colSpan={4} style={swTh(true, true)}>
+            Efficiency %
+          </th>
+        </tr>
+        <tr>
+          <th style={{ ...swThBottom(), width: '21%' }}>
+            Shift 1
+          </th>
+          <th style={{ ...swThBottom(), width: '21%' }}>
+            Shift 2
+          </th>
+          <th style={{ ...swThBottom(), width: '21%' }}>
+            Shift 3
+          </th>
+          <th style={{ ...swThBottom(true), width: '21%' }}>
+            Overall EFF%
+          </th>
+        </tr>
+      </thead>
 
-        {!loading && !loadError && !hasShiftWiseData && (
-          <div style={{ padding: '8px 14px', fontSize: '12px', color: C.textMuted, borderTop: `1px solid ${C.border}` }}>
-            No hourly HPR / Quality production records found for {dateLabel}.
-          </div>
-        )}
-      </div>
+      <tbody>
+        {shiftWiseRows.map((r, i) => (
+          <tr
+            key={r.machineNo}
+            style={{
+              backgroundColor:
+                i % 2 === 0 ? C.white : '#f8fafc',
+              printColorAdjust: 'exact',
+            }}
+          >
+            <td
+              style={{
+                ...swTd,
+                textAlign: 'center',
+                fontWeight: 600,
+              }}
+            >
+              {r.machineNo}
+            </td>
+
+            {r.efficiency.map((v, s) => (
+              <td key={`eff-${s}`} style={swTd}>
+                {fmtPctWhole(v)}
+              </td>
+            ))}
+
+            <td style={{ ...swTdLast, fontWeight: 600 }}>
+              {fmtPctWhole(r.overallEff)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+
+  {!loading && !loadError && !hasShiftWiseData && (
+    <div
+      style={{
+        padding: '8px 14px',
+        fontSize: '12px',
+        color: C.textMuted,
+        borderTop: `1px solid ${C.border}`,
+      }}
+    >
+      No hourly HPR / Quality production records found for {dateLabel}.
+    </div>
+  )}
+</div>
+
 
       <div
         className="dppr-card"

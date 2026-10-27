@@ -1038,7 +1038,7 @@ const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1
   // the final percentage is formatted to two decimal places; the underlying
   // value is unchanged (the save path converts this string back to a number,
   // so persisted data is unaffected by the extra display digit).
-  return efficiency.toFixed(2);
+  return efficiency.toFixed(1);
 };
 
 const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): string => {
@@ -3567,7 +3567,7 @@ export const QualityControlModule: React.FC = () => {
     return {
       totalCartons,
       totalBottles,
-      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(2) : '—',
+      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
       totalSqc: sumNumericField('sqc'),
       totalQcHold: sumNumericField('qc_hold'),
       totalNum: sumNumericField('num'),
