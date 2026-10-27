@@ -64,7 +64,7 @@ export const Header: React.FC = () => {
       {/* Center: Current Module Name */}
       <div className="hidden md:flex items-center justify-center flex-1">
         <h2 className="text-3xl font-bold text-blue-900 bg-slate-50 px-5 py-1.5 rounded-full border border-slate-200/80">
-          {activeModule === 'Quality Control' ? 'Hourly Production Monitor' : activeModule}
+          {activeModule === 'Quality Control' ? 'Hourly Production Report' : activeModule}
         </h2>
       </div>
 

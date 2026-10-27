@@ -1003,7 +1003,9 @@ type DefectGroup = { group: 'Critical' | 'Major' | 'Minor'; items: string[] };
 const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
   const ps = parseInt(e?.packing_size ?? '');
   const ct = parseInt(e?.cartons ?? '');
-  return ps > 0 && ct > 0 ? String(ps * ct) : '';
+  // Zero cartons is a real value: display 0 bottles instead of blank. Blank or
+  // invalid cartons still leave the cell empty.
+  return ps > 0 && ct >= 0 ? String(ps * ct) : '';
 };
 
 /**
@@ -1015,8 +1017,14 @@ const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
  */
 const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1): string => {
   if (!e?.bottle_id || !e.packing_size || !e.cartons) return '';
-  const bottlesN = parseInt(e.packing_size) * parseInt(e.cartons);
+  const packingSize = parseInt(e.packing_size);
+  const cartons = parseInt(e.cartons);
+  const bottlesN = packingSize * cartons;
   const speed = parseFloat(e.speed_per_min);
+  // Zero cartons means zero actual bottles, so the row shows 0% instead of a
+  // blank cell. This also gives the row a real 0 to contribute to the summary
+  // average, matching the zero-carton rule used by the production reports.
+  if (cartons === 0 && packingSize > 0) return '0';
   // Actual row duration drives the expected production. A zero/invalid
   // duration or a missing speed has no meaningful expected output, so the
   // efficiency is left blank instead of dividing by zero or showing NaN.
@@ -3548,7 +3556,12 @@ export const QualityControlModule: React.FC = () => {
       if (!isNaN(ct)) totalCartons += ct;
       const ps = parseInt(e?.packing_size ?? '');
       if (!isNaN(ct) && ps > 0) totalBottles += ps * ct;
-      const eff = parseFloat(String(e?.efficiency_percentage ?? ''));
+      // A zero-carton row displays 0% and must contribute that 0 to the
+      // summary average. Every other row keeps using its stored
+      // (authoritative) efficiency, so their formula is unchanged.
+      const eff = ct === 0
+        ? parseFloat(calcEffFor(e, activeMachine, durationByKey[k] ?? 1))
+        : parseFloat(String(e?.efficiency_percentage ?? ''));
       if (!isNaN(eff)) effVals.push(eff);
     }
     return {
@@ -3559,7 +3572,7 @@ export const QualityControlModule: React.FC = () => {
       totalQcHold: sumNumericField('qc_hold'),
       totalNum: sumNumericField('num'),
     };
-  }, [activeRows, activeMachine, displayKeys, durationByKey]);
+  }, [activeRows, activeMachine, calcEffFor, displayKeys, durationByKey]);
 
   // ── Save / Export / Print ────────────────────────────────────────────────
   /**
@@ -4009,7 +4022,7 @@ doc.setFontSize(8);
 doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 
       doc.setFontSize(10);
-      doc.text('Hourly Production Monitor', 10, 22);
+      doc.text('Hourly Production Report', 10, 22);
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
       doc.text(`Date: ${dateLabel}    Machine: No. ${activeMachine}`, 10, 27.5);
@@ -4483,7 +4496,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             onMouseEnter={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
             onMouseLeave={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            Daily Report
+            Speed & Weight
           </button>
           <button
             onClick={() => setActiveMachine(0)}
@@ -4504,7 +4517,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
             onMouseEnter={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
             onMouseLeave={(e) => { if (activeMachine !== 0) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            Monthly Report
+            Monthly Draw
           </button>
           {/* Report ID — always reserves identical space so the navbar never shifts */}
           <div
@@ -4522,7 +4535,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           </div>
           <div style={{ flex: '1 0 auto', minWidth: '8px' }} />
 
-          {/* Date filter — pick any date directly (shared by HRP + Daily Report) */}
+          {/* Date filter — pick any date directly (shared by HRP + Speed & Weight) */}
             <label
               style={{
                 display: 'flex', alignItems: 'center', gap: '5px', padding: '3px 8px',
