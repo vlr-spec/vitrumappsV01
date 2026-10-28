@@ -22,7 +22,8 @@
  * the same qualityRepository call. Neither touches the report's calculations,
  * the Quality Module, the API or the database.
  *
- * The Shift-Wise Production & Efficiency Report rendered above the Daily
+ * The Shift-Wise Efficiency Report
+ rendered above the Daily
  * table is another read-only view of those SAME hourly records: actual bottle
  * production, an independent efficiency per machine and shift, and each
  * machine's overall day efficiency, calculated in this file only — no extra
@@ -536,7 +537,7 @@ const splitMachineRuns = (
 const fmtUnits = (n: number) => Math.round(n).toLocaleString('en-US');
 const fmt1 = (n: number) => n.toFixed(1);
 const fmt3 = (n: number) => n.toFixed(3);
-const fmtEff = (n: number | null) => (n === null ? '—' : n.toFixed(2));
+const fmtEff = (n: number | null) => (n === null ? '—' : n.toFixed(1));
 
 // ─── Job-wise table helpers ───────────────────────────────────────────────
 
@@ -754,8 +755,9 @@ const jobStartLabels = (dayHourly: QualityDayHourly): Map<string, string> => {
   return out;
 };
 
-// ─── Shift-Wise Production & Efficiency Report ─────────────────────────────
-/** One machine's row of the Shift-Wise Production & Efficiency Report. */
+// ─── Shift-Wise Efficiency Report ─────────────────────────────
+/** One machine's row of the Shift-Wise Efficiency Report
+. */
 interface ShiftWiseRow {
   machineNo: number;
   /** Actual bottles of each shift — null when the shift has no records. */
@@ -776,7 +778,8 @@ interface ShiftWiseRow {
 const fmtPctWhole = (n: number | null): string =>
   (n === null ? '—' : `${n.toFixed(1)}%`);
 /**
- * Builds the Shift-Wise Production & Efficiency Report — a frontend-only
+ * Builds the Shift-Wise Efficiency Report
+ — a frontend-only
  * view that reads the already-loaded hourly records of the selected date and
  * changes nothing else (no new API call, no database or backend change, no
  * shared mutable state, and no change to the Hourly Production Monitor's own
@@ -1673,7 +1676,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     borderRight: `1px solid ${C.border}`,
     fontSize: '12.5px',
     color: C.textMain,
-    textAlign: 'right',
+    textAlign: 'center',
     whiteSpace: 'nowrap',
   };
   const swTdLast: React.CSSProperties = { ...swTd, borderRight: 'none' };
@@ -1771,25 +1774,6 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         }}
       >
         <div
-          style={{
-            padding: '9px 12px',
-            backgroundColor: C.headerBg,
-            borderBottom: `1px solid ${C.border}`,
-          }}
-        >
-          <h3
-            style={{
-              margin: 0,
-              fontSize: '13px',
-              fontWeight: 700,
-              color: '#1e293b',
-            }}
-          >
-            Shift-Wise Efficiency Report
-          </h3>
-        </div>
-
-        <div
           className="dppr-table-scroll"
           style={{ overflowX: 'auto', width: '100%' }}
         >
@@ -1816,7 +1800,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                 </th>
 
                 <th colSpan={4} style={swTh(true, true)}>
-                  Efficiency %
+                  Shift Efficiency %
                 </th>
               </tr>
 
@@ -2128,6 +2112,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
             </thead>
             <tbody>
               {rows.flatMap((r, idx) => {
+                // Row-wise Overall Efficiency — average of this bottle row's
+                // available Shift I/II/III efficiencies only. Missing shifts
+                // ('—' / no production) are ignored, never counted as 0%.
+                const rowOverallEff = averageEfficiency(
+                  r.shiftEff.filter((v): v is number => v !== null)
+                );
                 const row = (
                   <tr
                     key={r.rowKey}
@@ -2151,7 +2141,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                     <td style={td}>{fmtEff(r.shiftEff[0])}</td>
                     <td style={td}>{fmtEff(r.shiftEff[1])}</td>
                     <td style={td}>{fmtEff(r.shiftEff[2])}</td>
-                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(machineOverallEff.get(r.machineNo) ?? null)}</td>
+                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(rowOverallEff)}</td>
                   </tr>
                 );
 
