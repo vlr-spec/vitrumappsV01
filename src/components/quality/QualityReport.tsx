@@ -986,6 +986,10 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
+  // Hide/Show Total — controls every total row of the Daily Production
+  // Performance Report together (machine-wise totals + the bottom Grand Total).
+  // Purely a display toggle: no data is re-fetched and no calculation changes.
+  const [totalsHidden, setTotalsHidden] = useState(false);
 
   // Job-wise rows for the same selected date. `jobLoadedKey` mirrors
   // `loadedKey`: the job table is only ever rendered while these rows belong
@@ -1220,44 +1224,44 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           theoreticalTotal += theoretical;
 
           // Per-hour segment efficiency — use the stored Pieces EFF% value from the
-  // hourly record (the same value the Hourly Production Monitor displays),
-  // as it is the authoritative source. Fall back to the existing calculation
-  // only when the stored value is not available or invalid.
-  //
-  // An entry must have a bottle assignment and valid positive production speed
-  // to be considered a valid efficiency entry (per HPM rules). Do not use
-  // hasMeaningfulData() directly — check the actual assignment fields separately.
-  const hasValidBottle = entryBottle(entry) !== '';
-  const hasValidSpeed = parseNum(entry.speed_per_min) > 0;
+          // hourly record (the same value the Hourly Production Monitor displays),
+          // as it is the authoritative source. Fall back to the existing calculation
+          // only when the stored value is not available or invalid.
+          //
+          // An entry must have a bottle assignment and valid positive production speed
+          // to be considered a valid efficiency entry (per HPM rules). Do not use
+          // hasMeaningfulData() directly — check the actual assignment fields separately.
+          const hasValidBottle = entryBottle(entry) !== '';
+          const hasValidSpeed = parseNum(entry.speed_per_min) > 0;
 
-  let pointEff: number | null = null;
+          let pointEff: number | null = null;
 
-  // Priority 1: Use the stored efficiency_percentage (authoritative, matches HPM)
-  if (hasValidBottle) {
-    const storedEff = parseFloat(entry.efficiency_percentage ?? '');
-    if (!Number.isNaN(storedEff) && Number.isFinite(storedEff)) {
-      pointEff = storedEff;
-    }
-  }
+          // Priority 1: Use the stored efficiency_percentage (authoritative, matches HPM)
+          if (hasValidBottle) {
+            const storedEff = parseFloat(entry.efficiency_percentage ?? '');
+            if (!Number.isNaN(storedEff) && Number.isFinite(storedEff)) {
+              pointEff = storedEff;
+            }
+          }
 
-  // Priority 2: Calculate from units (fallback when stored value unavailable)
-  // Apply the same zero-cartons rules as the Hourly Production Monitor
-  if (pointEff === null && hasValidBottle) {
-    const packingSize = parseInt(entry.packing_size ?? '', 10);
-    const cartons = parseInt(entry.cartons ?? '', 10);
-    const gridUnits =
-      entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
-    // Include zero-percent entries when cartons = 0 but valid bottle, packing size, and speed
-    const validSpeed = parseNum(entry.speed_per_min) > 0;
-    pointEff = entryBottle(entry) && cartons === 0 && packingSize > 0 && validSpeed ? 0 :
-      (gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null);
-  }
+          // Priority 2: Calculate from units (fallback when stored value unavailable)
+          // Apply the same zero-cartons rules as the Hourly Production Monitor
+          if (pointEff === null && hasValidBottle) {
+            const packingSize = parseInt(entry.packing_size ?? '', 10);
+            const cartons = parseInt(entry.cartons ?? '', 10);
+            const gridUnits =
+              entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
+            // Include zero-percent entries when cartons = 0 but valid bottle, packing size, and speed
+            const validSpeed = parseNum(entry.speed_per_min) > 0;
+            pointEff = entryBottle(entry) && cartons === 0 && packingSize > 0 && validSpeed ? 0 :
+              (gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null);
+          }
 
-  // Include valid entries only (never add blank values)
-  if (pointEff !== null) {
-    shiftEffValues[idx].push(pointEff);
-    overallEffValues.push(pointEff);
-  }
+          // Include valid entries only (never add blank values)
+          if (pointEff !== null) {
+            shiftEffValues[idx].push(pointEff);
+            overallEffValues.push(pointEff);
+          }
 
           if (weight !== null) {
             weightSum += weight * durationHours;
@@ -1353,13 +1357,13 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     return out;
   }, [dayHourly, machines, bottles, packingNamesFor, formatPackedName]);
 
-// Total row — quantities above are straight sums, but Efficiency % is the
-// simple average of every producing hourly segment's efficiency, exactly as
-// the Quality grid's summary calculates it. It is never a weighted
-// actual/expected ratio and never weight/draw. Collecting the per-segment
-// values (rather than averaging each run's average) keeps a machine with two
-// jobs weighted by its hours, just like the grid.
-const totals = useMemo(() => {
+  // Total row — quantities above are straight sums, but Efficiency % is the
+  // simple average of every producing hourly segment's efficiency, exactly as
+  // the Quality grid's summary calculates it. It is never a weighted
+  // actual/expected ratio and never weight/draw. Collecting the per-segment
+  // values (rather than averaging each run's average) keeps a machine with two
+  // jobs weighted by its hours, just like the grid.
+  const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
     const shiftEffValues: number[][] = [[], [], []];
     const overallEffValues: number[] = [];
@@ -1408,6 +1412,77 @@ const totals = useMemo(() => {
   // True once at least one hourly record sits behind the Shift-Wise table —
   // only used for its own "no records" note, never for a calculation.
   const hasShiftWiseData = shiftWiseRows.some((r) => r.actualUnits.some((v) => v !== null));
+
+  // Overall Efficiency per machine — taken from the Shift-Wise Production &
+  // Efficiency Report above (its own Overall EFF% column), which is the single
+  // source of truth. These values are displayed on every Daily row of the
+  // machine and on its machine-wise total row; they are never recalculated
+  // from the Daily rows, production units or draw.
+  const machineOverallEff = useMemo(() => {
+    const map = new Map<number, number | null>();
+    for (const r of shiftWiseRows) map.set(r.machineNo, r.overallEff);
+    return map;
+  }, [shiftWiseRows]);
+
+  // Machine-wise totals — aggregated ONLY from the original bottle/job rows of
+  // each machine (never from another total row), so the Grand Total below can
+  // keep aggregating the same original rows without double-counting. Shift
+  // efficiencies reuse the existing Daily-row aggregation; Overall Efficiency
+  // comes from the upper report via machineOverallEff.
+  const machineTotals = useMemo(() => {
+    const map = new Map<number, {
+      machineNo: number;
+      asPerSpeedUnits: number;
+      asPerSpeedDraw: number;
+      shiftUnits: number[];
+      actualUnits: number;
+      actualDraw: number;
+      shiftEff: (number | null)[];
+      overallEff: number | null;
+    }>();
+    for (const machineNo of MACHINE_NOS) {
+      const shiftUnits = [0, 0, 0];
+      const shiftEffValues: number[][] = [[], [], []];
+      let asPerSpeedUnits = 0;
+      let asPerSpeedDraw = 0;
+      let actualUnits = 0;
+      let actualDraw = 0;
+      for (const r of rows) {
+        if (r.machineNo !== machineNo) continue;
+        asPerSpeedUnits += r.asPerSpeedUnits;
+        asPerSpeedDraw += r.asPerSpeedDraw;
+        actualUnits += r.actualUnits;
+        actualDraw += r.actualDraw;
+        r.shiftUnits.forEach((u, i) => {
+          shiftUnits[i] += u;
+        });
+        r.shiftEffValues.forEach((values, i) => {
+          shiftEffValues[i].push(...values);
+        });
+      }
+      map.set(machineNo, {
+        machineNo,
+        asPerSpeedUnits,
+        asPerSpeedDraw,
+        shiftUnits,
+        actualUnits,
+        actualDraw,
+        shiftEff: shiftEffValues.map(averageEfficiency),
+        overallEff: machineOverallEff.get(machineNo) ?? null,
+      });
+    }
+    return map;
+  }, [rows, machineOverallEff]);
+
+  // Grand Total Overall EFF% — arithmetic average of the four machine-level
+  // Overall EFF% values from the Shift-Wise report. Production-related Grand
+  // Total values still come from `totals` (original rows only).
+  const grandOverallEff = useMemo(() => {
+    const values = MACHINE_NOS
+      .map((machineNo) => machineOverallEff.get(machineNo))
+      .filter((v): v is number => v !== null && v !== undefined);
+    return averageEfficiency(values);
+  }, [machineOverallEff]);
 
   // Job-wise production summary — one row per machine + Job ID applicable to
   // the selected production date: the API rows when the job endpoint answered,
@@ -1606,6 +1681,8 @@ const totals = useMemo(() => {
       <style>{`
         .dppr-table tbody tr:not(.dppr-m1):not(.dppr-m2):not(.dppr-m3):not(.dppr-m4):hover td { background-color: #f8fafc; }
         .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
+        .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #e8eef7; }
+        .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbe4f0; }
         .dppr-table tbody tr.dppr-m1:hover td { background-color: #EFF6FF; }
         .dppr-table tbody tr.dppr-m2:hover td { background-color: #F0FDF4; }
         .dppr-table tbody tr.dppr-m3:hover td { background-color: #FFFBEB; }
@@ -1638,6 +1715,8 @@ const totals = useMemo(() => {
           .dppr-remark-tip { display: none !important; }
           .dppr-table tbody tr:hover td { background-color: transparent; }
           .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
+          .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #e8eef7; }
+          .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbe4f0; }
 
           /* Applied by the Print button: everything except this report leaves
              the printed page, so only the report is sent to the printer. */
@@ -1666,138 +1745,225 @@ const totals = useMemo(() => {
           API call, no database or backend change. It shares the card, table
           and scroll classes so the existing print and responsive rules apply
           to it unchanged. */}
-      
-{/* Shift-Wise Production & Efficiency Report
+
+      {/* Shift-Wise Production & Efficiency Report
     Frontend-only. Uses existing loaded hourly records.
     No database, backend, API, or calculation changes. */}
-<div
-  className="dppr-card"
-  style={{
-    backgroundColor: C.white,
-    border: `1px solid ${C.border}`,
-    borderRadius: '10px',
-    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-    overflow: 'hidden',
-    marginBottom: '16px',
-    width: '50%',
-    maxWidth: '50%',
-    boxSizing: 'border-box',
-    marginLeft: 0,
-    marginRight: 'auto',
-  }}
->
-  <div
-    style={{
-      padding: '9px 12px',
-      backgroundColor: C.headerBg,
-      borderBottom: `1px solid ${C.border}`,
-    }}
-  >
-    <h3
-      style={{
-        margin: 0,
-        fontSize: '13px',
-        fontWeight: 700,
-        color: '#1e293b',
-      }}
-    >
-      Shift-Wise Production &amp; Efficiency Report
-    </h3>
-  </div>
 
-  <div
-    className="dppr-table-scroll"
-    style={{ overflowX: 'auto', width: '100%' }}
-  >
-    <table
-      className="dppr-table"
-      style={{
-        width: '100%',
-        minWidth: 0,
-        tableLayout: 'fixed',
-        borderCollapse: 'collapse',
-      }}
-    >
-      <thead>
-        <tr>
-          <th
-            rowSpan={2}
+      <div
+        className="dppr-card"
+        style={{
+          backgroundColor: C.white,
+          border: `1px solid ${C.border}`,
+          borderRadius: '10px',
+          boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
+          overflow: 'hidden',
+          marginBottom: '16px',
+          width: '30%',
+          maxWidth: '30%',
+          boxSizing: 'border-box',
+          marginLeft: 0,
+          marginRight: 'auto',
+        }}
+      >
+        <div
+          style={{
+            padding: '9px 12px',
+            backgroundColor: C.headerBg,
+            borderBottom: `1px solid ${C.border}`,
+          }}
+        >
+          <h3
             style={{
-              ...swTh(),
-              width: '16%',
-              borderBottom: `2px solid ${swBorder}`,
+              margin: 0,
+              fontSize: '13px',
+              fontWeight: 700,
+              color: '#1e293b',
             }}
           >
-            M/C No
-          </th>
-          <th colSpan={4} style={swTh(true, true)}>
-            Efficiency %
-          </th>
-        </tr>
-        <tr>
-          <th style={{ ...swThBottom(), width: '21%' }}>
-            Shift 1
-          </th>
-          <th style={{ ...swThBottom(), width: '21%' }}>
-            Shift 2
-          </th>
-          <th style={{ ...swThBottom(), width: '21%' }}>
-            Shift 3
-          </th>
-          <th style={{ ...swThBottom(true), width: '21%' }}>
-            Overall EFF%
-          </th>
-        </tr>
-      </thead>
+            Shift-Wise Production &amp; Efficiency Report
+          </h3>
+        </div>
 
-      <tbody>
-        {shiftWiseRows.map((r, i) => (
-          <tr
-            key={r.machineNo}
+        <div
+          className="dppr-table-scroll"
+          style={{ overflowX: 'auto', width: '100%' }}
+        >
+          <table
+            className="dppr-table"
             style={{
-              backgroundColor:
-                i % 2 === 0 ? C.white : '#f8fafc',
-              printColorAdjust: 'exact',
+              width: '100%',
+              minWidth: 0,
+              tableLayout: 'fixed',
+              borderCollapse: 'collapse',
             }}
           >
-            <td
-              style={{
-                ...swTd,
-                textAlign: 'center',
-                fontWeight: 600,
-              }}
-            >
-              {r.machineNo}
-            </td>
+            <thead>
+              <tr>
+                <th
+                  rowSpan={2}
+                  style={{
+                    ...swTh(),
+                    width: '16%',
+                    borderBottom: `2px solid ${swBorder}`,
+                  }}
+                >
+                  M/C No
+                </th>
 
-            {r.efficiency.map((v, s) => (
-              <td key={`eff-${s}`} style={swTd}>
-                {fmtPctWhole(v)}
-              </td>
-            ))}
+                <th colSpan={4} style={swTh(true, true)}>
+                  Efficiency %
+                </th>
+              </tr>
 
-            <td style={{ ...swTdLast, fontWeight: 600 }}>
-              {fmtPctWhole(r.overallEff)}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  </div>
+              <tr>
+                <th style={{ ...swThBottom(), width: '21%' }}>
+                  Shift 1
+                </th>
+                <th style={{ ...swThBottom(), width: '21%' }}>
+                  Shift 2
+                </th>
+                <th style={{ ...swThBottom(), width: '21%' }}>
+                  Shift 3
+                </th>
+                <th style={{ ...swThBottom(true), width: '21%' }}>
+                  Overall EFF%
+                </th>
+              </tr>
+            </thead>
 
-  {!loading && !loadError && !hasShiftWiseData && (
-    <div
-      style={{
-        padding: '8px 14px',
-        fontSize: '12px',
-        color: C.textMuted,
-        borderTop: `1px solid ${C.border}`,
-      }}
-    >
-      No hourly HPR / Quality production records found for {dateLabel}.
-    </div>
-  )}
-</div>
+            <tbody>
+              {shiftWiseRows.map((r, i) => (
+                <tr
+                  key={r.machineNo}
+                  style={{
+                    backgroundColor:
+                      i % 2 === 0 ? C.white : '#f8fafc',
+                    printColorAdjust: 'exact',
+                  }}
+                >
+                  <td
+                    style={{
+                      ...swTd,
+                      textAlign: 'center',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {r.machineNo}
+                  </td>
+
+                  {r.efficiency.map((v, s) => (
+                    <td key={`eff-${s}`} style={swTd}>
+                      {fmtPctWhole(v)}
+                    </td>
+                  ))}
+
+                  <td style={{ ...swTdLast, fontWeight: 600 }}>
+                    {fmtPctWhole(r.overallEff)}
+                  </td>
+                </tr>
+              ))}
+
+              {/* Total row: average efficiency across all machines */}
+              <tr
+                style={{
+                  backgroundColor: '#dbeafe',
+                  fontWeight: 700,
+                  borderTop: '2px solid #93c5fd',
+                  printColorAdjust: 'exact',
+                }}
+              >
+                <td
+                  style={{
+                    ...swTd,
+                    textAlign: 'center',
+                    fontWeight: 700,
+                    backgroundColor: '#dbeafe',
+                  }}
+                >
+                  Total
+                </td>
+
+                {[0, 1, 2].map((shiftIndex) => {
+                  const values = shiftWiseRows
+                    .map((r) => r.efficiency[shiftIndex])
+                    .filter(
+                      (v): v is number =>
+                        typeof v === 'number' &&
+                        Number.isFinite(v)
+                    );
+
+                  const average =
+                    values.length > 0
+                      ? values.reduce((sum, v) => sum + v, 0) /
+                      values.length
+                      : null;
+
+                  return (
+                    <td
+                      key={`total-shift-${shiftIndex}`}
+                      style={{
+                        ...swTd,
+                        fontWeight: 700,
+                        backgroundColor: '#dbeafe',
+                        borderTop: '2px solid #93c5fd',
+                      }}
+                    >
+                      {average === null
+                        ? '—'
+                        : `${average.toFixed(1)}%`}
+                    </td>
+                  );
+                })}
+
+                <td
+                  style={{
+                    ...swTdLast,
+                    fontWeight: 700,
+                    backgroundColor: '#dbeafe',
+                    borderTop: '2px solid #93c5fd',
+                  }}
+                >
+                  {(() => {
+                    const values = shiftWiseRows
+                      .map((r) => r.overallEff)
+                      .filter(
+                        (v): v is number =>
+                          typeof v === 'number' &&
+                          Number.isFinite(v)
+                      );
+
+                    if (values.length === 0) {
+                      return '—';
+                    }
+
+                    const average =
+                      values.reduce((sum, v) => sum + v, 0) /
+                      values.length;
+
+                    return `${average.toFixed(1)}%`;
+                  })()}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {!loading && !loadError && !hasShiftWiseData && (
+          <div
+            style={{
+              padding: '8px 14px',
+              fontSize: '12px',
+              color: C.textMuted,
+              borderTop: `1px solid ${C.border}`,
+            }}
+          >
+            No hourly HPR / Quality production records found for{' '}
+            {dateLabel}.
+          </div>
+        )}
+      </div>
+
 
 
       <div
@@ -1854,6 +2020,21 @@ const totals = useMemo(() => {
 
           {/* Print / Refresh — screen only; never part of the printed report. */}
           <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              type="button"
+              onClick={() => setTotalsHidden((hidden) => !hidden)}
+              title={totalsHidden ? 'Show machine-wise and Grand Total rows' : 'Hide machine-wise and Grand Total rows'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 12px',
+                fontSize: '12.5px', fontWeight: 500, color: '#1e293b', backgroundColor: '#ffffff',
+                border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
+                whiteSpace: 'nowrap', transition: 'background-color 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+            >
+              {totalsHidden ? 'Show Total' : 'Hide Total'}
+            </button>
             <button
               type="button"
               onClick={handlePrint}
@@ -1942,51 +2123,104 @@ const totals = useMemo(() => {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr
-                  key={r.rowKey}
-                  className={`dppr-m${r.machineNo}`}
-                  style={{ backgroundColor: MACHINE_ROW_BG[r.machineNo] ?? 'transparent', printColorAdjust: 'exact' }}
-                >
-                  <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
-                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.bottleName) || undefined}>
-                    {r.packingName || r.bottleName || '—'}
-                  </td>
-                  <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
-                  <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
-                  <td style={td}>{r.runtimeMinutes > 0 ? r.runtimeMinutes : '—'}</td>
-                  <td style={td}>{fmtUnits(r.asPerSpeedUnits)}</td>
-                  <td style={td}>{fmt3(r.asPerSpeedDraw)}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[0])}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[1])}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[2])}</td>
-                  <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.actualUnits)}</td>
-                  <td style={td}>{fmt3(r.actualDraw)}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[0])}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[1])}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[2])}</td>
-                  <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(r.overallEff)}</td>
-                </tr>
-              ))}
+              {rows.flatMap((r, idx) => {
+                const row = (
+                  <tr
+                    key={r.rowKey}
+                    className={`dppr-m${r.machineNo}`}
+                    style={{ backgroundColor: MACHINE_ROW_BG[r.machineNo] ?? 'transparent', printColorAdjust: 'exact' }}
+                  >
+                    <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
+                    <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.bottleName) || undefined}>
+                      {r.packingName || r.bottleName || '—'}
+                    </td>
+                    <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
+                    <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
+                    <td style={td}>{r.runtimeMinutes > 0 ? r.runtimeMinutes : '—'}</td>
+                    <td style={td}>{fmtUnits(r.asPerSpeedUnits)}</td>
+                    <td style={td}>{fmt3(r.asPerSpeedDraw)}</td>
+                    <td style={td}>{fmtUnits(r.shiftUnits[0])}</td>
+                    <td style={td}>{fmtUnits(r.shiftUnits[1])}</td>
+                    <td style={td}>{fmtUnits(r.shiftUnits[2])}</td>
+                    <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.actualUnits)}</td>
+                    <td style={td}>{fmt3(r.actualDraw)}</td>
+                    <td style={td}>{fmtEff(r.shiftEff[0])}</td>
+                    <td style={td}>{fmtEff(r.shiftEff[1])}</td>
+                    <td style={td}>{fmtEff(r.shiftEff[2])}</td>
+                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(machineOverallEff.get(r.machineNo) ?? null)}</td>
+                  </tr>
+                );
 
-              {/* Total row — weighted from totals, never an average of efficiencies */}
-              <tr className="dppr-total" style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td style={{ ...td, fontWeight: 700 }} colSpan={2}>Total</td>
-                <td style={td} />
-                <td style={td} />
-                <td style={td}></td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.asPerSpeedUnits)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.asPerSpeedDraw)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[0])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[1])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[2])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.actualUnits)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.actualDraw)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[0])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[1])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[2])}</td>
-                <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(totals.overallEff)}</td>
-              </tr>
+                // Machine-wise total row — inserted immediately after the last
+                // bottle/job entry of this machine. Hidden by the Hide Total
+                // button together with the Grand Total below.
+                const lastOfMachine =
+                  idx === rows.length - 1 || rows[idx + 1].machineNo !== r.machineNo;
+                if (!lastOfMachine || totalsHidden) return [row];
+
+                const mt = machineTotals.get(r.machineNo);
+                const totalRow = (
+                  <tr
+                    key={`machine-total-${r.machineNo}`}
+                    className="dppr-total dppr-machine-total"
+                    style={{
+                      backgroundColor: '#e8eef7',
+                      borderTop: '2px solid #cbd5e1',
+                      printColorAdjust: 'exact',
+                    }}
+                  >
+                    <td style={{ ...td, fontWeight: 700, textAlign: 'left', whiteSpace: 'normal' }} colSpan={2}>
+                      Machine {r.machineNo} Total
+                    </td>
+                    <td style={td} />
+                    <td style={td} />
+                    <td style={td}></td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.asPerSpeedUnits ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmt3(mt?.asPerSpeedDraw ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[0] ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[1] ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[2] ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.actualUnits ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmt3(mt?.actualDraw ?? 0)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[0] ?? null)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[1] ?? null)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[2] ?? null)}</td>
+                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(mt?.overallEff ?? null)}</td>
+                  </tr>
+                );
+                return [row, totalRow];
+              })}
+
+              {/* Grand Total — production columns still come from the existing
+                  Daily report totals (original rows only, never the machine-wise
+                  total rows); Overall EFF% is the average of the four
+                  machine-level Overall EFF% values from the upper report. */}
+              {!totalsHidden && (
+                <tr
+                  className="dppr-total dppr-grand-total"
+                  style={{
+                    backgroundColor: '#dbe4f0',
+                    borderTop: '2px solid #94a3b8',
+                    printColorAdjust: 'exact',
+                  }}
+                >
+                  <td style={{ ...td, fontWeight: 700 }} colSpan={2}>Total</td>
+                  <td style={td} />
+                  <td style={td} />
+                  <td style={td}></td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.asPerSpeedUnits)}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.asPerSpeedDraw)}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[0])}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[1])}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[2])}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.actualUnits)}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.actualDraw)}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[0])}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[1])}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[2])}</td>
+                  <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(grandOverallEff)}</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
