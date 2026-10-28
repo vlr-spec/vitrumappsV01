@@ -14,6 +14,37 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-28 — Efficiency Precision Standardization (1 Decimal Place), Streamlined Shift-Wise Efficiency Card & Machine-Wise Totals with Visibility Toggle in Daily Production Performance Report
+- **Problem:**
+  - `ProductionQualityMonitor`:
+    - Efficiency percentages formatted to two decimal places (`.toFixed(2)`) introduced visual clutter and did not conform to the operational plant standard of 1-decimal precision (`0.0%`).
+  - `QualityReport`:
+    - The upper "Shift-Wise Production & Efficiency Report" displayed redundant "Actual Production" columns (Shift 1, 2, and 3) that duplicated figures from the lower Daily Production Performance Report, occupied excessive horizontal space (100% width card), lacked cross-machine summary averages, and calculated machine Overall EFF% as a plain average of the three shift values rather than mirroring the Hourly Production Monitor's authoritative Day Avg / Summary rule.
+    - In the "Daily Production Performance Report" (DPPR), each machine's runs lacked intermediate machine-level total rows, forcing supervisors to manually sum bottle runs for multi-job machines.
+    - The DPPR row-level Overall EFF% and Grand Total Overall EFF% were disconnected from the upper Shift-Wise report's machine overall efficiencies.
+    - Users had no mechanism to collapse or hide total rows when reviewing dense raw production schedules or preparing simplified printouts.
+- **Root Cause:**
+  - `calcEffForEntry` and `avgEff` formatted numbers with `.toFixed(2)`.
+  - `QualityReport.tsx` had a wide dual-purpose table structure for Shift-Wise reporting, lacked machine total grouping logic, lacked synchronization with `shiftWiseRows` machine-level overall efficiency, and had no state toggle for totals visibility.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Standardized `calcEffForEntry` and summary `avgEff` to display efficiency rounded to one decimal place (`.toFixed(1)`).
+  - `src/components/quality/QualityReport.tsx`:
+    - Added helper `piecesEffForEntry` reproducing the Hourly Production Monitor's Pieces EFF% column (including 0% contribution for zero cartons on active jobs) formatted to one decimal place (`parseFloat(efficiency.toFixed(1))`).
+    - Updated `fmtPctWhole` to format percentages to one decimal place (`${n.toFixed(1)}%`).
+    - Streamlined the "Shift-Wise Production & Efficiency Report": removed redundant Actual Production columns, focused purely on efficiency (Shift 1, Shift 2, Shift 3, Overall EFF%), added an all-machine summary Total footer row calculating average shift and overall efficiencies, constrained container width to a compact 30% (`width: 30%, maxWidth: 30%`), and aligned machine Overall EFF% to the Hourly Production Monitor's Day Avg rule.
+    - Introduced machine-level total rows (`Machine <M> Total`) beneath each machine's bottle runs in the Daily Production Performance Report, summing As Per Speed Units & Draw, Shift Units, Actual Units, and Actual Draw while inheriting machine overall efficiency from the Shift-Wise report (`machineOverallEff`).
+    - Synchronized individual row Overall EFF% to display the machine's overall efficiency from `machineOverallEff`, and computed Grand Total Overall EFF% as the cross-machine arithmetic mean of the machine overall efficiencies (`grandOverallEff`).
+    - Added an interactive "Hide Total" / "Show Total" button in the DPPR header (with screen hover states and `.no-print` exemption) that dynamically toggles the visibility of all machine-wise total rows and the Grand Total row simultaneously.
+    - Added `.dppr-machine-total:hover` and `.dppr-grand-total:hover` CSS styling for both screen and print media queries.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - Zero database schema changes. Zero API contract changes. Display formatting, layout optimization, and UI reporting enhancements only.
+
+---
+
 ### 2026-10-26 — Quality Control Inspection Day Totals, 2-Decimal Efficiency Display & Job-Scoped Remarks in QualityReport
 - **Problem:**
   - `ProductionQualityMonitor`:
