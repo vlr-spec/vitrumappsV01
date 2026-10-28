@@ -1437,6 +1437,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       shiftUnits: number[];
       actualUnits: number;
       actualDraw: number;
+      runtimeMinutes: number;
       shiftEff: (number | null)[];
       overallEff: number | null;
     }>();
@@ -1447,12 +1448,14 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       let asPerSpeedDraw = 0;
       let actualUnits = 0;
       let actualDraw = 0;
+      let runtimeMinutes = 0;
       for (const r of rows) {
         if (r.machineNo !== machineNo) continue;
         asPerSpeedUnits += r.asPerSpeedUnits;
         asPerSpeedDraw += r.asPerSpeedDraw;
         actualUnits += r.actualUnits;
         actualDraw += r.actualDraw;
+        runtimeMinutes += r.runtimeMinutes;
         r.shiftUnits.forEach((u, i) => {
           shiftUnits[i] += u;
         });
@@ -1467,6 +1470,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         shiftUnits,
         actualUnits,
         actualDraw,
+        runtimeMinutes,
         shiftEff: shiftEffValues.map(averageEfficiency),
         overallEff: machineOverallEff.get(machineNo) ?? null,
       });
@@ -1762,7 +1766,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           width: '30%',
           maxWidth: '30%',
           boxSizing: 'border-box',
-          marginLeft: 0,
+          marginLeft: 'auto',
           marginRight: 'auto',
         }}
       >
@@ -1781,7 +1785,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
               color: '#1e293b',
             }}
           >
-            Shift-Wise Production &amp; Efficiency Report
+            Shift-Wise Efficiency Report
           </h3>
         </div>
 
@@ -2012,7 +2016,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
           <div style={{ flex: 1, textAlign: 'center' }}>
             <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#1e293b' }}>
-              Daily Production Performance Report
+              Machine Wise Production and Efficiency
             </h2>
           </div>
 
@@ -2174,7 +2178,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                     </td>
                     <td style={td} />
                     <td style={td} />
-                    <td style={td}></td>
+                    <td style={{ ...td, fontWeight: 700 }}>{mt?.runtimeMinutes ? mt.runtimeMinutes : '—'}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.asPerSpeedUnits ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmt3(mt?.asPerSpeedDraw ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[0] ?? 0)}</td>
