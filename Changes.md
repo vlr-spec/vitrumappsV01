@@ -98,3 +98,18 @@ This document tracks the recent bug fixes and configuration updates made to the 
   3. **Machine-Wise Totals & Unified Overall EFF%**: Added machine subtotal rows (`Machine <M> Total`) beneath each machine's bottle runs in the DPPR summing As-Per-Speed and actual units and draw; synchronized individual row and machine total Overall EFF% to the authoritative `machineOverallEff` from the upper Shift-Wise report; and set Grand Total Overall EFF% to the arithmetic mean across machines (`grandOverallEff`).
   4. **Interactive Totals Toggle**: Added a "Hide Total" / "Show Total" button in the DPPR header (styled with hover transitions and marked `.no-print`) that toggles the visibility of all machine-wise total rows and the Grand Total row simultaneously.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/QualityReport.tsx`
+
+## 13. QualityReport Layout & Calculation Refinements: Machine Wise Production and Efficiency Naming, Runtime Minutes in Machine Subtotals, Row-Wise Overall Efficiency, and Centered Shift-Wise Card
+- **Issue**:
+  1. In `QualityReport`, the main table header was labeled "Daily Production Performance Report", whereas plant operational nomenclature requires "Machine Wise Production and Efficiency".
+  2. The upper summary card retained the old title "Shift-Wise Production & Efficiency Report" with a separate inner header bar, left alignment (`marginLeft: 0`), right-aligned numeric cells, and column header "Efficiency %", rather than being a clean, centered shift efficiency overview.
+  3. In the machine subtotal rows (`Machine <M> Total`), the Runtime (Min) column was rendered as an empty cell (`<td style={td}></td>`), missing the aggregate operational minutes across the machine's runs.
+  4. In the main table's individual bottle/job rows, the "Overall" efficiency column was displaying the entire machine's day-wide overall efficiency (`machineOverallEff`) rather than calculating the specific bottle run's own overall efficiency across its active shifts.
+  5. The efficiency formatting helper `fmtEff` retained a 2-decimal fallback (`.toFixed(2)`), conflicting with the plant-standard 1-decimal efficiency display (`0.0%`).
+- **Fix**:
+  1. **Report Titles & Layout Polish**: Renamed the main report table header to "Machine Wise Production and Efficiency" and the upper card to "Shift-Wise Efficiency Report" with column header "Shift Efficiency %". Removed the redundant inner header bar from the Shift-Wise card, horizontally centered the container (`marginLeft: 'auto', marginRight: 'auto'`), and centered efficiency percentage values within table cells (`textAlign: 'center'`).
+  2. **Runtime Minutes in Machine Subtotals**: Added `runtimeMinutes` aggregation to `machineTotals` (summing runtime across all runs for each machine) and rendered the total minutes in bold (`mt?.runtimeMinutes ? mt.runtimeMinutes : '—'`) in the `Machine <M> Total` row.
+  3. **Row-Wise Overall Efficiency**: Updated individual bottle rows to compute their own row-level Overall Efficiency (`rowOverallEff`) by averaging only their available Shift I, II, and III efficiencies (`averageEfficiency(r.shiftEff.filter(v => v !== null))`), ignoring unworked shifts rather than penalizing as 0%. The machine total row continues to display the authoritative whole-machine overall efficiency.
+  4. **Strict 1-Decimal Formatting**: Updated `fmtEff` in `QualityReport.tsx` to format all efficiency percentages with one decimal place (`n.toFixed(1)`).
+- **Files Touched**: `src/components/quality/QualityReport.tsx`
+
