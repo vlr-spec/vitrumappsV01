@@ -78,15 +78,14 @@ const C = {
 };
 
 /**
- * Very light pastel row background per machine — Daily Production Performance
- * Report body rows only. Header, total row, Weight Efficiency strip and the
- * job-wise table are intentionally left untinted.
+ * Row background per machine — Daily Production Performance Report body rows.
+ * All machines use white; total rows keep their own highlighting below.
  */
 const MACHINE_ROW_BG: Record<number, string> = {
-  1: '#EFF6FF',
-  2: '#F0FDF4',
-  3: '#FFFBEB',
-  4: '#F5F3FF',
+  1: '#ffffff',
+  2: '#ffffff',
+  3: '#ffffff',
+  4: '#ffffff',
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -1688,12 +1687,46 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       <style>{`
         .dppr-table tbody tr:not(.dppr-m1):not(.dppr-m2):not(.dppr-m3):not(.dppr-m4):hover td { background-color: #f8fafc; }
         .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
-        .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #e8eef7; }
-        .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbe4f0; }
-        .dppr-table tbody tr.dppr-m1:hover td { background-color: #EFF6FF; }
-        .dppr-table tbody tr.dppr-m2:hover td { background-color: #F0FDF4; }
-        .dppr-table tbody tr.dppr-m3:hover td { background-color: #FFFBEB; }
-        .dppr-table tbody tr.dppr-m4:hover td { background-color: #F5F3FF; }
+        .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #eff6ff; }
+        .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbeafe; }
+        .dppr-table tbody tr.dppr-m1:hover td { background-color: #ffffff; }
+        .dppr-table tbody tr.dppr-m2:hover td { background-color: #ffffff; }
+        .dppr-table tbody tr.dppr-m3:hover td { background-color: #ffffff; }
+        .dppr-table tbody tr.dppr-m4:hover td { background-color: #ffffff; }
+
+        /* Shift Efficiency % table — responsive card + contained horizontal
+           scrolling. Columns keep a usable minimum width on small screens
+           instead of compressing or overflowing the page. */
+        .dppr-sw-card {
+          width: 30%;
+          max-width: 30%;
+          margin-left: auto;
+          margin-right: auto;
+          box-sizing: border-box;
+        }
+        .dppr-sw-scroll {
+          width: 100%;
+          max-width: 100%;
+          overflow-x: auto;
+          overflow-y: hidden;
+          -webkit-overflow-scrolling: touch;
+        }
+        .dppr-sw-scroll .dppr-table {
+          width: 100%;
+          min-width: 380px;
+          table-layout: fixed;
+          border-collapse: collapse;
+        }
+        @media screen and (max-width: 1200px) {
+          .dppr-sw-card { width: 45%; max-width: 45%; }
+        }
+        @media screen and (max-width: 900px) {
+          .dppr-sw-card { width: 70%; max-width: 70%; }
+        }
+        @media screen and (max-width: 640px) {
+          .dppr-sw-card { width: 100%; max-width: 100%; }
+          .dppr-sw-scroll .dppr-table { min-width: 400px; }
+        }
         .dppr-remark-text { display: block; white-space: normal; overflow-wrap: break-word; }
         .dppr-remark-tip {
           display: none;
@@ -1722,8 +1755,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           .dppr-remark-tip { display: none !important; }
           .dppr-table tbody tr:hover td { background-color: transparent; }
           .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
-          .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #e8eef7; }
-          .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbe4f0; }
+          .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #eff6ff; }
+          .dppr-table tbody tr.dppr-grand-total:hover td { background-color: #dbeafe; }
 
           /* Applied by the Print button: everything except this report leaves
              the printed page, so only the report is sent to the printer. */
@@ -1757,200 +1790,209 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     Frontend-only. Uses existing loaded hourly records.
     No database, backend, API, or calculation changes. */}
 
-      <div
-        className="dppr-card"
-        style={{
-          backgroundColor: C.white,
-          border: `1px solid ${C.border}`,
-          borderRadius: '10px',
-          boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-          overflow: 'hidden',
-          marginBottom: '16px',
-          width: '30%',
-          maxWidth: '30%',
-          boxSizing: 'border-box',
-          marginLeft: 'auto',
-          marginRight: 'auto',
-        }}
-      >
-        <div
-          className="dppr-table-scroll"
-          style={{ overflowX: 'auto', width: '100%' }}
-        >
-          <table
-            className="dppr-table"
+      
+<div
+  className="dppr-card dppr-sw-card"
+  style={{
+    backgroundColor: C.white,
+    border: `1px solid ${C.border}`,
+    borderRadius: '10px',
+    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
+    overflow: 'hidden',
+    marginBottom: '16px',
+  }}
+>
+  <div
+    className="dppr-table-scroll dppr-sw-scroll"
+    style={{ overflowX: 'auto', overflowY: 'hidden', width: '100%' }}
+  >
+    <table
+      className="dppr-table"
+      style={{
+        width: '100%',
+        borderCollapse: 'collapse',
+      }}
+    >
+      <colgroup>
+        <col style={{ width: '20%' }} />
+        <col style={{ width: '20%' }} />
+        <col style={{ width: '20%' }} />
+        <col style={{ width: '20%' }} />
+        <col style={{ width: '20%' }} />
+      </colgroup>
+
+      <thead>
+        {/* Main heading */}
+        <tr>
+          <th
+            colSpan={5}
             style={{
-              width: '100%',
-              minWidth: 0,
-              tableLayout: 'fixed',
-              borderCollapse: 'collapse',
+              ...swTh(true, true),
+              textAlign: 'center',
+              fontWeight: 700,
+              borderBottom: `2px solid ${swBorder}`,
             }}
           >
-            <thead>
-              <tr>
-                <th
-                  rowSpan={2}
-                  style={{
-                    ...swTh(),
-                    width: '16%',
-                    borderBottom: `2px solid ${swBorder}`,
-                  }}
-                >
-                  M/C No
-                </th>
+            Shift Efficiency %
+          </th>
+        </tr>
 
-                <th colSpan={4} style={swTh(true, true)}>
-                  Shift Efficiency %
-                </th>
-              </tr>
+        {/* Column headings */}
+        <tr>
+          <th style={swTh()}>
+            M/C No
+          </th>
 
-              <tr>
-                <th style={{ ...swThBottom(), width: '21%' }}>
-                  Shift 1
-                </th>
-                <th style={{ ...swThBottom(), width: '21%' }}>
-                  Shift 2
-                </th>
-                <th style={{ ...swThBottom(), width: '21%' }}>
-                  Shift 3
-                </th>
-                <th style={{ ...swThBottom(true), width: '21%' }}>
-                  Overall EFF%
-                </th>
-              </tr>
-            </thead>
+          <th style={swThBottom()}>
+            Shift 1
+          </th>
 
-            <tbody>
-              {shiftWiseRows.map((r, i) => (
-                <tr
-                  key={r.machineNo}
-                  style={{
-                    backgroundColor:
-                      i % 2 === 0 ? C.white : '#f8fafc',
-                    printColorAdjust: 'exact',
-                  }}
-                >
-                  <td
-                    style={{
-                      ...swTd,
-                      textAlign: 'center',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {r.machineNo}
-                  </td>
+          <th style={swThBottom()}>
+            Shift 2
+          </th>
 
-                  {r.efficiency.map((v, s) => (
-                    <td key={`eff-${s}`} style={swTd}>
-                      {fmtPctWhole(v)}
-                    </td>
-                  ))}
+          <th style={swThBottom()}>
+            Shift 3
+          </th>
 
-                  <td style={{ ...swTdLast, fontWeight: 600 }}>
-                    {fmtPctWhole(r.overallEff)}
-                  </td>
-                </tr>
-              ))}
+          <th style={swThBottom(true)}>
+            Overall EFF%
+          </th>
+        </tr>
+      </thead>
 
-              {/* Total row: average efficiency across all machines */}
-              <tr
+      <tbody>
+        {shiftWiseRows.map((r, i) => (
+          <tr
+            key={r.machineNo}
+            style={{
+              backgroundColor:
+                i % 2 === 0 ? C.white : '#f8fafc',
+              printColorAdjust: 'exact',
+            }}
+          >
+            <td
+              style={{
+                ...swTd,
+                textAlign: 'center',
+                fontWeight: 600,
+              }}
+            >
+              {r.machineNo}
+            </td>
+
+            {r.efficiency.map((v, s) => (
+              <td key={`eff-${s}`} style={swTd}>
+                {fmtPctWhole(v)}
+              </td>
+            ))}
+
+            <td style={{ ...swTdLast, fontWeight: 600 }}>
+              {fmtPctWhole(r.overallEff)}
+            </td>
+          </tr>
+        ))}
+
+        {/* Total row */}
+        <tr
+          style={{
+            backgroundColor: '#dbeafe',
+            fontWeight: 700,
+            borderTop: '2px solid #93c5fd',
+            printColorAdjust: 'exact',
+          }}
+        >
+          <td
+            style={{
+              ...swTd,
+              textAlign: 'center',
+              fontWeight: 700,
+              backgroundColor: '#dbeafe',
+            }}
+          >
+            Total
+          </td>
+
+          {[0, 1, 2].map((shiftIndex) => {
+            const values = shiftWiseRows
+              .map((r) => r.efficiency[shiftIndex])
+              .filter(
+                (v): v is number =>
+                  typeof v === 'number' &&
+                  Number.isFinite(v)
+              );
+
+            const average =
+              values.length > 0
+                ? values.reduce((sum, v) => sum + v, 0) /
+                  values.length
+                : null;
+
+            return (
+              <td
+                key={`total-shift-${shiftIndex}`}
                 style={{
-                  backgroundColor: '#dbeafe',
+                  ...swTd,
                   fontWeight: 700,
+                  backgroundColor: '#dbeafe',
                   borderTop: '2px solid #93c5fd',
-                  printColorAdjust: 'exact',
                 }}
               >
-                <td
-                  style={{
-                    ...swTd,
-                    textAlign: 'center',
-                    fontWeight: 700,
-                    backgroundColor: '#dbeafe',
-                  }}
-                >
-                  Total
-                </td>
+                {average === null
+                  ? '—'
+                  : `${average.toFixed(1)}%`}
+              </td>
+            );
+          })}
 
-                {[0, 1, 2].map((shiftIndex) => {
-                  const values = shiftWiseRows
-                    .map((r) => r.efficiency[shiftIndex])
-                    .filter(
-                      (v): v is number =>
-                        typeof v === 'number' &&
-                        Number.isFinite(v)
-                    );
-
-                  const average =
-                    values.length > 0
-                      ? values.reduce((sum, v) => sum + v, 0) /
-                      values.length
-                      : null;
-
-                  return (
-                    <td
-                      key={`total-shift-${shiftIndex}`}
-                      style={{
-                        ...swTd,
-                        fontWeight: 700,
-                        backgroundColor: '#dbeafe',
-                        borderTop: '2px solid #93c5fd',
-                      }}
-                    >
-                      {average === null
-                        ? '—'
-                        : `${average.toFixed(1)}%`}
-                    </td>
-                  );
-                })}
-
-                <td
-                  style={{
-                    ...swTdLast,
-                    fontWeight: 700,
-                    backgroundColor: '#dbeafe',
-                    borderTop: '2px solid #93c5fd',
-                  }}
-                >
-                  {(() => {
-                    const values = shiftWiseRows
-                      .map((r) => r.overallEff)
-                      .filter(
-                        (v): v is number =>
-                          typeof v === 'number' &&
-                          Number.isFinite(v)
-                      );
-
-                    if (values.length === 0) {
-                      return '—';
-                    }
-
-                    const average =
-                      values.reduce((sum, v) => sum + v, 0) /
-                      values.length;
-
-                    return `${average.toFixed(1)}%`;
-                  })()}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        {!loading && !loadError && !hasShiftWiseData && (
-          <div
+          <td
             style={{
-              padding: '8px 14px',
-              fontSize: '12px',
-              color: C.textMuted,
-              borderTop: `1px solid ${C.border}`,
+              ...swTdLast,
+              fontWeight: 700,
+              backgroundColor: '#dbeafe',
+              borderTop: '2px solid #93c5fd',
             }}
           >
-            No hourly HPR / Quality production records found for{' '}
-            {dateLabel}.
-          </div>
-        )}
-      </div>
+            {(() => {
+              const values = shiftWiseRows
+                .map((r) => r.overallEff)
+                .filter(
+                  (v): v is number =>
+                    typeof v === 'number' &&
+                    Number.isFinite(v)
+                );
+
+              if (values.length === 0) {
+                return '—';
+              }
+
+              const average =
+                values.reduce((sum, v) => sum + v, 0) /
+                values.length;
+
+              return `${average.toFixed(1)}%`;
+            })()}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  {!loading && !loadError && !hasShiftWiseData && (
+    <div
+      style={{
+        padding: '8px 14px',
+        fontSize: '12px',
+        color: C.textMuted,
+        borderTop: `1px solid ${C.border}`,
+      }}
+    >
+      No hourly HPR / Quality production records found for{' '}
+      {dateLabel}.
+    </div>
+  )}
+</div>
+
 
 
 
@@ -2158,8 +2200,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                     key={`machine-total-${r.machineNo}`}
                     className="dppr-total dppr-machine-total"
                     style={{
-                      backgroundColor: '#e8eef7',
-                      borderTop: '2px solid #cbd5e1',
+                      backgroundColor: '#eff6ff',
+                      borderTop: '2px solid #bfdbfe',
                       printColorAdjust: 'exact',
                     }}
                   >
@@ -2182,7 +2224,23 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                     <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(mt?.overallEff ?? null)}</td>
                   </tr>
                 );
-                return [row, totalRow];
+                return [
+                  row,
+                  totalRow,
+                  <tr key={`machine-total-space-${r.machineNo}`} aria-hidden="true">
+                    <td
+                      colSpan={16}
+                      style={{
+                        padding: 0,
+                        border: 'none',
+                        height: '6px',
+                        lineHeight: 0,
+                        fontSize: 0,
+                        backgroundColor: 'transparent',
+                      }}
+                    />
+                  </tr>,
+                ];
               })}
 
               {/* Grand Total — production columns still come from the existing
@@ -2190,11 +2248,12 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                   total rows); Overall EFF% is the average of the four
                   machine-level Overall EFF% values from the upper report. */}
               {!totalsHidden && (
+                <>
                 <tr
                   className="dppr-total dppr-grand-total"
                   style={{
-                    backgroundColor: '#dbe4f0',
-                    borderTop: '2px solid #94a3b8',
+                    backgroundColor: '#dbeafe',
+                    borderTop: '2px solid #93c5fd',
                     printColorAdjust: 'exact',
                   }}
                 >
@@ -2214,6 +2273,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                   <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[2])}</td>
                   <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(grandOverallEff)}</td>
                 </tr>
+                <tr key="grand-total-space" aria-hidden="true">
+                  <td
+                    colSpan={16}
+                    style={{
+                      padding: 0,
+                      border: 'none',
+                      height: '6px',
+                      lineHeight: 0,
+                      fontSize: 0,
+                      backgroundColor: 'transparent',
+                    }}
+                  />
+                </tr>
+                </>
               )}
             </tbody>
           </table>

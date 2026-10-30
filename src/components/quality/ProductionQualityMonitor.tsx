@@ -10,6 +10,7 @@ import { calculateTheoreticalBottles } from '../../utils/calculations';
 import QualityReport from './QualityReport';
 import AllMachineReport from './AllMachineReport';
 import DailyMcSpeedWeightReport from './DailyMcSpeedWeightReport';
+import RePackingReport from './Re-PackingReport';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shift master — mirrors the production.shift_master table
@@ -48,6 +49,7 @@ const PACKING_OPTIONS = [
   'SB',
   'BT',
   'PP',
+  // SNTT
 ];
 
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
@@ -4498,6 +4500,27 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           >
             Speed & Weight
           </button>
+           <button
+            onClick={() => setActiveMachine(6)}
+            style={{
+              padding: '7px 18px',
+              margin: '8px 4px',
+              fontSize: '13px',
+              fontWeight: activeMachine === 6 ? 600 : 400,
+              color: activeMachine === 6 ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 ? '#2563eb' : C.border}`,
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+              outline: 'none',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => { if (activeMachine !== 6) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (activeMachine !== 6) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            Re-Sorting
+          </button>
           <button
             onClick={() => setActiveMachine(0)}
             style={{
@@ -4821,6 +4844,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         {activeMachine >= 1 && activeMachine <= 4 && <QualityReport date={navDate} />}
 
         {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
+
+        {activeMachine === 6 && <RePackingReport date={navDate} />}
 
         {activeMachine === 0 && <AllMachineReport date={navDate} />}
 
