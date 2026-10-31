@@ -5,9 +5,9 @@
  * page background, white machine cards with subtle borders / rounded corners
  * / minimal shadows, and blue (#2563EB) as the primary accent.
  *   • NUMBERING (default): 4 machine tables with columns
- *     Job Name | Shift | Time | Pcs/Pack | Cartons | No. of Bottles | Defects | Lot No. | Mould | Section No. | Checker Name | QA-Shift Ex.
+ *     Job Name | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Defects | Lot No. | Mould | Section No. | GOB | Checker Name | QA-Shift Ex.
  *   • SQC/QC HOLD: 4 machine tables with columns
- *     Job Name | Time | Shift | Lot No. | Mould | Section | Defects | Pcs/Pack | Cartons | No. of Bottles | Checker Name | QA-Shift Ex.
+ *     Shift | Time | Job Name | Lot No. | Mould | Section | GOB | Defects | Pcs/Pack | Cartons | Defective Bottles | Checker Name | QA-Shift Ex.
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
@@ -79,20 +79,22 @@ const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
 
 const NUMBERING_COLUMNS = [
-  'Job Name', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'No. of Bottles',
-  'Defects', 'Lot No.', 'Mould', 'Section No.', 'Checker Name', 'QA-Shift Ex.',
+  'Job Name', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Defective Bottles',
+  'Defects', 'Lot No.', 'Mould', 'Section No.', 'GOB', 'Checker Name',
+  'QA-Shift Ex.',
 ];
 
 const SQC_COLUMNS = [
-  'Job Name', 'Time', 'Shift', 'Lot No.', 'Mould', 'Section', 'Defects',
-  'Pcs/Pack', 'Cartons', 'No. of Bottles', 'Checker Name', 'QA-Shift Ex.',
+  'Shift', 'Time', 'Job Name', 'Lot No.', 'Mould', 'Section', 'GOB',
+  'Defects', 'Pcs/Pack', 'Cartons', 'Defective Bottles', 'Checker Name',
+  'QA-Shift Ex.',
 ];
 
 /** Minimum rendered table width — below it the card body scrolls horizontally. */
-// 12 columns (one 80px default-width column more than the original 11) at the
+// 13 columns (two 80px default-width columns more than the original 11) at the
 // same per-column minimums, so every column keeps its existing width and the
 // card body just starts scrolling horizontally a little earlier.
-const TABLE_MIN_WIDTH = '1140px';
+const TABLE_MIN_WIDTH = '1220px';
 
 const EMPTY_DAY: QualityDayHourly = {};
 
@@ -1012,7 +1014,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 12
+                        // Production and added rows share the exact same 13
                         // cells — only the prefill fallbacks, the row key and
                         // the buttons differ.
                         const key =
@@ -1114,6 +1116,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
                               />
                             </td>
+                            <td style={cellTd()}>
+                              <CellNumInput
+                                value={cellValue(numberingValues, key, 'gob', '')}
+                                onChange={(v) => setNumberingCell(key, 'gob', v)}
+                              />
+                            </td>
                             <td style={cellTd('left')}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'checkerName', '')}
@@ -1133,7 +1141,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={12} style={emptyStateTd(12)}>
+                          <td colSpan={13} style={emptyStateTd(13)}>
                             {statusMessage('No numbering data available for the selected date.')}
                           </td>
                         </tr>
@@ -1213,7 +1221,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 12
+                        // Production and added rows share the exact same 13
                         // cells — only the prefill fallbacks, the row key and
                         // the buttons differ.
                         const key =
@@ -1232,6 +1240,18 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc' }}>
+                            <td style={cellTd()}>
+                              <CellShiftSelect
+                                value={cellValue(sqcValues, key, 'shift', shiftFallback)}
+                                onChange={(v) => setSqcCell(key, 'shift', v)}
+                              />
+                            </td>
+                            <td style={cellTd()}>
+                              <CellTimePicker
+                                value={cellValue(sqcValues, key, 'time', '')}
+                                onChange={(v) => setSqcCell(key, 'time', v)}
+                              />
+                            </td>
                             <td style={cellTd('left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -1262,18 +1282,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               </div>
                             </td>
                             <td style={cellTd()}>
-                              <CellTimePicker
-                                value={cellValue(sqcValues, key, 'time', '')}
-                                onChange={(v) => setSqcCell(key, 'time', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
-                              <CellShiftSelect
-                                value={cellValue(sqcValues, key, 'shift', shiftFallback)}
-                                onChange={(v) => setSqcCell(key, 'shift', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
                               <CellTextInput
                                 value={cellValue(sqcValues, key, 'lotNo', '')}
                                 onChange={(v) => setSqcCell(key, 'lotNo', v)}
@@ -1289,6 +1297,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               <CellTextInput
                                 value={cellValue(sqcValues, key, 'section', '')}
                                 onChange={(v) => setSqcCell(key, 'section', v)}
+                              />
+                            </td>
+                            <td style={cellTd()}>
+                              <CellNumInput
+                                value={cellValue(sqcValues, key, 'gob', '')}
+                                onChange={(v) => setSqcCell(key, 'gob', v)}
                               />
                             </td>
                             <td style={cellTd()}>
@@ -1334,7 +1348,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={12} style={emptyStateTd(12)}>
+                          <td colSpan={13} style={emptyStateTd(13)}>
                             {statusMessage('No SQC/QC HOLD data available for the selected date.')}
                           </td>
                         </tr>

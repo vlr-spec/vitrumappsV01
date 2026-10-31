@@ -4483,31 +4483,31 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               </button>
             );
           })}
-          <button
-            onClick={() => setActiveMachine(5)}
+           {/* SQC/QC HOLD + NUMBERING — Re-Packing Report views, reachable
+               straight from the main navigation bar (same styling as the
+               other nav buttons). Both open the Re-Packing Report (machine
+               view 6) and select its layout. */}
+           <button
+            onClick={() => { setRepLayout('sqc'); setActiveMachine(6); }}
             style={{
               padding: '7px 18px',
               margin: '8px 4px',
               fontSize: '13px',
-              fontWeight: activeMachine === 5 ? 600 : 400,
-              color: activeMachine === 5 ? '#ffffff' : C.textMuted,
-              backgroundColor: activeMachine === 5 ? '#2563eb' : 'transparent',
-              border: `1px solid ${activeMachine === 5 ? '#2563eb' : C.border}`,
+              fontWeight: activeMachine === 6 && repLayout === 'sqc' ? 600 : 400,
+              color: activeMachine === 6 && repLayout === 'sqc' ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : C.border}`,
               borderRadius: '6px',
               cursor: 'pointer',
               transition: 'all 0.15s',
               outline: 'none',
               whiteSpace: 'nowrap',
             }}
-            onMouseEnter={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-            onMouseLeave={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            Speed & Weight
+            SQC/QC HOLD
           </button>
-           {/* NUMBERING + SQC/QC HOLD — Re-Packing Report views, reachable
-               straight from the main navigation bar (same styling as the
-               other nav buttons). Both open the Re-Packing Report (machine
-               view 6) and select its layout. */}
            <button
             onClick={() => { setRepLayout('numbering'); setActiveMachine(6); }}
             style={{
@@ -4529,26 +4529,26 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           >
             NUMBERING
           </button>
-           <button
-            onClick={() => { setRepLayout('sqc'); setActiveMachine(6); }}
+          <button
+            onClick={() => setActiveMachine(5)}
             style={{
               padding: '7px 18px',
               margin: '8px 4px',
               fontSize: '13px',
-              fontWeight: activeMachine === 6 && repLayout === 'sqc' ? 600 : 400,
-              color: activeMachine === 6 && repLayout === 'sqc' ? '#ffffff' : C.textMuted,
-              backgroundColor: activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : 'transparent',
-              border: `1px solid ${activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : C.border}`,
+              fontWeight: activeMachine === 5 ? 600 : 400,
+              color: activeMachine === 5 ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 5 ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 5 ? '#2563eb' : C.border}`,
               borderRadius: '6px',
               cursor: 'pointer',
               transition: 'all 0.15s',
               outline: 'none',
               whiteSpace: 'nowrap',
             }}
-            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            onMouseEnter={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (activeMachine !== 5) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            SQC/QC HOLD
+            Speed & Weight
           </button>
           <button
             onClick={() => setActiveMachine(0)}
