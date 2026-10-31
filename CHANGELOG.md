@@ -14,6 +14,59 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-10-31 — Re-Packing Report Dashboard (Numbering & SQC/QC Hold Layouts), Direct Main Navbar Access, Dynamic Job-Grouped Row Insertion/Removal, Manual 12-Hour Time Picker & GOB Field Integration
+- **Problem:**
+  - Glass manufacturing operations lacked a dedicated re-sorting and re-packing tracking module in the Quality Control suite. Plant teams needed to log re-packing inspection metrics, carton counts, defect totals, mould/section assignments, and sign-offs under two standard operational formats: "NUMBERING" and "SQC/QC HOLD".
+  - Supervisors needed direct one-click navigation between the two views from the top-level Quality Control navigation bar rather than hiding them under nested configuration tabs.
+  - Production jobs frequently have multiple defect occurrences or separate sorting batches per bottle run. Operators needed to add new inspection rows anchored directly beneath the relevant bottle run (grouped under that specific bottle) without corrupting or deleting base production runs loaded from the Hourly Production Monitor.
+  - Inspection timestamps for re-packing are manual observation times and must not default to or be derived from scheduled machine production hours.
+  - Operational traceability required logging GOB numbers alongside Section and Mould for all re-packing records.
+- **Root Cause:**
+  - Re-packing tracking previously lacked a specialized ERP interface and was managed ad-hoc outside the core system.
+  - Production quality records only tracked primary hourly inspections and defect tallies without a specialized multi-layout re-sorting view.
+- **Fix:**
+  - `src/components/quality/Re-PackingReport.tsx`:
+    - Created a modern two-layout Re-Packing Report dashboard rendering 4 machine cards with subtle borders, rounded corners, and blue (#2563EB) accents.
+    - Added automatic continuous run detection from loaded daily HPR records via `qualityRepository.load(date)`:
+      - **NUMBERING Layout (13 Columns)**: `Job Name` | `Shift` | `Time` | `Pcs/Pack` | `Cartons` | `Defective Bottles` | `Defects` | `Lot No.` | `Mould` | `Section No.` | `GOB` | `Checker Name` | `QA-Shift Ex.`
+      - **SQC/QC HOLD Layout (13 Columns)**: `Shift` | `Time` | `Job Name` | `Lot No.` | `Mould` | `Section` | `GOB` | `Defects` | `Pcs/Pack` | `Cartons` | `Defective Bottles` | `Checker Name` | `QA-Shift Ex.`
+    - Implemented job-anchored row insertion (`+` button) inserting new rows immediately beneath the clicked bottle run, and row deletion (`-` button) for manually added rows with child re-anchoring.
+    - Built a manual 12-hour floating time picker (`CellTimePicker`) with Hour, Minute, and AM/PM dropdowns, dismissing on click-outside, Escape, or page scroll.
+    - Swallowed native `ArrowUp`/`ArrowDown` keystrokes in `CellNumInput` to prevent unintended numeric increments during inspection data entry.
+    - Maintained isolated state stores for Numbering and SQC/QC Hold to guarantee non-interference when toggling views.
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Added top-level navigation buttons for `SQC/QC HOLD` and `NUMBERING` (active machine view 6 with layout state `'sqc'` or `'numbering'`), integrated seamlessly with existing machine navigation and date selection.
+- **Files Changed:**
+  - `src/components/quality/Re-PackingReport.tsx`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - Zero database schema changes. Zero backend API modifications. Display formatting, state management, and UI reporting enhancements reusing existing read-only daily quality records.
+
+---
+
+### 2026-10-30 — Responsive Shift-Wise Card Styling, Clean White Machine Rows, and Spaced Subtotals in Machine Wise Production and Efficiency Report
+- **Problem:**
+  - `QualityReport`:
+    - On tablets, laptops, and smaller viewports, the Shift-Wise Efficiency card's fixed 30% container width compressed table columns and caused layout overflow.
+    - Alternating pastel machine tint backgrounds (`#EFF6FF`, `#F0FDF4`, `#FFFBEB`, `#F5F3FF`) across body rows generated visual clutter in dense data grids.
+    - Machine subtotals (`Machine <M> Total`) and the Grand Total row lacked visual demarcation from preceding and succeeding rows, reducing readability when scanning multi-machine reports.
+- **Root Cause:**
+  - The Shift-Wise card lacked viewport-adaptive CSS media queries.
+  - Machine background colors were originally configured with machine-specific pastel fills rather than a standardized clean white surface.
+  - Table row mapping lacked spacer elements between machine groupings.
+- **Fix:**
+  - `src/components/quality/QualityReport.tsx`:
+    - Added responsive container classes (`.dppr-sw-card` and `.dppr-sw-scroll`) with media queries: 30% width on desktop, 45% on screens $\le 1200\text{px}$, 70% on screens $\le 900\text{px}$, and 100% on screens $\le 640\text{px}$ with a minimum width of 400px and contained horizontal scrolling.
+    - Standardized `MACHINE_ROW_BG` across all four machines to clean `#ffffff`, updating hover states to subtle light blue tints (`#eff6ff` for machine subtotals and `#dbeafe` for the grand total).
+    - Inserted 6px transparent spacer rows (`aria-hidden="true"`) below each `Machine <M> Total` row and the `Grand Total` row for clean visual separation.
+    - Highlighted the bottom Shift-Wise Total row's overall efficiency cell with `#dbeafe` background and `#93c5fd` top border.
+- **Files Changed:**
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - Zero database schema changes. Zero API contract changes. Purely frontend styling and responsive layout improvements.
+
+---
+
 ### 2026-10-28 — Machine Wise Production and Efficiency Naming, Runtime Minutes in Machine Subtotals, Row-Wise Overall Efficiency & Centered Shift-Wise Card
 - **Problem:**
   - `QualityReport`:

@@ -113,3 +113,38 @@ This document tracks the recent bug fixes and configuration updates made to the 
   4. **Strict 1-Decimal Formatting**: Updated `fmtEff` in `QualityReport.tsx` to format all efficiency percentages with one decimal place (`n.toFixed(1)`).
 - **Files Touched**: `src/components/quality/QualityReport.tsx`
 
+## 14. Responsive Shift-Wise Card Styling, Clean White Machine Rows, and Spaced Subtotals in Machine Wise Production and Efficiency Report
+- **Issue**:
+  1. In `QualityReport`, the fixed 30% width of the Shift-Wise Efficiency card squeezed columns or triggered awkward horizontal overflow on tablet and mobile viewports.
+  2. Main body rows in the Machine Wise Production and Efficiency report table used pastel tint backgrounds per machine (`#EFF6FF`, `#F0FDF4`, `#FFFBEB`, `#F5F3FF`), creating unnecessary visual noise in high-density production data grids.
+  3. Machine subtotal rows and the grand total row lacked visual separation from adjacent data rows, making it harder for plant supervisors to quickly scan individual machine boundaries.
+- **Fix**:
+  1. **Responsive Card Container & Contained Scrolling**: Added `.dppr-sw-card` and `.dppr-sw-scroll` CSS classes with responsive breakpoints: 30% width on desktop, 45% on viewports $\le 1200\text{px}$, 70% on viewports $\le 900\text{px}$, and 100% width on viewports $\le 640\text{px}$ with a minimum table width of 400px and smooth contained horizontal scrolling.
+  2. **Standardized Clean White Body Rows**: Standardized `MACHINE_ROW_BG` across all four machines to clean `#ffffff`, updating hover states to subtle light blue tints (`#eff6ff` on machine subtotals and `#dbeafe` on the grand total).
+  3. **Visual Spacer Rows**: Added dedicated 6px transparent spacer rows (`aria-hidden="true"`) beneath each `Machine <M> Total` row and the `Grand Total` row for clear visual partitioning. Highlighted the bottom Shift-Wise Total row's overall efficiency cell with `#dbeafe` background and `#93c5fd` top border.
+- **Files Touched**: `src/components/quality/QualityReport.tsx`
+
+## 15. Re-Packing Report Dashboard (Numbering & SQC/QC Hold Layouts), Direct Main Navbar Access, Dynamic Job-Grouped Row Insertion/Removal, Manual 12-Hour Time Picker & GOB Field Integration
+- **Issue**:
+  1. Glass production and quality assurance operations required a dedicated re-sorting and re-packing workflow to monitor packing outputs, defect counts, defective bottles, lot numbers, moulds, sections, and QA inspections under two standard operational formats: "NUMBERING" and "SQC/QC HOLD".
+  2. Plant supervisors needed direct access to both NUMBERING and SQC/QC HOLD views straight from the main navigation bar without complex nested menus or state loss during tab switches.
+  3. Production jobs frequently encounter multiple re-sorting intervals or defect events per bottle run. Operators needed the ability to dynamically insert additional inspection rows immediately beneath the active bottle run (grouped under that specific bottle) and remove manually added rows, while ensuring core production runs loaded from the Hourly Production Monitor remained immutable.
+  4. Inspection times for re-packing operations represent manual observation events and must never be auto-filled or inferred from scheduled machine production intervals.
+  5. QA teams required logging the GOB number alongside Section and Mould for both Numbering and SQC/QC Hold records to provide complete mould equipment traceability.
+- **Fix**:
+  1. **Two-Layout Re-Packing ERP Dashboard (`Re-PackingReport.tsx`)**: Created a modern, modular report component displaying 4 machine cards with subtle borders, rounded corners, and blue (#2563EB) accents. Automatically detects continuous same-bottle runs from the selected date's HPR records via `qualityRepository.load(date)`:
+     - **NUMBERING Layout (13 Columns)**:
+       `Job Name` | `Shift` | `Time` | `Pcs/Pack` | `Cartons` | `Defective Bottles` | `Defects` | `Lot No.` | `Mould` | `Section No.` | `GOB` | `Checker Name` | `QA-Shift Ex.`
+     - **SQC/QC HOLD Layout (13 Columns)**:
+       `Shift` | `Time` | `Job Name` | `Lot No.` | `Mould` | `Section` | `GOB` | `Defects` | `Pcs/Pack` | `Cartons` | `Defective Bottles` | `Checker Name` | `QA-Shift Ex.`
+  2. **Direct Top Navigation Integration**: Added top-level navigation buttons in `ProductionQualityMonitor.tsx` for both `SQC/QC HOLD` and `NUMBERING` (active machine view 6 with layout state `'sqc'` or `'numbering'`), styled consistently with existing machine navigation tabs and preserving active date context.
+  3. **Dynamic Row Insertion & Removal Grouped by Job**:
+     - Implemented an ERP-style `(+)` button beside the Job Name input that inserts an editable row immediately below the clicked row (`anchor` tracking), maintaining bottle grouping (e.g., Medley $\rightarrow$ Medley-added rows $\rightarrow$ Himalaya) rather than appending to the bottom of the table.
+     - Implemented a `(-)` button on manually added rows to delete them, clearing their state and gracefully re-anchoring child rows. Core production runs remain protected and cannot be deleted.
+     - Maintained isolated state stores (`numberingValues`, `sqcValues`, `numberingExtras`, `sqcExtras`) so adding or editing rows in one layout never modifies or corrupts data in the other layout.
+  4. **Manual 12-Hour AM/PM Time Picker (`CellTimePicker`)**: Created a floating, viewport-aware time selector panel with Hour (1–12), Minute (00–59), and AM/PM dropdowns. Stored in standard `h:mm A` format (e.g., "3:30 PM"). Never auto-populates from schedules, ensuring operator entered times are genuine. Automatically dismisses on outside clicks, Escape, or page scroll.
+  5. **13-Column Grid with GOB Integration & Numeric Stepper Protection**: Added `GOB` column input to both tables and updated minimum table width to `1220px` with contained horizontal scrolling. Swallowed native `ArrowUp`/`ArrowDown` keystrokes on numeric input fields (`CellNumInput`) to prevent accidental stepping during inspection entry.
+  6. **Zero Backend / Schema Impact**: Entirely UI-driven ERP module that reuses existing read-only daily quality records; does not alter database schemas or create breaking API dependencies.
+- **Files Touched**: `src/components/quality/Re-PackingReport.tsx`, `src/components/quality/ProductionQualityMonitor.tsx`
+
+
