@@ -5,9 +5,9 @@
  * page background, white machine cards with subtle borders / rounded corners
  * / minimal shadows, and blue (#2563EB) as the primary accent.
  *   • NUMBERING (default): 4 machine tables with columns
- *     Job Name | Shift | Time | Pcs/Pack | Cartons | No. of Bottles | Defects | Section No. | Lot No. | Checker Name | QA-Shift Ex.
+ *     Job Name | Shift | Time | Pcs/Pack | Cartons | No. of Bottles | Defects | Lot No. | Mould | Section No. | Checker Name | QA-Shift Ex.
  *   • SQC/QC HOLD: 4 machine tables with columns
- *     Job Name | Time | Shift | Lot No. | Mould | Defects | Pcs/Pack | Cartons | No. of Bottles | Checker Name | QA-Shift Ex.
+ *     Job Name | Time | Shift | Lot No. | Mould | Section | Defects | Pcs/Pack | Cartons | No. of Bottles | Checker Name | QA-Shift Ex.
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
@@ -80,16 +80,19 @@ const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d
 
 const NUMBERING_COLUMNS = [
   'Job Name', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'No. of Bottles',
-  'Defects', 'Section No.', 'Lot No.', 'Checker Name', 'QA-Shift Ex.',
+  'Defects', 'Lot No.', 'Mould', 'Section No.', 'Checker Name', 'QA-Shift Ex.',
 ];
 
 const SQC_COLUMNS = [
-  'Job Name', 'Time', 'Shift', 'Lot No.', 'Mould', 'Defects',
+  'Job Name', 'Time', 'Shift', 'Lot No.', 'Mould', 'Section', 'Defects',
   'Pcs/Pack', 'Cartons', 'No. of Bottles', 'Checker Name', 'QA-Shift Ex.',
 ];
 
 /** Minimum rendered table width — below it the card body scrolls horizontally. */
-const TABLE_MIN_WIDTH = '1060px';
+// 12 columns (one 80px default-width column more than the original 11) at the
+// same per-column minimums, so every column keeps its existing width and the
+// card body just starts scrolling horizontally a little earlier.
+const TABLE_MIN_WIDTH = '1140px';
 
 const EMPTY_DAY: QualityDayHourly = {};
 
@@ -639,11 +642,11 @@ const RemoveRowButton: React.FC<{ onClick: () => void; title: string }> = ({ onC
   </button>
 );
 
-/** Compact table-header cell style — navy uppercase labels on a light blue strip. */
+/** Compact table-header cell style — bold navy uppercase labels on a light blue strip. */
 const thStyle = (isLast: boolean, minWidth?: string): React.CSSProperties => ({
   padding: '6px 8px',
   color: C.headerText,
-  fontWeight: 600,
+  fontWeight: 700,
   fontSize: '10.5px',
   letterSpacing: '0.04em',
   textTransform: 'uppercase',
@@ -739,9 +742,8 @@ const buildOrderedRows = (rowRuns: JobRun[], extras: ExtraRow[]): OrderedRow[] =
   return out;
 };
 
-const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
+const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = ({ date, layout = 'numbering' }) => {
   const { bottles } = useERP();
-  const [layout, setLayout] = useState<'numbering' | 'sqc'>('numbering');
   const machineNos = MACHINE_NOS;
 
   // ── Hourly Production Monitor data for the selected date ─────────────────
@@ -928,10 +930,6 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
     });
   };
 
-  const toggleLayout = (newLayout: 'numbering' | 'sqc') => {
-    setLayout(newLayout);
-  };
-
   /** Loading / error / empty status shown in a machine's body when it has no entries. */
   const statusMessage = (emptyText: string): string => {
     if (loading) return `Loading production data for ${dateLabel}…`;
@@ -939,43 +937,11 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
     return emptyText;
   };
 
-  /** Shared tab button style — active: blue/white; inactive: light with border. */
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: '8px 22px',
-    fontSize: '13px',
-    fontWeight: active ? 700 : 600,
-    color: active ? '#ffffff' : '#475569',
-    backgroundColor: active ? '#2563EB' : C.white,
-    border: `1px solid ${active ? '#2563EB' : C.border}`,
-    borderRadius: '8px',
-    cursor: 'pointer',
-    transition: 'all 0.15s ease',
-    whiteSpace: 'nowrap',
-    outline: 'none',
-    boxShadow: active ? '0 1px 2px rgba(37, 99, 235, 0.35)' : 'none',
-  });
-
   return (
     <div style={{ padding: '16px 20px', backgroundColor: '#f8fafc', minHeight: '100%' }}>
-      {/* Report navigation tabs — modern pill tabs, top-left */}
-      <div style={{ marginBottom: '14px', display: 'inline-flex', gap: '6px', padding: '4px', backgroundColor: C.lightGray, border: `1px solid ${C.border}`, borderRadius: '10px' }}>
-        <button
-          onClick={() => toggleLayout('numbering')}
-          style={tabStyle(layout === 'numbering')}
-          onMouseEnter={(e) => { if (layout !== 'numbering') { e.currentTarget.style.backgroundColor = '#eff6ff'; e.currentTarget.style.color = '#2563EB'; e.currentTarget.style.borderColor = '#bfdbfe'; } }}
-          onMouseLeave={(e) => { if (layout !== 'numbering') { e.currentTarget.style.backgroundColor = C.white; e.currentTarget.style.color = '#475569'; e.currentTarget.style.borderColor = C.border; } }}
-        >
-          NUMBERING
-        </button>
-        <button
-          onClick={() => toggleLayout('sqc')}
-          style={tabStyle(layout === 'sqc')}
-          onMouseEnter={(e) => { if (layout !== 'sqc') { e.currentTarget.style.backgroundColor = '#eff6ff'; e.currentTarget.style.color = '#2563EB'; e.currentTarget.style.borderColor = '#bfdbfe'; } }}
-          onMouseLeave={(e) => { if (layout !== 'sqc') { e.currentTarget.style.backgroundColor = C.white; e.currentTarget.style.color = '#475569'; e.currentTarget.style.borderColor = C.border; } }}
-        >
-          SQC/QC HOLD
-        </button>
-      </div>
+      {/* The NUMBERING / SQC/QC HOLD switch lives in the main navigation bar
+          of the parent module (QualityControlModule) — the `layout` prop
+          selects which report is rendered below. */}
 
       {/* Date filter and navigation preserved from parent - via useERP context */}
       {/* The parent component provides dateKey, dateLabel, shift navigation etc. */}
@@ -1046,7 +1012,7 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 11
+                        // Production and added rows share the exact same 12
                         // cells — only the prefill fallbacks, the row key and
                         // the buttons differ.
                         const key =
@@ -1131,15 +1097,21 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                               />
                             </td>
                             <td style={cellTd()}>
-                              <CellNumInput
-                                value={cellValue(numberingValues, key, 'sectionNo', '')}
-                                onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
+                              <CellTextInput
+                                value={cellValue(numberingValues, key, 'lotNo', '')}
+                                onChange={(v) => setNumberingCell(key, 'lotNo', v)}
                               />
                             </td>
                             <td style={cellTd()}>
                               <CellTextInput
-                                value={cellValue(numberingValues, key, 'lotNo', '')}
-                                onChange={(v) => setNumberingCell(key, 'lotNo', v)}
+                                value={cellValue(numberingValues, key, 'mould', '')}
+                                onChange={(v) => setNumberingCell(key, 'mould', v)}
+                              />
+                            </td>
+                            <td style={cellTd()}>
+                              <CellNumInput
+                                value={cellValue(numberingValues, key, 'sectionNo', '')}
+                                onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
                               />
                             </td>
                             <td style={cellTd('left')}>
@@ -1161,7 +1133,7 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={11} style={emptyStateTd(11)}>
+                          <td colSpan={12} style={emptyStateTd(12)}>
                             {statusMessage('No numbering data available for the selected date.')}
                           </td>
                         </tr>
@@ -1241,7 +1213,7 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 11
+                        // Production and added rows share the exact same 12
                         // cells — only the prefill fallbacks, the row key and
                         // the buttons differ.
                         const key =
@@ -1314,6 +1286,12 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                               />
                             </td>
                             <td style={cellTd()}>
+                              <CellTextInput
+                                value={cellValue(sqcValues, key, 'section', '')}
+                                onChange={(v) => setSqcCell(key, 'section', v)}
+                              />
+                            </td>
+                            <td style={cellTd()}>
                               <CellNumInput
                                 value={cellValue(sqcValues, key, 'defects', '')}
                                 onChange={(v) => setSqcCell(key, 'defects', v)}
@@ -1356,7 +1334,7 @@ const RePackingReport: React.FC<{ date: Date }> = ({ date }) => {
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={11} style={emptyStateTd(11)}>
+                          <td colSpan={12} style={emptyStateTd(12)}>
                             {statusMessage('No SQC/QC HOLD data available for the selected date.')}
                           </td>
                         </tr>

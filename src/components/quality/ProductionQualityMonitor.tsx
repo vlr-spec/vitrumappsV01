@@ -2081,6 +2081,10 @@ export const QualityControlModule: React.FC = () => {
   const canEdit = hasPermission(MODULES.QUALITY_CONTROL, 'edit');
 
   const [activeMachine, setActiveMachine] = useState(1);
+  // Re-Packing Report layout (NUMBERING ↔ SQC/QC HOLD). Controlled from the
+  // main navigation bar so both views are directly reachable from the top
+  // nav — purely UI navigation state, no data logic affected.
+  const [repLayout, setRepLayout] = useState<'numbering' | 'sqc'>('numbering');
   const [navDate, setNavDate] = useState<Date>(() => new Date());
   // Collapses the stable navigation bar (same Hide/Show pattern as the
   // planning module's Filters card). Layout only — no data logic affected.
@@ -4500,26 +4504,51 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           >
             Speed & Weight
           </button>
+           {/* NUMBERING + SQC/QC HOLD — Re-Packing Report views, reachable
+               straight from the main navigation bar (same styling as the
+               other nav buttons). Both open the Re-Packing Report (machine
+               view 6) and select its layout. */}
            <button
-            onClick={() => setActiveMachine(6)}
+            onClick={() => { setRepLayout('numbering'); setActiveMachine(6); }}
             style={{
               padding: '7px 18px',
               margin: '8px 4px',
               fontSize: '13px',
-              fontWeight: activeMachine === 6 ? 600 : 400,
-              color: activeMachine === 6 ? '#ffffff' : C.textMuted,
-              backgroundColor: activeMachine === 6 ? '#2563eb' : 'transparent',
-              border: `1px solid ${activeMachine === 6 ? '#2563eb' : C.border}`,
+              fontWeight: activeMachine === 6 && repLayout === 'numbering' ? 600 : 400,
+              color: activeMachine === 6 && repLayout === 'numbering' ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 && repLayout === 'numbering' ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 && repLayout === 'numbering' ? '#2563eb' : C.border}`,
               borderRadius: '6px',
               cursor: 'pointer',
               transition: 'all 0.15s',
               outline: 'none',
               whiteSpace: 'nowrap',
             }}
-            onMouseEnter={(e) => { if (activeMachine !== 6) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-            onMouseLeave={(e) => { if (activeMachine !== 6) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'numbering')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'numbering')) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            Re-Sorting
+            NUMBERING
+          </button>
+           <button
+            onClick={() => { setRepLayout('sqc'); setActiveMachine(6); }}
+            style={{
+              padding: '7px 18px',
+              margin: '8px 4px',
+              fontSize: '13px',
+              fontWeight: activeMachine === 6 && repLayout === 'sqc' ? 600 : 400,
+              color: activeMachine === 6 && repLayout === 'sqc' ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : C.border}`,
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+              outline: 'none',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            SQC/QC HOLD
           </button>
           <button
             onClick={() => setActiveMachine(0)}
@@ -4845,7 +4874,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 
         {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
 
-        {activeMachine === 6 && <RePackingReport date={navDate} />}
+        {activeMachine === 6 && <RePackingReport date={navDate} layout={repLayout} />}
 
         {activeMachine === 0 && <AllMachineReport date={navDate} />}
 
