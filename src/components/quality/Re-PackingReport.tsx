@@ -5,9 +5,9 @@
  * page background, white machine cards with subtle borders / rounded corners
  * / minimal shadows, and blue (#2563EB) as the primary accent.
  *   • NUMBERING (default): 4 machine tables with columns
- *     Job Name | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Defects | Lot No. | Mould | Section No. | GOB | Checker Name | QA-Shift Ex.
+ *     Job Name | Pack Type | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Lot No. | Defects | Mould | Section No. | Checker Name | QA-Shift Ex. (Numbering)
  *   • SQC/QC HOLD: 4 machine tables with columns
- *     Shift | Time | Job Name | Lot No. | Mould | Section | GOB | Defects | Pcs/Pack | Cartons | Defective Bottles | Checker Name | QA-Shift Ex.
+ *     Shift | Time | Job Name | Pack Type | Lot No. | Pcs/Pack | Cartons | Defective Bottles | Defects | Mould | Section | Checker Name | QA-Shift Ex.
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
@@ -80,15 +80,93 @@ const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d
 
 const NUMBERING_COLUMNS = [
   'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Defective Bottles',
-  'Defects', 'Lot No.', 'Mould', 'Section No.', 'GOB', 'Checker Name',
+  'Lot No.', 'Defects', 'Mould', 'Section No.', 'Checker Name',
   'QA-Shift Ex.',
 ];
 
+/** Numbering table: column widths (small columns reduced, Defects widened). */
+const NUMBERING_COL_WIDTHS: Record<string, string> = {
+  'Job Name': '150px',
+  'Pack Type': '78px',
+  'Shift': '68px',
+  'Time': '92px',
+  'Pcs/Pack': '68px',
+  'Cartons': '68px',
+  'Defective Bottles': '78px',
+  'Lot No.': '78px',
+  'Defects': '280px',
+  'Mould': '68px',
+  'Section No.': '68px',
+  'Checker Name': '118px',
+  'QA-Shift Ex.': '78px',
+};
+
+/** Numbering table: percentage widths so the table fills all available
+ *  horizontal space (sums to ~100%). */
+const NUMBERING_COL_PERCENTS: Record<string, string> = {
+  'Job Name': '11.6%',
+  'Pack Type': '6.0%',
+  'Shift': '5.3%',
+  'Time': '7.1%',
+  'Pcs/Pack': '5.3%',
+  'Cartons': '5.3%',
+  'Defective Bottles': '6.0%',
+  'Lot No.': '6.0%',
+  'Defects': '21.7%',
+  'Mould': '5.3%',
+  'Section No.': '5.3%',
+  'Checker Name': '9.1%',
+  'QA-Shift Ex.': '6.0%',
+};
+
+/** Numbering table: 0-based column indices that end a visual section
+ *  (Production Details, Defect Details (Mould Wise), Verification). */
+const NUMBERING_SECTION_ENDS = new Set([7, 10]); // after 'Lot No.' and 'Section No.'
+const NUMBERING_SECTION_DIVIDER = '2px solid #94a3b8';
+
 const SQC_COLUMNS = [
-  'Shift', 'Time', 'Job Name', 'Pack Type', 'Lot No.', 'Mould', 'Section', 'GOB',
-  'Defects', 'Pcs/Pack', 'Cartons', 'Defective Bottles', 'Checker Name',
+  'Shift', 'Time', 'Job Name', 'Pack Type', 'Lot No.', 'Pcs/Pack', 'Cartons',
+  'Defective Bottles', 'Defects', 'Mould', 'Section', 'Checker Name',
   'QA-Shift Ex.',
 ];
+
+/** SQC/QC HOLD table: percentage widths so the table fills all available
+ *  horizontal space (sums to ~100%). */
+const SQC_COL_PERCENTS: Record<string, string> = {
+  'Shift': '5.3%',
+  'Time': '7.2%',
+  'Job Name': '11.4%',
+  'Pack Type': '6.1%',
+  'Lot No.': '6.1%',
+  'Pcs/Pack': '5.3%',
+  'Cartons': '5.3%',
+  'Defective Bottles': '6.1%',
+  'Defects': '21.3%',
+  'Mould': '5.3%',
+  'Section': '5.3%',
+  'Checker Name': '9.1%',
+  'QA-Shift Ex.': '6.1%',
+};
+
+/** SQC/QC HOLD table: pixel minimums for the header cells. */
+const SQC_COL_WIDTHS: Record<string, string> = {
+  'Shift': '70px',
+  'Time': '95px',
+  'Job Name': '150px',
+  'Pack Type': '80px',
+  'Lot No.': '80px',
+  'Pcs/Pack': '70px',
+  'Cartons': '70px',
+  'Defective Bottles': '80px',
+  'Defects': '220px',
+  'Mould': '70px',
+  'Section': '70px',
+  'Checker Name': '120px',
+  'QA-Shift Ex.': '80px',
+};
+
+/** SQC/QC HOLD: 0-based column indices that end a visual section. */
+const SQC_SECTION_ENDS = new Set([7, 10]); // after 'Defective Bottles' and 'Section'
 
 /** Minimum rendered table width — below it the card body scrolls horizontally. */
 // 13 columns (two 80px default-width columns more than the original 11) at the
@@ -97,6 +175,18 @@ const SQC_COLUMNS = [
 const TABLE_MIN_WIDTH = '1220px';
 
 const EMPTY_DAY: QualityDayHourly = {};
+
+/** Numbering table inputs: no rounded inner borders, transparent fill so the
+ *  table's continuous grid borders read as the cell boundaries. */
+const NUMBERING_INPUT_STYLE: React.CSSProperties = {
+  borderRadius: 0,
+  border: '1px solid transparent',
+  backgroundColor: 'transparent',
+};
+
+// SQC/QC HOLD uses the same continuous-grid treatment as Numbering: inputs
+// remain fully functional, while the table itself provides the visual borders.
+const SQC_INPUT_STYLE = NUMBERING_INPUT_STYLE;
 
 // ─── Production-day timeline (same canonical labels as the HRP) ─────────────
 /** Canonical production-day order (9 AM → 8 AM) — used for run detection only. */
@@ -319,7 +409,8 @@ const CellTextInput: React.FC<{
   onChange: (v: string) => void;
   align?: 'left' | 'center';
   placeholder?: string;
-}> = ({ value, onChange, align = 'center', placeholder }) => (
+  style?: React.CSSProperties;
+}> = ({ value, onChange, align = 'center', placeholder, style }) => (
   <input
     type="text"
     value={value}
@@ -332,12 +423,13 @@ const CellTextInput: React.FC<{
       color: value ? C.textMain : '#94a3b8',
       textAlign: align,
       cursor: 'text',
+      ...(style ?? {}),
     }}
   />
 );
 
 /** Editable numeric cell — same typing-only behaviour as the HRP NumInput. */
-const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => {
+const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
   // ArrowUp / ArrowDown are the native step keys of <input type="number">: the
   // browser silently changes the value (and fires onChange) with no typing at
   // all. A production cell must only ever change by typing, so both keys are
@@ -361,6 +453,7 @@ const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void }> =
           textAlign: 'center',
           cursor: 'text',
           MozAppearance: 'textfield',
+          ...(style ?? {}),
         } as React.CSSProperties
       }
     />
@@ -368,7 +461,7 @@ const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void }> =
 };
 
 /** Editable shift dropdown — prefilled from the run's production shift. */
-const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => (
+const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => (
   <select
     value={value}
     onChange={(e) => onChange(e.target.value)}
@@ -382,6 +475,7 @@ const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void }
       textAlignLast: 'center',
       cursor: 'pointer',
       appearance: 'auto',
+      ...(style ?? {}),
     }}
   >
     <option value="1">Shift 1</option>
@@ -395,18 +489,19 @@ const PackTypeCell: React.FC<{
   onChange: (v: string) => void;
   machineNo: number;
   packingTypes: string[];
-}> = ({ value, onChange, machineNo, packingTypes }) => {
+  style?: React.CSSProperties;
+}> = ({ value, onChange, machineNo, packingTypes, style }) => {
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onChange(e.target.value);
   };
 
   if (packingTypes.length === 0) {
-    return <CellTextInput value={value} onChange={onChange} />;
+    return <CellTextInput value={value} onChange={onChange} style={style} />;
   }
 
   if (packingTypes.length === 1) {
     // Only one packing type used during this day — display as plain text
-    return <CellTextInput value={packingTypes[0]} onChange={() => {}} />;
+    return <CellTextInput value={packingTypes[0]} onChange={() => {}} style={style} />;
   }
 
   // Multiple packing types — show dropdown for selection
@@ -423,6 +518,7 @@ const PackTypeCell: React.FC<{
         textAlign: 'center',
         cursor: 'pointer',
         appearance: 'auto',
+        ...(style ?? {}),
       }}
     >
       {packingTypes.map((cat) => (
@@ -481,7 +577,7 @@ const PANEL_SELECT_STYLE: React.CSSProperties = {
   appearance: 'auto',
 };
 
-const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void }> = ({ value, onChange }) => {
+const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<TimeDraft>({ h: '12', m: '00', ap: 'AM' });
   const [panelPos, setPanelPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
@@ -554,6 +650,7 @@ const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void }>
           cursor: 'pointer',
           textAlign: 'left',
           color: value ? C.textMain : '#94a3b8',
+          ...(style ?? {}),
         }}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -722,6 +819,90 @@ const emptyStateTd = (colSpan: number): React.CSSProperties => ({
   fontSize: '13px',
   borderBottom: `1px solid ${C.border}`,
 });
+
+/** Numbering table header cell — with section divider borders. */
+const numThStyle = (colIndex: number, total: number, minWidth?: string, align: 'left' | 'center' = 'center'): React.CSSProperties => {
+  const isLast = colIndex === total - 1;
+  const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
+  return {
+    padding: '6px 8px',
+    color: C.headerText,
+    fontWeight: 700,
+    fontSize: '10.5px',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    borderBottom: `1px solid ${C.border}`,
+    borderRight: isLast
+      ? 'none'
+      : isSectionEnd
+        ? NUMBERING_SECTION_DIVIDER
+        : `1px solid ${C.border}`,
+    lineHeight: 1.3,
+    verticalAlign: 'middle',
+    backgroundColor: C.headerBg,
+    whiteSpace: 'nowrap',
+    minWidth: minWidth ?? '80px',
+    textAlign: align,
+  };
+};
+
+/** Numbering table data cell — with section divider borders. */
+const numCellTd = (colIndex: number, total: number, align: 'left' | 'center' = 'center'): React.CSSProperties => {
+  const isLast = colIndex === total - 1;
+  const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
+  return {
+    padding: '3px 6px',
+    borderBottom: `1px solid ${C.border}`,
+    borderRight: isLast
+      ? 'none'
+      : isSectionEnd
+        ? NUMBERING_SECTION_DIVIDER
+        : `1px solid ${C.border}`,
+    fontSize: '12.5px',
+    color: C.textMain,
+    textAlign: align,
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+  };
+};
+
+/** SQC/QC HOLD header cell — mirrors Numbering's grouped-section dividers. */
+const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: 'left' | 'center' = 'center'): React.CSSProperties => {
+  const isLast = colIndex === total - 1;
+  const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
+  return {
+    padding: '6px 8px',
+    color: C.headerText,
+    fontWeight: 700,
+    fontSize: '10.5px',
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase',
+    borderBottom: `1px solid ${C.border}`,
+    borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
+    lineHeight: 1.3,
+    verticalAlign: 'middle',
+    backgroundColor: C.headerBg,
+    whiteSpace: 'nowrap',
+    minWidth: minWidth ?? '80px',
+    textAlign: align,
+  };
+};
+
+/** SQC/QC HOLD data cell — mirrors Numbering's grouped-section dividers. */
+const sqcCellTd = (colIndex: number, total: number, align: 'left' | 'center' = 'center'): React.CSSProperties => {
+  const isLast = colIndex === total - 1;
+  const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
+  return {
+    padding: '3px 6px',
+    borderBottom: `1px solid ${C.border}`,
+    borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
+    fontSize: '12.5px',
+    color: C.textMain,
+    textAlign: align,
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+  };
+};
 
 /** Editable cell values of one layout, keyed per date + machine + production run. */
 type CellValues = Record<string, string>;
@@ -1053,18 +1234,26 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     style={{
                       width: '100%',
                       borderCollapse: 'collapse',
-                      minWidth: TABLE_MIN_WIDTH,
+                      tableLayout: 'fixed',
+                      minWidth: '1080px',
                     }}
                   >
+                    <colgroup>
+                      {NUMBERING_COLUMNS.map((col) => (
+                        <col key={col} style={{ width: NUMBERING_COL_PERCENTS[col] ?? '8%' }} />
+                      ))}
+                    </colgroup>
                     <thead>
                       <tr style={{ backgroundColor: C.headerBg }}>
                         {NUMBERING_COLUMNS.map((col, idx) => (
                           <th
                             key={col}
-                            style={{
-                              ...thStyle(idx === NUMBERING_COLUMNS.length - 1, col === 'Job Name' || col === 'Pack Type' ? '140px' : col === 'Checker Name' ? '110px' : '80px'),
-                              textAlign: col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center',
-                            }}
+                            style={numThStyle(
+                              idx,
+                              NUMBERING_COLUMNS.length,
+                              NUMBERING_COL_WIDTHS[col],
+                              col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center'
+                            )}
                           >
                             {col}
                           </th>
@@ -1092,13 +1281,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc' }}>
-                            <td style={cellTd('left')}>
+                            <td style={numCellTd(0, 13, 'left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <CellTextInput
                                     value={cellValue(numberingValues, key, 'jobName', jobNameFallback)}
                                     onChange={(v) => setNumberingCell(key, 'jobName', v)}
                                     align="left"
+                                    style={NUMBERING_INPUT_STYLE}
                                   />
                                 </div>
                                 <AddRowButton
@@ -1121,85 +1311,91 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                               </div>
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(1, 13)}>
                               <PackTypeCell
                                 value={cellValue(numberingValues, key, 'packType', '')}
                                 onChange={(v) => setNumberingCell(key, 'packType', v)}
                                 machineNo={machineNo}
                                 packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(2, 13)}>
                               <CellShiftSelect
                                 value={cellValue(numberingValues, key, 'shift', shiftFallback)}
                                 onChange={(v) => setNumberingCell(key, 'shift', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(3, 13)}>
                               <CellTimePicker
                                 value={cellValue(numberingValues, key, 'time', '')}
                                 onChange={(v) => setNumberingCell(key, 'time', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(4, 13)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'pcsPack', '')}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(5, 13)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'cartons', '')}
                                 onChange={(v) => setNumberingCell(key, 'cartons', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(6, 13)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'noOfBottle', '')}
                                 onChange={(v) => setNumberingCell(key, 'noOfBottle', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
-                              <CellNumInput
-                                value={cellValue(numberingValues, key, 'defects', '')}
-                                onChange={(v) => setNumberingCell(key, 'defects', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(7, 13)}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'lotNo', '')}
                                 onChange={(v) => setNumberingCell(key, 'lotNo', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(8, 13)}>
+                              <CellNumInput
+                                value={cellValue(numberingValues, key, 'defects', '')}
+                                onChange={(v) => setNumberingCell(key, 'defects', v)}
+                                style={NUMBERING_INPUT_STYLE}
+                              />
+                            </td>
+                            <td style={numCellTd(9, 13)}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'mould', '')}
                                 onChange={(v) => setNumberingCell(key, 'mould', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={numCellTd(10, 13)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'sectionNo', '')}
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
-                              <CellNumInput
-                                value={cellValue(numberingValues, key, 'gob', '')}
-                                onChange={(v) => setNumberingCell(key, 'gob', v)}
-                              />
-                            </td>
-                            <td style={cellTd('left')}>
+                            <td style={numCellTd(11, 13, 'left')}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'checkerName', '')}
                                 onChange={(v) => setNumberingCell(key, 'checkerName', v)}
                                 align="left"
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd('center', true)}>
+                            <td style={numCellTd(12, 13, 'center')}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'qaShiftEx', '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
+                                style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                           </tr>
@@ -1268,18 +1464,26 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     style={{
                       width: '100%',
                       borderCollapse: 'collapse',
+                      tableLayout: 'fixed',
                       minWidth: TABLE_MIN_WIDTH,
                     }}
                   >
+                    <colgroup>
+                      {SQC_COLUMNS.map((col) => (
+                        <col key={col} style={{ width: SQC_COL_PERCENTS[col] ?? '8%' }} />
+                      ))}
+                    </colgroup>
                     <thead>
                       <tr style={{ backgroundColor: C.headerBg }}>
                         {SQC_COLUMNS.map((col, idx) => (
                           <th
                             key={col}
-                            style={{
-                              ...thStyle(idx === SQC_COLUMNS.length - 1, col === 'Job Name' || col === 'Pack Type' ? '140px' : col === 'Checker Name' ? '110px' : col === 'Time' ? '130px' : '80px'),
-                              textAlign: col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center',
-                            }}
+                            style={sqcThStyle(
+                              idx,
+                              SQC_COLUMNS.length,
+                              SQC_COL_WIDTHS[col],
+                              col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center'
+                            )}
                           >
                             {col}
                           </th>
@@ -1307,25 +1511,28 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc' }}>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(0, SQC_COLUMNS.length)}>
                               <CellShiftSelect
                                 value={cellValue(sqcValues, key, 'shift', shiftFallback)}
                                 onChange={(v) => setSqcCell(key, 'shift', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(1, SQC_COLUMNS.length)}>
                               <CellTimePicker
                                 value={cellValue(sqcValues, key, 'time', '')}
                                 onChange={(v) => setSqcCell(key, 'time', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd('left')}>
+                            <td style={sqcCellTd(2, SQC_COLUMNS.length, 'left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <CellTextInput
                                     value={cellValue(sqcValues, key, 'jobName', jobNameFallback)}
                                     onChange={(v) => setSqcCell(key, 'jobName', v)}
                                     align="left"
+                                    style={SQC_INPUT_STYLE}
                                   />
                                 </div>
                                 <AddRowButton
@@ -1348,73 +1555,77 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                               </div>
                             </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
                               <PackTypeCell
                                 value={cellValue(sqcValues, key, 'packType', '')}
                                 onChange={(v) => setSqcCell(key, 'packType', v)}
                                 machineNo={machineNo}
                                 packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(4, SQC_COLUMNS.length)}>
                               <CellTextInput
                                 value={cellValue(sqcValues, key, 'lotNo', '')}
                                 onChange={(v) => setSqcCell(key, 'lotNo', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
-                              <CellTextInput
-                                value={cellValue(sqcValues, key, 'mould', '')}
-                                onChange={(v) => setSqcCell(key, 'mould', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
-                              <CellTextInput
-                                value={cellValue(sqcValues, key, 'section', '')}
-                                onChange={(v) => setSqcCell(key, 'section', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
-                              <CellNumInput
-                                value={cellValue(sqcValues, key, 'gob', '')}
-                                onChange={(v) => setSqcCell(key, 'gob', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
-                              <CellNumInput
-                                value={cellValue(sqcValues, key, 'defects', '')}
-                                onChange={(v) => setSqcCell(key, 'defects', v)}
-                              />
-                            </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(5, SQC_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(sqcValues, key, 'pcsPack', '')}
                                 onChange={(v) => setSqcCell(key, 'pcsPack', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(6, SQC_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(sqcValues, key, 'cartons', '')}
                                 onChange={(v) => setSqcCell(key, 'cartons', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd()}>
+                            <td style={sqcCellTd(7, SQC_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(sqcValues, key, 'noOfBottle', '')}
                                 onChange={(v) => setSqcCell(key, 'noOfBottle', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd('left')}>
+                            <td style={sqcCellTd(8, SQC_COLUMNS.length)}>
+                              <CellNumInput
+                                value={cellValue(sqcValues, key, 'defects', '')}
+                                onChange={(v) => setSqcCell(key, 'defects', v)}
+                                style={SQC_INPUT_STYLE}
+                              />
+                            </td>
+                            <td style={sqcCellTd(9, SQC_COLUMNS.length)}>
+                              <CellTextInput
+                                value={cellValue(sqcValues, key, 'mould', '')}
+                                onChange={(v) => setSqcCell(key, 'mould', v)}
+                                style={SQC_INPUT_STYLE}
+                              />
+                            </td>
+                            <td style={sqcCellTd(10, SQC_COLUMNS.length)}>
+                              <CellTextInput
+                                value={cellValue(sqcValues, key, 'section', '')}
+                                onChange={(v) => setSqcCell(key, 'section', v)}
+                                style={SQC_INPUT_STYLE}
+                              />
+                            </td>
+                            <td style={sqcCellTd(11, SQC_COLUMNS.length, 'left')}>
                               <CellTextInput
                                 value={cellValue(sqcValues, key, 'checkerName', '')}
                                 onChange={(v) => setSqcCell(key, 'checkerName', v)}
                                 align="left"
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={cellTd('center', true)}>
+                            <td style={sqcCellTd(12, SQC_COLUMNS.length)}>
                               <CellTextInput
                                 value={cellValue(sqcValues, key, 'qaShiftEx', '')}
                                 onChange={(v) => setSqcCell(key, 'qaShiftEx', v)}
+                                style={SQC_INPUT_STYLE}
                               />
                             </td>
                           </tr>
@@ -1423,7 +1634,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={13} style={emptyStateTd(13)}>
+                          <td colSpan={SQC_COLUMNS.length} style={emptyStateTd(SQC_COLUMNS.length)}>
                             {statusMessage('No SQC/QC HOLD data available for the selected date.')}
                           </td>
                         </tr>

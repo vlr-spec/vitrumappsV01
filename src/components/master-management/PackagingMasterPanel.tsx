@@ -226,7 +226,7 @@ export const PackagingMasterPanel: React.FC = () => {
           <div className="rounded-lg border border-gray-200 overflow-hidden">
             {/* Horizontal scroll keeps the table usable on mobile */}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[520px] border-collapse text-sm">
+              <table className="w-full min-w-130 border-collapse text-sm">
                 <thead>
                   <tr className="bg-blue-50 border-b border-blue-100">
                     <th className="px-3 sm:px-4 py-2.5 text-left text-xs font-semibold text-blue-700 uppercase tracking-wider whitespace-nowrap">
@@ -258,7 +258,7 @@ export const PackagingMasterPanel: React.FC = () => {
                       <td className="px-3 sm:px-4 py-3 text-sm font-mono font-semibold text-gray-800 whitespace-nowrap">
                         {row.packaging_code}
                       </td>
-                      <td className="px-3 sm:px-4 py-3 text-sm text-gray-600 break-words">
+                      <td className="px-3 sm:px-4 py-3 text-sm text-gray-600 wrap-break-word">
                         {row.packaging_description}
                       </td>
                       <td className="px-3 sm:px-4 py-3 text-right">
