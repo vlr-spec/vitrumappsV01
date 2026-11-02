@@ -20,6 +20,7 @@ import {
   ParentChildMappingRow,
   ProductionJobRow,
   JobPackagingRow,
+  PackagingMasterRow,
 } from '../data/planningSchema';
 
 // ─── In-Memory Cache ───────────────────────────────────────────────────────────
@@ -1132,6 +1133,76 @@ export const planningRepository = {
       return { ok: true };
     } catch (err: any) {
       return { ok: false, error: err.message || 'Failed to delete holiday' };
+    }
+  },
+
+  // ── Packaging Master CRUD (hpr.packaging_master) ─────────────────────────────
+  //
+  // Reads/writes go through /api/production/packaging/ which enforces the
+  // same database-driven Master Management permissions as the Bottle Master
+  // and Holiday Master panels. packaging_id is the internal key for
+  // UPDATE/DELETE only and is never rendered in the UI.
+
+  /** Loads every hpr.packaging_master row in packaging_id order. */
+  async getPackagingMasters(): Promise<{
+    ok: boolean;
+    rows: PackagingMasterRow[];
+    error?: string;
+  }> {
+    try {
+      const raw = await apiFetch('/api/production/packaging/');
+      const rows = (raw as Record<string, unknown>[]).map((p) => ({
+        packaging_id: toNum(p.packaging_id),
+        packaging_code: toStr(p.packaging_code),
+        packaging_description: toStr(p.packaging_description),
+      }));
+      return { ok: true, rows };
+    } catch (err: any) {
+      return {
+        ok: false,
+        rows: [],
+        error: err.message || 'Failed to load packaging records.',
+      };
+    }
+  },
+
+  async createPackagingMaster(
+    packaging_code: string,
+    packaging_description: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await apiFetch('/api/production/packaging/', {
+        method: 'POST',
+        body: JSON.stringify({ packaging_code, packaging_description }),
+      });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'Failed to create packaging record.' };
+    }
+  },
+
+  async updatePackagingMaster(
+    packaging_id: number,
+    packaging_code: string,
+    packaging_description: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await apiFetch(`/api/production/packaging/${packaging_id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ packaging_code, packaging_description }),
+      });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'Failed to update packaging record.' };
+    }
+  },
+
+  async deletePackagingMaster(packaging_id: number): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await apiFetch(`/api/production/packaging/${packaging_id}`, { method: 'DELETE' });
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'Failed to delete packaging record.' };
     }
   },
 

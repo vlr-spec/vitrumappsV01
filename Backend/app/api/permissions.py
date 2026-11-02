@@ -94,6 +94,23 @@ def require_any_module_read(modules: list[str]):
     return dependency
 
 
+def require_any_module_edit(modules: list[str]):
+    """
+    Allow a write endpoint when the user may edit ANY of the listed modules.
+    Edit twin of ``require_any_module_read`` (e.g. the Packaging Master panel,
+    which is part of Master Management and reuses its child modules'
+    permissions).  ``_check`` still requires read first, so ``can_edit`` alone
+    never grants access to a module the employee cannot read.
+    """
+    def dependency(
+        user: AuthUser = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> AuthUser:
+        return _check(user, db, list(modules), "edit")
+
+    return dependency
+
+
 def require_any_active_module_read():
     """
     Generic guard for endpoints whose data does not belong to a single module

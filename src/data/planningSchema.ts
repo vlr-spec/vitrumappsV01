@@ -48,6 +48,18 @@ export interface BottleConfigurationRow {
   speeds: number;       // cuts per minute, e.g. 118.5
 }
 
+/**
+ * One row of hpr.packaging_master (Packaging Master panel).
+ *
+ * `packaging_id` is the internal key used for UPDATE/DELETE only -- it is
+ * never rendered in the UI, which shows code, description and actions.
+ */
+export interface PackagingMasterRow {
+  packaging_id: number;
+  packaging_code: string;        // e.g. "ST" (VARCHAR(20), unique)
+  packaging_description: string; // e.g. "Shrink Tray" (VARCHAR(150))
+}
+
 export interface ProductionJobRow {
   job_id?: string;                      // FK to job_master.job_id (backend-generated, never frontend-generated)
   plan_date: string;              // "YYYY-MM-DD"

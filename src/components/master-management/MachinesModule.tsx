@@ -1,12 +1,13 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { FlaskConical, CalendarDays } from 'lucide-react';
+import { FlaskConical, CalendarDays, Package } from 'lucide-react';
 import { planningRepository } from '../../services/planningRepository';
 import { MachineMasterRow, BottleMasterRow, BottleConfigurationRow } from '../../data/planningSchema';
 import { BottleMasterPanel } from './BottleMasterPanel';
 import { HolidayMasterPanel } from './HolidayMasterPanel';
+import { PackagingMasterPanel } from './PackagingMasterPanel';
 import { useAuth, MODULES } from '../../context/AuthContext';
 
-type MasterTabId = 'bottle' | 'holiday';
+type MasterTabId = 'bottle' | 'holiday' | 'packaging';
 
 interface MasterTab {
   id: MasterTabId;
@@ -17,6 +18,7 @@ interface MasterTab {
 const MASTER_TABS: MasterTab[] = [
   { id: 'bottle', label: 'Bottle Master', icon: <FlaskConical size={16} /> },
   { id: 'holiday', label: 'Holiday Master', icon: <CalendarDays size={16} /> },
+  { id: 'packaging', label: 'Packaging Master', icon: <Package size={16} /> },
 ];
 
 export const MachinesModule: React.FC = () => {
@@ -26,11 +28,25 @@ export const MachinesModule: React.FC = () => {
   const [configs, setConfigs] = useState<BottleConfigurationRow[]>([]);
   const [activeTab, setActiveTab] = useState<MasterTabId>('bottle');
 
-  const availableTabs = MASTER_TABS.filter((tab) =>
-    tab.id === 'bottle'
-      ? hasPermission(MODULES.BOTTLE_MASTER, 'read')
-      : hasPermission(MODULES.HOLIDAY_MASTER, 'read')
-  );
+  const availableTabs = MASTER_TABS.filter((tab) => {
+    switch (tab.id) {
+      case 'bottle':
+        return hasPermission(MODULES.BOTTLE_MASTER, 'read');
+      case 'holiday':
+        return hasPermission(MODULES.HOLIDAY_MASTER, 'read');
+      // Packaging Master has no module_master row of its own: it is a panel of
+      // Master Management, so it is readable by anyone who can read a Master
+      // Management child module (the same derivation that reveals the parent
+      // module in the sidebar). Writes inside the panel are checked separately.
+      case 'packaging':
+        return (
+          hasPermission(MODULES.BOTTLE_MASTER, 'read') ||
+          hasPermission(MODULES.HOLIDAY_MASTER, 'read')
+        );
+      default:
+        return false;
+    }
+  });
 
   useEffect(() => {
     if (availableTabs.length > 0 && !availableTabs.some((t) => t.id === activeTab)) {
@@ -84,6 +100,7 @@ export const MachinesModule: React.FC = () => {
         />
       )}
       {activeTab === 'holiday' && <HolidayMasterPanel />}
+      {activeTab === 'packaging' && <PackagingMasterPanel />}
     </div>
   );
 };

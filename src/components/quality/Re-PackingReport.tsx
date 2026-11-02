@@ -79,13 +79,13 @@ const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
 
 const NUMBERING_COLUMNS = [
-  'Job Name', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Defective Bottles',
+  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Defective Bottles',
   'Defects', 'Lot No.', 'Mould', 'Section No.', 'GOB', 'Checker Name',
   'QA-Shift Ex.',
 ];
 
 const SQC_COLUMNS = [
-  'Shift', 'Time', 'Job Name', 'Lot No.', 'Mould', 'Section', 'GOB',
+  'Shift', 'Time', 'Job Name', 'Pack Type', 'Lot No.', 'Mould', 'Section', 'GOB',
   'Defects', 'Pcs/Pack', 'Cartons', 'Defective Bottles', 'Checker Name',
   'QA-Shift Ex.',
 ];
@@ -389,6 +389,48 @@ const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void }
     <option value="3">Shift 3</option>
   </select>
 );
+
+const PackTypeCell: React.FC<{
+  value: string;
+  onChange: (v: string) => void;
+  machineNo: number;
+  packingTypes: string[];
+}> = ({ value, onChange, machineNo, packingTypes }) => {
+  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    onChange(e.target.value);
+  };
+
+  if (packingTypes.length === 0) {
+    return <CellTextInput value={value} onChange={onChange} />;
+  }
+
+  if (packingTypes.length === 1) {
+    // Only one packing type used during this day — display as plain text
+    return <CellTextInput value={packingTypes[0]} onChange={() => {}} />;
+  }
+
+  // Multiple packing types — show dropdown for selection
+  return (
+    <select
+      value={value}
+      onChange={handleChange}
+      onFocus={(e) => focusCellBorder(e, true)}
+      onBlur={(e) => focusCellBorder(e, false)}
+      style={{
+        ...CELL_INPUT_STYLE,
+        padding: '2px 4px',
+        color: value ? C.textMain : '#94a3b8',
+        textAlign: 'center',
+        cursor: 'pointer',
+        appearance: 'auto',
+      }}
+    >
+      {packingTypes.map((cat) => (
+        <option key={cat} value={cat}>{cat}</option>
+      ))}
+    </select>
+  );
+};
 
 // ─── CellTimePicker ─────────────────────────────────────────────────────────
 /**
@@ -822,6 +864,23 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   // report can only ever show the currently selected production day.
   const dayHourly: QualityDayHourly = loadedKey === dateKey ? hourly : EMPTY_DAY;
 
+  // Available packing types per machine for the selected date,
+  // computed from the Hourly Production Monitor records.
+  const packingTypesPerMachine = useMemo(() => {
+    const out: Record<number, string[]> = {};
+    for (const machineNo of MACHINE_NOS) {
+      const entries = dayHourly[String(machineNo)] ?? {};
+      const types = new Set<string>();
+      for (const entry of Object.values(entries)) {
+        if (entry.packing_category && entry.packing_category.length > 0) {
+          entry.packing_category.forEach((cat: string) => types.add(cat));
+        }
+      }
+      out[machineNo] = [...types].sort();
+    }
+    return out;
+  }, [dayHourly]);
+
   // One entry per continuous same-bottle run per machine — the date-wise job
   // selection of the Machine Wise Production and Efficiency report: a single
   // job all day yields one entry, a mid-day job change yields one entry per
@@ -1003,7 +1062,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           <th
                             key={col}
                             style={{
-                              ...thStyle(idx === NUMBERING_COLUMNS.length - 1, col === 'Job Name' ? '140px' : col === 'Checker Name' ? '110px' : '80px'),
+                              ...thStyle(idx === NUMBERING_COLUMNS.length - 1, col === 'Job Name' || col === 'Pack Type' ? '140px' : col === 'Checker Name' ? '110px' : '80px'),
                               textAlign: col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center',
                             }}
                           >
@@ -1061,6 +1120,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                   />
                                 )}
                               </div>
+                            </td>
+                            <td style={cellTd()}>
+                              <PackTypeCell
+                                value={cellValue(numberingValues, key, 'packType', '')}
+                                onChange={(v) => setNumberingCell(key, 'packType', v)}
+                                machineNo={machineNo}
+                                packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                              />
                             </td>
                             <td style={cellTd()}>
                               <CellShiftSelect
@@ -1210,7 +1277,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           <th
                             key={col}
                             style={{
-                              ...thStyle(idx === SQC_COLUMNS.length - 1, col === 'Job Name' ? '140px' : col === 'Checker Name' ? '110px' : col === 'Time' ? '130px' : '80px'),
+                              ...thStyle(idx === SQC_COLUMNS.length - 1, col === 'Job Name' || col === 'Pack Type' ? '140px' : col === 'Checker Name' ? '110px' : col === 'Time' ? '130px' : '80px'),
                               textAlign: col === 'Job Name' || col === 'Checker Name' ? 'left' : 'center',
                             }}
                           >
@@ -1280,6 +1347,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                   />
                                 )}
                               </div>
+                            </td>
+                            <td style={cellTd()}>
+                              <PackTypeCell
+                                value={cellValue(sqcValues, key, 'packType', '')}
+                                onChange={(v) => setSqcCell(key, 'packType', v)}
+                                machineNo={machineNo}
+                                packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                              />
                             </td>
                             <td style={cellTd()}>
                               <CellTextInput

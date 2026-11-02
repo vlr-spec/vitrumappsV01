@@ -1197,7 +1197,6 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         const shiftEffValues: number[][] = [[], [], []];
         const overallEffValues: number[] = [];
         let totalUnits = 0;
-        let theoreticalTotal = 0;
         let weightSum = 0;
         let weightHours = 0;
         let weightedWeight = 0;
@@ -1212,18 +1211,18 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           const idx = slot.shift_id - 1;
           if (idx < 0 || idx > 2) continue;
 
-          // As Per Speed (theoretical) production for the segment — the shared
+          // Segment's As-Per-Speed (theoretical) production — the shared
           // formula Speed/min × 60 × Machine Gob × Duration/Hours, with this
           // machine's own gob count and the segment's actual duration (1 for
-          // hourly rows, fractional for split segments). Over a full 24-slot
-          // day at one speed this is exactly
-          // Speed × Machine Gob × 60 × 24 (calculateProductionMetrics), and a
-          // split hour's segments sum to exactly the unsplit hour.
+          // hourly rows, fractional for split segments). It is used ONLY as the
+          // expected-quantity denominator of this segment's Efficiency % below;
+          // the report's "As Per Speed" Total Units / Total Draw columns are
+          // NOT derived from it (they are computed from the displayed average
+          // Speed, Weight, Machine Gob and MIN further down).
           const theoretical = calculateTheoreticalBottles(speed, gob, durationHours);
 
           shiftUnits[idx] += units;
           totalUnits += units;
-          theoreticalTotal += theoretical;
 
           // Per-hour segment efficiency — use the stored Pieces EFF% value from the
           // hourly record (the same value the Hourly Production Monitor displays),
@@ -1280,8 +1279,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         }
 
         // Applicable weight/speed from the HPR data. Weight is production
-        // weighted when several hours ran, so Total Draw = Units × Weight /
-        // 1,000,000 stays exact across the whole period.
+        // weighted when several hours ran, so Actual Total Draw = Units ×
+        // Weight / 1,000,000 stays exact across the whole period.
         const weight =
           weightedUnits > 0
             ? weightedWeight / weightedUnits
@@ -1290,8 +1289,6 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
               : 0;
         const speed = speedHours > 0 ? speedSum / speedHours : 0;
 
-        // As Per Speed – Total Draw = Weight × As Per Speed Total Units / 1,000,000
-        const asPerSpeedDraw = (weight * theoreticalTotal) / 1_000_000;
         // Actual Total Draw = Actual Total Units × Weight / 1,000,000
         const actualDraw = (weight * totalUnits) / 1_000_000;
 
@@ -1336,6 +1333,25 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         }
 
         const bottleName = bottleNameFor(run.bottleId, bottles);
+
+        // ── As Per Speed – Total Units & Total Draw ─────────────────────────
+        // Calculated ONLY from what this report already displays for the row —
+        // the average Speed and the applicable Weight (never from Bottle
+        // Master), this machine's own Gob count (existing machine gob
+        // configuration) and the row's MIN:
+        //
+        //   Total Units = Average Speed × Machine Gob × MIN
+        //   Total Draw  = (Weight × Total Units) / 1,000,000
+        //
+        // Speed and Weight are taken at the exact single decimal the table
+        // shows (fmt1), so both figures can be reproduced straight from the
+        // displayed cells. Machine Total and Grand Total rows keep summing
+        // these row values.
+        const displaySpeed = Number.isFinite(speed) ? parseFloat(fmt1(speed)) : 0;
+        const displayWeight = Number.isFinite(weight) ? parseFloat(fmt1(weight)) : 0;
+        const asPerSpeedUnits = displaySpeed * gob * runtimeMinutes;
+        const asPerSpeedDraw = (displayWeight * asPerSpeedUnits) / 1_000_000;
+
         out.push({
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
@@ -1344,7 +1360,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           weight,
           speed,
           runtimeMinutes,
-          asPerSpeedUnits: theoreticalTotal,
+          asPerSpeedUnits,
           asPerSpeedDraw,
           shiftUnits,
           actualUnits: totalUnits,

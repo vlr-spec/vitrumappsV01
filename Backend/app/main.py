@@ -10,6 +10,7 @@ from app.api.production import products
 from app.api.production import jobs
 from app.api.production import audit_logs
 from app.api.production import holidays
+from app.api.production import packaging
 from app.api.production import quality_defects
 from app.api.production import quality_daily
 from app.api import auth
@@ -26,6 +27,7 @@ from app.models.product import BottleMaster, BottleConfiguration
 from app.models.job import JobMaster, ProductionJob, JobPackaging, MachineJobSequence
 from app.models.audit_log import AuditLog
 from app.models.holiday import HolidayMaster
+from app.models.packaging import PackagingMaster
 from app.models.quality import DefectMaster, HourlyProductionReport, ShiftMaster, ShiftAssignment, HourlyProduction, HourlyProductionDefect
 
 # Auth schema models live on their own base so Base.metadata.create_all never
@@ -140,6 +142,7 @@ app.include_router(products.router, prefix="/api/production", dependencies=[Depe
 app.include_router(jobs.router, prefix="/api/production", dependencies=[Depends(get_current_user)])
 app.include_router(audit_logs.router, prefix="/api/production", dependencies=[Depends(get_current_user)])
 app.include_router(holidays.router, prefix="/api/production", dependencies=[Depends(get_current_user)])
+app.include_router(packaging.router, prefix="/api/production", dependencies=[Depends(get_current_user)])
 app.include_router(quality_defects.router, prefix="/api/production/quality/defects", dependencies=[Depends(get_current_user)])
 app.include_router(quality_daily.router, prefix="/api/production/quality/daily", dependencies=[Depends(get_current_user)])
 app.include_router(auth.router)

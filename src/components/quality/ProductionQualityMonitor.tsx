@@ -41,17 +41,12 @@ const GROUP_STYLE: Record<string, { color: string; bg: string; border: string }>
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Packing options + 24 hourly slots keyed to shift_id
+// 24 hourly slots keyed to shift_id
+//
+// Pack Type options are NOT hardcoded here: PackingMultiSelect loads every
+// packaging_code from hpr.packaging_master through GET /api/production/packaging/
+// so Packaging Master additions/deletions are reflected automatically.
 // ═══════════════════════════════════════════════════════════════════════════
-const PACKING_OPTIONS = [
-  'ST',
-  'SN',
-  'SB',
-  'BT',
-  'PP',
-  // SNTT
-];
-
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
   { time: '9:00 AM', shift_id: 1 }, { time: '10:00 AM', shift_id: 1 },
   { time: '11:00 AM', shift_id: 1 }, { time: '12:00 PM', shift_id: 1 },
@@ -597,11 +592,61 @@ const DefectDropdown: React.FC<{
   );
 };
 
+// ─── Shared Pack Type options (hpr.packaging_master) ────────────────────────
+// Every hourly row renders its own PackingMultiSelect, so the packaging_code
+// list is fetched ONCE and shared by all of them instead of one HTTP request
+// per row. loadPackOptions() deduplicates concurrent callers (and retries a
+// failed load on the next mount); fetchPackOptions() always hits the API so a
+// panel open reflects Packaging Master additions/deletions immediately. A
+// failed request keeps the last known list rather than clearing it.
+let packOptionsStore: string[] = [];
+let packOptionsLoad: Promise<void> | null = null;
+const packOptionsListeners = new Set<(codes: string[]) => void>();
+
+const publishPackOptions = (codes: string[]) => {
+  packOptionsStore = codes;
+  packOptionsListeners.forEach((notify) => notify(codes));
+};
+
+const fetchPackOptions = async (): Promise<void> => {
+  const result = await planningRepository.getPackagingMasters();
+  if (!result.ok) return;
+  publishPackOptions(result.rows.map((row) => row.packaging_code).filter((code) => code.length > 0));
+};
+
+/** Loads the list once for every row on screen; concurrent callers share one request. */
+const loadPackOptions = (): Promise<void> => {
+  if (!packOptionsLoad) {
+    packOptionsLoad = fetchPackOptions()
+      .catch(() => undefined)
+      .then(() => {
+        packOptionsLoad = null;
+      });
+  }
+  return packOptionsLoad;
+};
+
 // ─── PackingMultiSelect ────────────────────────────────────────────────────
 const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[]) => void; disabled?: boolean }> = ({ selected: rawSelected, onChange, disabled = false }) => {
   const selected = Array.isArray(rawSelected) ? rawSelected : [];
   const [open, setOpen] = useState(false);
   const ref = React.useRef<HTMLDivElement>(null);
+
+  // Options come straight from hpr.packaging_master via GET
+  // /api/production/packaging/ -- never a hardcoded list -- and every row
+  // subscribes to the single shared load above.
+  const [packOptions, setPackOptions] = useState<string[]>(packOptionsStore);
+  useEffect(() => {
+    const listener = (codes: string[]) => setPackOptions(codes);
+    packOptionsListeners.add(listener);
+    loadPackOptions();
+    return () => {
+      packOptionsListeners.delete(listener);
+    };
+  }, []);
+  useEffect(() => {
+    if (open) fetchPackOptions();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -659,7 +704,7 @@ const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[])
             overflow: 'hidden',
           }}
         >
-          {PACKING_OPTIONS.map((opt) => {
+          {packOptions.map((opt) => {
             const checked = selected.includes(opt);
             return (
               <label
