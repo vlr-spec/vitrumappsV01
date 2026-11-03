@@ -37,5 +37,9 @@ class Settings(BaseSettings):
     def auth_schema(self) -> str | None:
         return None if self.is_sqlite else "auth"
 
+    @property
+    def sqc_schema(self) -> str | None:
+        return None if self.is_sqlite else "sqc"
+
 
 settings = Settings()

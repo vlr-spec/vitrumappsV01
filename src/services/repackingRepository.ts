@@ -1,0 +1,197 @@
+/**
+ * repackingRepository.ts — API-backed persistence layer for the Repacking Module
+ * (Numbering and SQC/QC HOLD).
+ *
+ * Interacts with FastAPI backend endpoints:
+ *   - /api/production/repacking/numbering
+ *   - /api/production/repacking/sqc-qc-hold
+ *   - /api/production/repacking/employees
+ */
+
+import { apiFetch } from '../utils/api';
+
+export interface RepackingNumberingEntry {
+  entry_id: string;
+  entry_ids?: string[];
+  production_date: string;
+  machine_no: number;
+  job_id: string;
+  bottle_id: number | null;
+  bottle_name?: string | null;
+  pack_type: string | null;
+  shift: number;
+  entry_time: string;
+  pcs_per_pack: number | null;
+  cartons: number | null;
+  defective_bottles: number | null;
+  defect_id: string | null;
+  defect_ids?: string[];
+  defect_name?: string | null;
+  defect_names?: string[];
+  mould: string | null;
+  section_no: string | null;
+  checker_id: string | null;
+  checker_name?: string | null;
+  qa_shift_ex_id: string | null;
+  qa_shift_ex_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RepackingSqcQcHoldEntry {
+  entry_id: string;
+  entry_ids?: string[];
+  production_date: string;
+  machine_no: number;
+  job_id: string;
+  bottle_id: number | null;
+  bottle_name?: string | null;
+  pack_type: string | null;
+  lot_no: string | null;
+  shift: number;
+  entry_time: string;
+  pcs_per_pack: number | null;
+  cartons: number | null;
+  defective_bottles: number | null;
+  defect_id: string | null;
+  defect_ids?: string[];
+  defect_name?: string | null;
+  defect_names?: string[];
+  mould: string | null;
+  section_no: string | null;
+  checker_id: string | null;
+  checker_name?: string | null;
+  qa_shift_ex_id: string | null;
+  qa_shift_ex_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface EmployeeItem {
+  employee_id: string;
+  employee_name: string;
+}
+
+let employeesCache: EmployeeItem[] | null = null;
+
+export const repackingRepository = {
+  // --- Employee list ---
+  async getEmployees(): Promise<EmployeeItem[]> {
+    if (employeesCache && employeesCache.length > 0) return employeesCache;
+    try {
+      const data = (await apiFetch('/api/production/repacking/employees')) as EmployeeItem[];
+      if (Array.isArray(data)) {
+        employeesCache = data;
+        return data;
+      }
+      return [];
+    } catch (err) {
+      console.error('Failed to fetch employees:', err);
+      return [];
+    }
+  },
+
+  // --- Numbering APIs ---
+  async getNumbering(
+    productionDate?: string,
+    machineNo?: number,
+    jobId?: string
+  ): Promise<RepackingNumberingEntry[]> {
+    const params = new URLSearchParams();
+    if (productionDate) params.append('production_date', productionDate);
+    if (machineNo !== undefined) params.append('machine_no', String(machineNo));
+    if (jobId) params.append('job_id', jobId);
+
+    const qs = params.toString();
+    const url = `/api/production/repacking/numbering${qs ? `?${qs}` : ''}`;
+    const data = (await apiFetch(url)) as RepackingNumberingEntry[];
+    return Array.isArray(data) ? data : [];
+  },
+
+  async createNumbering(payload: Partial<RepackingNumberingEntry>): Promise<RepackingNumberingEntry> {
+    return (await apiFetch('/api/production/repacking/numbering', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })) as RepackingNumberingEntry;
+  },
+
+  async updateNumbering(
+    entryId: string,
+    payload: Partial<RepackingNumberingEntry>
+  ): Promise<RepackingNumberingEntry> {
+    return (await apiFetch(`/api/production/repacking/numbering/${entryId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })) as RepackingNumberingEntry;
+  },
+
+  async deleteNumbering(entryId: string): Promise<boolean> {
+    const res = (await apiFetch(`/api/production/repacking/numbering/${entryId}`, {
+      method: 'DELETE',
+    })) as { ok: boolean };
+    return !!res?.ok;
+  },
+
+  async saveNumberingBatch(
+    inserts: Partial<RepackingNumberingEntry>[],
+    updates: (Partial<RepackingNumberingEntry> & { entry_id: string })[]
+  ): Promise<RepackingNumberingEntry[]> {
+    const data = (await apiFetch('/api/production/repacking/numbering/save', {
+      method: 'POST',
+      body: JSON.stringify({ inserts, updates }),
+    })) as RepackingNumberingEntry[];
+    return Array.isArray(data) ? data : [];
+  },
+
+  // --- SQC/QC HOLD APIs ---
+  async getSqcQcHold(
+    productionDate?: string,
+    machineNo?: number,
+    jobId?: string
+  ): Promise<RepackingSqcQcHoldEntry[]> {
+    const params = new URLSearchParams();
+    if (productionDate) params.append('production_date', productionDate);
+    if (machineNo !== undefined) params.append('machine_no', String(machineNo));
+    if (jobId) params.append('job_id', jobId);
+
+    const qs = params.toString();
+    const url = `/api/production/repacking/sqc-qc-hold${qs ? `?${qs}` : ''}`;
+    const data = (await apiFetch(url)) as RepackingSqcQcHoldEntry[];
+    return Array.isArray(data) ? data : [];
+  },
+
+  async createSqcQcHold(payload: Partial<RepackingSqcQcHoldEntry>): Promise<RepackingSqcQcHoldEntry> {
+    return (await apiFetch('/api/production/repacking/sqc-qc-hold', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })) as RepackingSqcQcHoldEntry;
+  },
+
+  async updateSqcQcHold(
+    entryId: string,
+    payload: Partial<RepackingSqcQcHoldEntry>
+  ): Promise<RepackingSqcQcHoldEntry> {
+    return (await apiFetch(`/api/production/repacking/sqc-qc-hold/${entryId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })) as RepackingSqcQcHoldEntry;
+  },
+
+  async deleteSqcQcHold(entryId: string): Promise<boolean> {
+    const res = (await apiFetch(`/api/production/repacking/sqc-qc-hold/${entryId}`, {
+      method: 'DELETE',
+    })) as { ok: boolean };
+    return !!res?.ok;
+  },
+
+  async saveSqcQcHoldBatch(
+    inserts: Partial<RepackingSqcQcHoldEntry>[],
+    updates: (Partial<RepackingSqcQcHoldEntry> & { entry_id: string })[]
+  ): Promise<RepackingSqcQcHoldEntry[]> {
+    const data = (await apiFetch('/api/production/repacking/sqc-qc-hold/save', {
+      method: 'POST',
+      body: JSON.stringify({ inserts, updates }),
+    })) as RepackingSqcQcHoldEntry[];
+    return Array.isArray(data) ? data : [];
+  },
+};

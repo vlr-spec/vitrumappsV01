@@ -13,6 +13,7 @@ from app.api.production import holidays
 from app.api.production import packaging
 from app.api.production import quality_defects
 from app.api.production import quality_daily
+from app.api.production import repacking
 from app.api import auth
 from app.api.auth import get_current_user
 
@@ -29,6 +30,7 @@ from app.models.audit_log import AuditLog
 from app.models.holiday import HolidayMaster
 from app.models.packaging import PackagingMaster
 from app.models.quality import DefectMaster, HourlyProductionReport, ShiftMaster, ShiftAssignment, HourlyProduction, HourlyProductionDefect
+from app.models.repacking import RepackingNumbering, RepackingSqcQcHold
 
 # Auth schema models live on their own base so Base.metadata.create_all never
 # touches the server-provisioned auth.users / module_master / permissions tables.
@@ -113,6 +115,9 @@ def initialize_database() -> None:
     if settings.hpr_schema:
         with engine.begin() as connection:
             connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{settings.hpr_schema}"'))
+    if settings.sqc_schema:
+        with engine.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{settings.sqc_schema}"'))
     Base.metadata.create_all(bind=engine)
     _ensure_hourly_production_weight_efficiency_column()
     _ensure_hourly_production_split_group_column()
@@ -145,6 +150,7 @@ app.include_router(holidays.router, prefix="/api/production", dependencies=[Depe
 app.include_router(packaging.router, prefix="/api/production", dependencies=[Depends(get_current_user)])
 app.include_router(quality_defects.router, prefix="/api/production/quality/defects", dependencies=[Depends(get_current_user)])
 app.include_router(quality_daily.router, prefix="/api/production/quality/daily", dependencies=[Depends(get_current_user)])
+app.include_router(repacking.router, prefix="/api/production/repacking", dependencies=[Depends(get_current_user)])
 app.include_router(auth.router)
 
 

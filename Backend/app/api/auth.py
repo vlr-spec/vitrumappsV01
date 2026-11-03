@@ -337,3 +337,13 @@ def logout(
 ):
     if credentials:
         SESSIONS.pop(credentials.credentials, None)
+
+
+
+@router.get("/employees")
+def list_employees(
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(get_current_user),
+):
+    users = db.query(AuthUser).filter(AuthUser.is_active == True).order_by(AuthUser.employee_name).all()
+    return [{"employee_id": u.employee_id, "employee_name": u.employee_name} for u in users]

@@ -34,3 +34,12 @@ def auth_table_args() -> dict[str, str]:
     schema = settings.auth_schema
     return {"schema": schema} if schema else {}
 
+
+def sqc_fk(table_and_column: str) -> str:
+    schema = settings.sqc_schema
+    return f"{schema}.{table_and_column}" if schema else table_and_column
+
+
+def sqc_table_args() -> dict[str, str]:
+    schema = settings.sqc_schema
+    return {"schema": schema} if schema else {}

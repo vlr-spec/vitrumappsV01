@@ -48,14 +48,23 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Save, Check, Loader2 } from 'lucide-react';
+import { ChevronDown, Save, Check, Loader2, CheckCircle2, X } from 'lucide-react';
+import { toast } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth } from '../../context/AuthContext';
+import { planningRepository } from '../../services/planningRepository';
+import {
+  repackingRepository,
+  RepackingNumberingEntry,
+  RepackingSqcQcHoldEntry,
+  EmployeeItem,
+} from '../../services/repackingRepository';
 import {
   qualityRepository,
   QualityDayHourly,
   QualityHourlyEntry,
   QualityShiftMap,
+  DefectMasterItem,
   hasMeaningfulData,
 } from '../../services/qualityRepository';
 
@@ -83,7 +92,7 @@ const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d
 
 const NUMBERING_COLUMNS = [
   'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Bottle',
-  'Defects', 'Mould', 'Section No.', 'Checker Name',
+  'Defects', 'Mould', 'SECTION', 'Checker Name',
   'QA-Shift Ex.',
 ];
 
@@ -98,7 +107,7 @@ const NUMBERING_COL_WIDTHS: Record<string, string> = {
   'Bottle': '85px',
   'Defects': '200px',
   'Mould': '70px',
-  'Section No.': '70px',
+  'SECTION': '70px',
   'Checker Name': '110px',
   'QA-Shift Ex.': '90px',
 };
@@ -115,13 +124,13 @@ const NUMBERING_COL_PERCENTS: Record<string, string> = {
   'Defective Bottles': '7.5%',
   'Defects': '20.5%',
   'Mould': '5.5%',
-  'Section No.': '5.5%',
+  'SECTION': '5.5%',
   'Checker Name': '8.5%',
   'QA-Shift Ex.': '6.5%',
 };
 
 /** Numbering table: 0-based column indices that end a visual section
- *  (Production Details after 'Defective Bottles' (6), Defect Details after 'Section No.' (9)). */
+ *  (Production Details after 'Defective Bottles' (6), Defect Details after 'SECTION' (9)). */
 const NUMBERING_SECTION_ENDS = new Set([6, 9]);
 const NUMBERING_SECTION_DIVIDER = '2px solid #cbd5e1';
 
@@ -490,24 +499,20 @@ const PackTypeCell: React.FC<{
   packingTypes: string[];
   style?: React.CSSProperties;
 }> = ({ value, onChange, machineNo, packingTypes, style }) => {
-  const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    onChange(e.target.value);
-  };
+  const options = useMemo(() => {
+    const set = new Set(packingTypes);
+    if (value && value.trim()) set.add(value.trim());
+    return Array.from(set).sort();
+  }, [packingTypes, value]);
 
-  if (packingTypes.length === 0) {
+  if (options.length === 0) {
     return <CellTextInput value={value} onChange={onChange} style={style} />;
   }
 
-  if (packingTypes.length === 1) {
-    // Only one packing type used during this day — display as plain text
-    return <CellTextInput value={packingTypes[0]} onChange={() => {}} style={style} />;
-  }
-
-  // Multiple packing types — show dropdown for selection
   return (
     <select
       value={value}
-      onChange={handleChange}
+      onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => focusCellBorder(e, true)}
       onBlur={(e) => focusCellBorder(e, false)}
       style={{
@@ -515,12 +520,15 @@ const PackTypeCell: React.FC<{
         padding: '2px 4px',
         color: value ? C.textMain : '#94a3b8',
         textAlign: 'center',
+        textAlignLast: 'center',
         cursor: 'pointer',
         appearance: 'auto',
+        fontSize: '11.5px',
         ...(style ?? {}),
       }}
     >
-      {packingTypes.map((cat) => (
+      <option value="">Select</option>
+      {options.map((cat) => (
         <option key={cat} value={cat}>{cat}</option>
       ))}
     </select>
@@ -640,7 +648,7 @@ const DefectDropdown: React.FC<{
     }))
     .filter((g) => g.items.length > 0);
 
-  const MAX_TAGS = 1;
+  const MAX_TAGS = 2;
   const visible = selected.slice(0, MAX_TAGS);
   const extra = selected.length - MAX_TAGS;
 
@@ -652,6 +660,7 @@ const DefectDropdown: React.FC<{
         onClick={() => {
           if (!disabled) onToggle(!isOpen);
         }}
+        title={selected.length > 0 ? selected.join(', ') : (isLoading ? 'Loading defects...' : 'Click to select defects')}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -697,7 +706,7 @@ const DefectDropdown: React.FC<{
                     fontWeight: 500,
                     lineHeight: '18px',
                     height: '18px',
-                    maxWidth: '105px',
+                    maxWidth: '75px',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
@@ -847,39 +856,59 @@ const DefectDropdown: React.FC<{
                 );
               })}
             </div>
-            {selected.length > 0 && (
-              <div
+            <div
+              style={{
+                padding: '6px 10px',
+                borderTop: '1px solid #f1f5f9',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexShrink: 0,
+                backgroundColor: '#ffffff',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                  {selected.length} {selected.length === 1 ? 'defect' : 'defects'} selected
+                </span>
+                {selected.length > 0 && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onChange([]);
+                    }}
+                    style={{
+                      fontSize: '11px',
+                      color: '#dc2626',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '0',
+                      fontWeight: 500,
+                    }}
+                  >
+                    Clear all
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => onToggle(false)}
                 style={{
-                  padding: '6px 10px',
-                  borderTop: '1px solid #f1f5f9',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  flexShrink: 0,
-                  backgroundColor: '#ffffff',
+                  fontSize: '11px',
+                  color: '#ffffff',
+                  backgroundColor: '#2563eb',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '3px 10px',
+                  cursor: 'pointer',
+                  fontWeight: 600,
                 }}
               >
-                <span style={{ fontSize: '11.5px', color: '#64748b' }}>{selected.length} selected</span>
-                <button
-                  type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    onChange([]);
-                  }}
-                  style={{
-                    fontSize: '11.5px',
-                    color: '#dc2626',
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    padding: '0',
-                    fontWeight: 500,
-                  }}
-                >
-                  Clear all
-                </button>
-              </div>
-            )}
+                Done
+              </button>
+            </div>
           </div>,
           document.body
         )}
@@ -945,15 +974,23 @@ export const DEFAULT_EMPLOYEE_LIST: string[] = [
 
 /**
  * Hook to retrieve the active employee roster.
- * Combines the base employee list with the current logged-in user and any
+ * Combines database employees with the current logged-in user and any
  * supervisors/executives assigned to the day's shifts.
- * TODO: replace with employees fetched from DB
  */
-export const useEmployeeList = (shiftAssignments?: QualityShiftMap): string[] => {
+export const useEmployeeList = (
+  dbEmployees?: EmployeeItem[],
+  shiftAssignments?: QualityShiftMap
+): string[] => {
   const { user: authUser } = useAuth();
   return useMemo(() => {
-    // TODO: replace with employees fetched from DB
-    const set = new Set<string>(DEFAULT_EMPLOYEE_LIST);
+    const set = new Set<string>();
+    if (dbEmployees && dbEmployees.length > 0) {
+      dbEmployees.forEach((e) => {
+        if (e.employee_name?.trim()) set.add(e.employee_name.trim());
+      });
+    } else {
+      DEFAULT_EMPLOYEE_LIST.forEach((name) => set.add(name));
+    }
     if (authUser?.employee_name?.trim()) {
       set.add(authUser.employee_name.trim());
     }
@@ -964,7 +1001,7 @@ export const useEmployeeList = (shiftAssignments?: QualityShiftMap): string[] =>
       });
     }
     return Array.from(set).sort();
-  }, [authUser, shiftAssignments]);
+  }, [dbEmployees, authUser, shiftAssignments]);
 };
 
 /**
@@ -1421,43 +1458,74 @@ interface ExtraRow {
 /** Manually added rows per layout, keyed `${dateKey}|${machineNo}`. */
 type ExtraRowsStore = Record<string, ExtraRow[]>;
 
-/** One rendered table row: a production run or a manually added row. */
+/** One rendered table row: a saved database entry, a production run or a manually added row. */
 type OrderedRow =
-  | { kind: 'run'; run: JobRun; rowIdx: number; visualIdx: number }
-  | { kind: 'extra'; extra: ExtraRow; visualIdx: number };
+  | { kind: 'db'; dbEntry: RepackingNumberingEntry | RepackingSqcQcHoldEntry; visualIdx: number; rowKey: string }
+  | { kind: 'run'; run: JobRun; rowIdx: number; visualIdx: number; rowKey: string }
+  | { kind: 'extra'; extra: ExtraRow; visualIdx: number; rowKey: string };
 
 /**
- * Production runs interleaved with the machine's manually added rows: every
- * added row renders directly beneath the row its (+) button was clicked on —
- * its bottle's production row, or another added row — so added rows stay
- * grouped under their bottle name (Medley, Medley-added, Himalaya,
- * Himalaya-added) instead of collecting at the bottom of the machine table.
- * Rows added FROM an added row render immediately beneath it; added rows whose
- * anchor no longer exists fall back to the end of the table (in creation
- * order) so they can never become invisible.
+ * Interleaves base rows with manually added rows: every added row renders
+ * directly beneath the row its (+) button was clicked on. If saved database
+ * records exist, they form the base rows; otherwise detected production runs
+ * form the base rows.
  */
-const buildOrderedRows = (rowRuns: JobRun[], extras: ExtraRow[]): OrderedRow[] => {
+const buildOrderedRows = (
+  dbEntries: (RepackingNumberingEntry | RepackingSqcQcHoldEntry)[],
+  rowRuns: JobRun[],
+  extras: ExtraRow[],
+  machineNo: number,
+  dateKey: string
+): OrderedRow[] => {
   const out: OrderedRow[] = [];
   const childrenOf = (anchor: string): ExtraRow[] => extras.filter((e) => e.anchor === anchor);
   const visited = new Set<number>();
   const pushExtraWithChildren = (extra: ExtraRow): void => {
-    // Guard against a self-referencing anchor ever looping.
     if (visited.has(extra.id)) return;
     visited.add(extra.id);
-    out.push({ kind: 'extra', extra, visualIdx: out.length });
-    // Rows added FROM this added row render immediately beneath it.
+    out.push({
+      kind: 'extra',
+      extra,
+      visualIdx: out.length,
+      rowKey: `${dateKey}|${machineNo}|x|${extra.id}`,
+    });
     for (const child of childrenOf(`x:${extra.id}`)) pushExtraWithChildren(child);
   };
-  rowRuns.forEach((run, rowIdx) => {
-    out.push({ kind: 'run', run, rowIdx, visualIdx: out.length });
-    for (const extra of childrenOf(`run:${rowIdx}`)) pushExtraWithChildren(extra);
-  });
-  // Orphans (stale anchor after a data change): a child always has a later
-  // creation order than its parent, so this pass keeps parent-before-child.
+
+  if (dbEntries && dbEntries.length > 0) {
+    dbEntries.forEach((dbEntry) => {
+      const anchor = `db:${dbEntry.entry_id}`;
+      out.push({
+        kind: 'db',
+        dbEntry,
+        visualIdx: out.length,
+        rowKey: anchor,
+      });
+      for (const extra of childrenOf(anchor)) pushExtraWithChildren(extra);
+    });
+  } else {
+    rowRuns.forEach((run, rowIdx) => {
+      const anchor = `run:${rowIdx}`;
+      out.push({
+        kind: 'run',
+        run,
+        rowIdx,
+        visualIdx: out.length,
+        rowKey: `${dateKey}|${machineNo}|${rowIdx}|${run.bottleId || 'job'}|${run.runKey}`,
+      });
+      for (const extra of childrenOf(anchor)) pushExtraWithChildren(extra);
+    });
+  }
+
   for (const extra of extras) {
     if (visited.has(extra.id)) continue;
     visited.add(extra.id);
-    out.push({ kind: 'extra', extra, visualIdx: out.length });
+    out.push({
+      kind: 'extra',
+      extra,
+      visualIdx: out.length,
+      rowKey: `${dateKey}|${machineNo}|x|${extra.id}`,
+    });
   }
   return out;
 };
@@ -1467,51 +1535,145 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const { user: authUser } = useAuth();
   const machineNos = MACHINE_NOS;
 
-  // ── Hourly Production Monitor data for the selected date ─────────────────
-  // Loaded through the SAME existing repository call the Machine Wise report
-  // and the Daily M/C Speed and Weight report use for the selected date —
-  // no new endpoint, no change to any existing fetch.
   const [hourly, setHourly] = useState<QualityDayHourly>({});
   const [shiftAssignments, setShiftAssignments] = useState<QualityShiftMap>({});
   const [defectGroups, setDefectGroups] = useState<{ group: 'Critical' | 'Major' | 'Minor'; items: string[] }[]>([]);
+  const [defectList, setDefectList] = useState<DefectMasterItem[]>([]);
   const [loadingDefects, setLoadingDefects] = useState(true);
+  const [dbEmployees, setDbEmployees] = useState<EmployeeItem[]>([]);
+  const [packagingMasterCodes, setPackagingMasterCodes] = useState<string[]>([]);
+  const [savedNumbering, setSavedNumbering] = useState<Record<number, RepackingNumberingEntry[]>>({});
+  const [savedSqc, setSavedSqc] = useState<Record<number, RepackingSqcQcHoldEntry[]>>({});
+  const [baselineNumbering, setBaselineNumbering] = useState<ValuesStore>({});
+  const [baselineSqc, setBaselineSqc] = useState<ValuesStore>({});
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const saveTimeoutRef = useRef<number | null>(null);
 
-  // The date the stored `hourly` was loaded for. Rows are only ever built from
-  // it while it matches the selected date, so a date change can never show
-  // another day's jobs under the new date while the fetch is in flight.
+  // Success Popup Message state
+  const [showSuccessPopup, setShowSuccessPopup] = useState(false);
+  const [successPopupMsg, setSuccessPopupMsg] = useState('');
+
   // Single open dropdown tracker: ensures only one Defects popover is open at a time
   const [openDefectCellKey, setOpenDefectCellKey] = useState<string | null>(null);
 
-  // The date the stored `hourly` was loaded for. Rows are only ever built from
-  // it while it matches the selected date, so a date change can never show
-  // another day's jobs under the new date while the fetch is in flight.
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const requestRef = useRef(0);
 
-  // ── Editable per-row values (component session only — never persisted) ───
-  // Kept per layout so switching NUMBERING ↔ SQC/QC HOLD preserves whatever
-  // was entered, and keyed per date + machine + run so entries of one date
-  // never leak into another date's rows.
+  // ── Editable per-row values ───
   const [numberingValues, setNumberingValues] = useState<ValuesStore>({});
   const [sqcValues, setSqcValues] = useState<ValuesStore>({});
 
   // ── Manually added rows ((+) button in the JOB NAME column) ──────────────
-  // Kept in ONE store per layout so the NUMBERING and SQC/QC HOLD row-add
-  // sets are completely independent — adding rows in one tab never affects
-  // the other — and keyed per date + machine so rows of one date never leak
-  // into another date's tables. Values of added rows live in the same
-  // per-layout cell-value stores as production rows, under their own keys.
   const [numberingExtras, setNumberingExtras] = useState<ExtraRowsStore>({});
   const [sqcExtras, setSqcExtras] = useState<ExtraRowsStore>({});
-  // Monotonic id source — unique across every added row of both layouts.
   const extraIdRef = useRef(0);
 
   const dateKey = toIso(date);
   const dateLabel = toDisplay(date);
+
+  // Load database employees and packaging masters on mount
+  useEffect(() => {
+    let active = true;
+    repackingRepository
+      .getEmployees()
+      .then((emps) => {
+        if (active && Array.isArray(emps)) setDbEmployees(emps);
+      })
+      .catch((err) => console.error('Failed to load employees:', err));
+
+    planningRepository
+      .getPackagingMasters()
+      .then((res) => {
+        if (active && res.ok && Array.isArray(res.rows)) {
+          const codes = res.rows.map((r) => r.packaging_code).filter(Boolean);
+          setPackagingMasterCodes(codes);
+        }
+      })
+      .catch((err) => console.error('Failed to load packaging masters:', err));
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const loadSavedData = useCallback(async (targetKey: string) => {
+    try {
+      const [numData, sqcData] = await Promise.all([
+        repackingRepository.getNumbering(targetKey),
+        repackingRepository.getSqcQcHold(targetKey),
+      ]);
+
+      const numMap: Record<number, RepackingNumberingEntry[]> = {};
+      const numInitVals: ValuesStore = {};
+      const numBase: ValuesStore = {};
+
+      numData.forEach((entry) => {
+        const m = entry.machine_no;
+        if (!numMap[m]) numMap[m] = [];
+        numMap[m].push(entry);
+
+        const key = `db:${entry.entry_id}`;
+        const vals: CellValues = {
+          jobName: entry.bottle_name || entry.job_id || '',
+          packType: entry.pack_type || '',
+          shift: String(entry.shift || 1),
+          time: entry.entry_time || '',
+          pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
+          cartons: entry.cartons != null ? String(entry.cartons) : '',
+          noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
+          defects: entry.defect_name || '',
+          mould: entry.mould || '',
+          sectionNo: entry.section_no || '',
+          checkerName: entry.checker_name || '',
+          qaShiftEx: entry.qa_shift_ex_name || '',
+        };
+        numInitVals[key] = vals;
+        numBase[key] = { ...vals };
+      });
+
+      setSavedNumbering(numMap);
+      setNumberingValues((prev) => ({ ...prev, ...numInitVals }));
+      setBaselineNumbering((prev) => ({ ...prev, ...numBase }));
+
+      const sqcMap: Record<number, RepackingSqcQcHoldEntry[]> = {};
+      const sqcInitVals: ValuesStore = {};
+      const sqcBase: ValuesStore = {};
+
+      sqcData.forEach((entry) => {
+        const m = entry.machine_no;
+        if (!sqcMap[m]) sqcMap[m] = [];
+        sqcMap[m].push(entry);
+
+        const key = `db:${entry.entry_id}`;
+        const vals: CellValues = {
+          jobName: entry.bottle_name || entry.job_id || '',
+          packType: entry.pack_type || '',
+          lotNo: entry.lot_no || '',
+          shift: String(entry.shift || 1),
+          time: entry.entry_time || '',
+          pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
+          cartons: entry.cartons != null ? String(entry.cartons) : '',
+          noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
+          defects: entry.defect_name || '',
+          mould: entry.mould || '',
+          section: entry.section_no || '',
+          sectionNo: entry.section_no || '',
+          checkerName: entry.checker_name || '',
+          qaShiftEx: entry.qa_shift_ex_name || '',
+        };
+        sqcInitVals[key] = vals;
+        sqcBase[key] = { ...vals };
+      });
+
+      setSavedSqc(sqcMap);
+      setSqcValues((prev) => ({ ...prev, ...sqcInitVals }));
+      setBaselineSqc((prev) => ({ ...prev, ...sqcBase }));
+    } catch (err) {
+      console.error('Failed to load saved repacking data:', err);
+    }
+  }, []);
 
   const loadDay = useCallback(async (targetKey: string) => {
     const token = (requestRef.current += 1);
@@ -1541,23 +1703,21 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     }
   }, []);
 
-  // Load the existing HPR/Quality records for the selected date.
   useEffect(() => {
     void loadDay(dateKey);
+    void loadSavedData(dateKey);
     return () => {
-      // Abandon the in-flight response when the selected date changes or the
-      // report unmounts, so a late answer can never be written into state.
       requestRef.current += 1;
     };
-  }, [dateKey, loadDay]);
+  }, [dateKey, loadDay, loadSavedData]);
 
-  // Load defects master data grouped into Critical, Major, Minor (same as Quality Module)
   useEffect(() => {
     let active = true;
     qualityRepository
       .getDefects(true)
       .then((defects) => {
         if (!active) return;
+        setDefectList(defects);
         const groups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[] = (
           ['Critical', 'Major', 'Minor'] as const
         ).map((grp) => ({
@@ -1579,36 +1739,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     };
   }, []);
 
-  // Save button UI state handler
-  const handleSaveClick = () => {
-    if (saveState === 'saving') return;
-    setSaveState('saving');
-    if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
-    saveTimeoutRef.current = window.setTimeout(() => {
-      setSaveState('saved');
-      saveTimeoutRef.current = window.setTimeout(() => {
-        setSaveState('idle');
-      }, 2500);
-    }, 600);
-  };
+  const employeeList = useEmployeeList(dbEmployees, shiftAssignments);
 
-  useEffect(() => {
-    return () => {
-      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
-    };
-  }, []);
-
-  // Employee roster for Checker Name and QA-Shift Ex. dropdowns
-  // TODO: replace with employees fetched from DB
-  const employeeList = useEmployeeList(shiftAssignments);
-
-  // The hourly records of the SELECTED date's 24-hour window only. Entries are
-  // never built from the store while it still holds another date, so the
-  // report can only ever show the currently selected production day.
   const dayHourly: QualityDayHourly = loadedKey === dateKey ? hourly : EMPTY_DAY;
 
-  // Available packing types per machine for the selected date,
-  // computed from the Hourly Production Monitor records.
   const packingTypesPerMachine = useMemo(() => {
     const out: Record<number, string[]> = {};
     for (const machineNo of MACHINE_NOS) {
@@ -1624,10 +1758,17 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     return out;
   }, [dayHourly]);
 
-  // One entry per continuous same-bottle run per machine — the date-wise job
-  // selection of the Machine Wise Production and Efficiency report: a single
-  // job all day yields one entry, a mid-day job change yields one entry per
-  // job, and multiple job changes stay distinct instead of being merged.
+  const machinePackagingOptions = useMemo(() => {
+    const out: Record<number, string[]> = {};
+    for (const machineNo of MACHINE_NOS) {
+      const set = new Set<string>();
+      packagingMasterCodes.forEach((c) => set.add(c));
+      (packingTypesPerMachine[machineNo] ?? []).forEach((c) => set.add(c));
+      out[machineNo] = Array.from(set).sort();
+    }
+    return out;
+  }, [packagingMasterCodes, packingTypesPerMachine]);
+
   const machineRuns = useMemo<Record<number, JobRun[]>>(() => {
     const out: Record<number, JobRun[]> = {};
     for (const machineNo of MACHINE_NOS) {
@@ -1636,26 +1777,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     return out;
   }, [dayHourly]);
 
-  /** Job Name of one run — the bottle name from the production records. */
   const runJobName = useCallback(
     (run: JobRun): string => bottleNameFor(run.bottleId, bottles),
     [bottles]
   );
-  /** Shift of one run — the shift its first production hour belongs to. */
   const runShift = (run: JobRun): string => String(run.points[0]?.slot.shift_id ?? 1);
-  /**
-   * Time of one run — its actual production interval. Retained unchanged for
-   * compatibility; the Time column is now a MANUAL time picker and is no
-   * longer pre-filled from the job schedule.
-   */
   const runTime = (run: JobRun): string => runIntervalLabel(run);
 
-  /**
-   * Stable per-row key: one editable row per date + machine + production run.
-   * The bottle and interval are part of the key so a later data change (new
-   * job split) addresses the correct run instead of inheriting another row's
-   * typed values.
-   */
   const rowKeyFor = (machineNo: number, run: JobRun, rowIndex: number): string =>
     `${dateKey}|${machineNo}|${rowIndex}|${run.bottleId || 'job'}|${run.runKey}`;
 
@@ -1669,24 +1797,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     setSqcValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), [field]: value } }));
   }, []);
 
-  /** Per-layout, per-date key of a machine's manually added rows. */
   const extraRowsKey = (machineNo: number): string => `${dateKey}|${machineNo}`;
-
-  /** Stable per-row key of one manually added row — distinct from every
-   * production row key, so its fields resolve independently. */
   const extraRowKey = (machineNo: number, extraId: number): string =>
     `${dateKey}|${machineNo}|x|${extraId}`;
 
-  /**
-   * (+) row-add: creates a new row anchored to the row whose button was
-   * clicked — `run:<productionRowIdx>` for a bottle's production row or
-   * `x:<addedRowId>` for another added row — so it is inserted IMMEDIATELY
-   * BELOW that row (inside the same bottle's group), never after the next
-   * bottle or at the bottom of the machine table. The bottle/job name and
-   * shift are prefilled. Writes only to the chosen layout's store, so
-   * NUMBERING and SQC/QC HOLD row-add stay fully independent. Any number of
-   * rows may be added for the same bottle.
-   */
   const addExtraRow = (
     target: 'numbering' | 'sqc',
     machineNo: number,
@@ -1700,14 +1814,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     setter((prev) => ({ ...prev, [storeKey]: [...(prev[storeKey] ?? []), row] }));
   };
 
-  /**
-   * (-) row-remove: deletes ONE manually added row from the chosen layout's
-   * store and clears the values typed into it. Rows added FROM the removed
-   * row are re-anchored to the removed row's own anchor, so they stay grouped
-   * under the same bottle instead of vanishing or jumping elsewhere. Writes
-   * only to that layout, so NUMBERING and SQC/QC HOLD row removal stays fully
-   * independent, and production rows are never touched.
-   */
   const removeExtraRow = (target: 'numbering' | 'sqc', machineNo: number, extraId: number) => {
     const storeKey = extraRowsKey(machineNo);
     const rowKey = extraRowKey(machineNo, extraId);
@@ -1724,7 +1830,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           .map((r) => (r.anchor === removedAnchor ? { ...r, anchor: removed.anchor } : r)),
       };
     });
-    // Drop the removed row's typed values so nothing lingers for a future row.
     const valuesSetter = target === 'numbering' ? setNumberingValues : setSqcValues;
     valuesSetter((prev) => {
       if (!(rowKey in prev)) return prev;
@@ -1734,7 +1839,294 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     });
   };
 
-  /** Loading / error / empty status shown in a machine's body when it has no entries. */
+  const handleDeleteDbRow = async (
+    target: 'numbering' | 'sqc',
+    machineNo: number,
+    entryId: string
+  ) => {
+    if (!window.confirm('Are you sure you want to delete this saved entry?')) return;
+    try {
+      const ok =
+        target === 'numbering'
+          ? await repackingRepository.deleteNumbering(entryId)
+          : await repackingRepository.deleteSqcQcHold(entryId);
+
+      if (!ok) {
+        alert('Could not delete the entry. Please try again.');
+        return;
+      }
+
+      const key = `db:${entryId}`;
+      if (target === 'numbering') {
+        setSavedNumbering((prev) => ({
+          ...prev,
+          [machineNo]: (prev[machineNo] ?? []).filter((e) => String(e.entry_id) !== entryId),
+        }));
+        setNumberingValues((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        setBaselineNumbering((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      } else {
+        setSavedSqc((prev) => ({
+          ...prev,
+          [machineNo]: (prev[machineNo] ?? []).filter((e) => String(e.entry_id) !== entryId),
+        }));
+        setSqcValues((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        setBaselineSqc((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }
+    } catch (err: any) {
+      console.error('Delete failed:', err);
+      alert(err?.message || 'Failed to delete the entry.');
+    }
+  };
+
+  const handleSaveClick = async () => {
+    if (saveState === 'saving') return;
+
+    try {
+      const isNum = layout === 'numbering';
+      const valuesStore = isNum ? numberingValues : sqcValues;
+      const baselineStore = isNum ? baselineNumbering : baselineSqc;
+      const savedEntriesByMachine = isNum ? savedNumbering : savedSqc;
+
+      const inserts: any[] = [];
+      const updates: any[] = [];
+
+      for (const machineNo of MACHINE_NOS) {
+        const dbEntries = savedEntriesByMachine[machineNo] ?? [];
+        const rowRuns = (machineRuns[machineNo] ?? []).filter((r) => r.points.length > 0);
+        const extras = (isNum ? numberingExtras : sqcExtras)[extraRowsKey(machineNo)] ?? [];
+
+        const orderedRows = buildOrderedRows(dbEntries, rowRuns, extras, machineNo, dateKey);
+
+        for (const row of orderedRows) {
+          const key = row.rowKey;
+          const currentVals = valuesStore[key] ?? {};
+          const baseline = baselineStore[key];
+
+          let jobNameFallback = '';
+          let shiftFallback = '1';
+          let defaultBottleId: number | null = null;
+          let defaultJobId = '';
+          let entryId: string | null = null;
+
+          if (row.kind === 'db') {
+            entryId = String(row.dbEntry.entry_id);
+            jobNameFallback = row.dbEntry.bottle_name || row.dbEntry.job_id || '';
+            shiftFallback = String(row.dbEntry.shift || 1);
+            defaultBottleId = row.dbEntry.bottle_id ?? null;
+            defaultJobId = row.dbEntry.job_id || '';
+          } else if (row.kind === 'run') {
+            jobNameFallback = runJobName(row.run);
+            shiftFallback = runShift(row.run);
+            defaultBottleId = row.run.bottleId ? parseInt(row.run.bottleId, 10) || null : null;
+            defaultJobId = row.run.jobId || '';
+          } else {
+            jobNameFallback = row.extra.jobName;
+            shiftFallback = row.extra.shift;
+          }
+
+          const effectiveJobName = (currentVals.jobName ?? jobNameFallback).trim();
+          const effectiveShift = parseInt(currentVals.shift ?? shiftFallback, 10) || 1;
+          const effectiveTime = (currentVals.time ?? '').trim();
+          const effectivePackType = (currentVals.packType ?? '').trim() || null;
+          const effectivePcsPack = currentVals.pcsPack ? parseInt(currentVals.pcsPack, 10) || null : null;
+          const effectiveCartons = currentVals.cartons ? parseInt(currentVals.cartons, 10) || null : null;
+          const effectiveDefectiveBottles = currentVals.noOfBottle ? parseInt(currentVals.noOfBottle, 10) || null : null;
+          const effectiveMould = (currentVals.mould ?? '').trim() || null;
+          const effectiveSection = (isNum ? currentVals.sectionNo : (currentVals.section ?? currentVals.sectionNo))?.trim() || null;
+          const effectiveCheckerName = (currentVals.checkerName ?? '').trim();
+          const effectiveQaShiftEx = (currentVals.qaShiftEx ?? '').trim();
+          const effectiveDefects = (currentVals.defects ?? '').trim();
+          const effectiveLotNo = !isNum ? (currentVals.lotNo ?? '').trim() || null : undefined;
+
+          const checkerEmp = dbEmployees.find(
+            (e) => e.employee_name.toLowerCase() === effectiveCheckerName.toLowerCase() || e.employee_id === effectiveCheckerName
+          );
+          const checkerId = checkerEmp ? checkerEmp.employee_id : (effectiveCheckerName || null);
+
+          const qaEmp = dbEmployees.find(
+            (e) => e.employee_name.toLowerCase() === effectiveQaShiftEx.toLowerCase() || e.employee_id === effectiveQaShiftEx
+          );
+          const qaShiftExId = qaEmp ? qaEmp.employee_id : (effectiveQaShiftEx || null);
+
+          let defectId: string | null = null;
+          const defectIds: string[] = [];
+          if (effectiveDefects) {
+            const names = effectiveDefects.split(',').map((s) => s.trim()).filter(Boolean);
+            for (const dName of names) {
+              const dHit = defectList.find((d) => d.defect_name.toLowerCase() === dName.toLowerCase());
+              if (dHit) {
+                defectIds.push(String(dHit.defect_id));
+              }
+            }
+            defectId = defectIds.length > 0 ? defectIds[0] : null;
+          }
+
+          let bottleId: number | null = defaultBottleId;
+          if (effectiveJobName) {
+            const bHit = bottles.find(
+              (b) => b.name.toLowerCase() === effectiveJobName.toLowerCase() || String(b.id) === effectiveJobName
+            );
+            if (bHit) {
+              bottleId = parseInt(bHit.id, 10) || null;
+            }
+          }
+          const jobId = defaultJobId || effectiveJobName || 'JOB';
+
+          if (entryId) {
+            const hasChanged =
+              !baseline ||
+              currentVals.jobName !== baseline.jobName ||
+              currentVals.shift !== baseline.shift ||
+              currentVals.time !== baseline.time ||
+              currentVals.packType !== baseline.packType ||
+              currentVals.pcsPack !== baseline.pcsPack ||
+              currentVals.cartons !== baseline.cartons ||
+              currentVals.noOfBottle !== baseline.noOfBottle ||
+              currentVals.defects !== baseline.defects ||
+              currentVals.mould !== baseline.mould ||
+              (isNum ? currentVals.sectionNo !== baseline.sectionNo : currentVals.section !== baseline.section) ||
+              currentVals.checkerName !== baseline.checkerName ||
+              currentVals.qaShiftEx !== baseline.qaShiftEx ||
+              (!isNum && currentVals.lotNo !== baseline.lotNo);
+
+            if (hasChanged) {
+              if (!effectiveTime) {
+                alert(`Please select a Time for ${effectiveJobName || 'entry'} on Machine ${machineNo} before saving.`);
+                return;
+              }
+              const updateObj: any = {
+                entry_id: entryId,
+                entry_ids: row.kind === 'db' ? (row.dbEntry.entry_ids || [entryId]) : [entryId],
+                production_date: dateKey,
+                machine_no: machineNo,
+                job_id: jobId,
+                bottle_id: bottleId,
+                pack_type: effectivePackType,
+                shift: effectiveShift,
+                entry_time: effectiveTime,
+                pcs_per_pack: effectivePcsPack,
+                cartons: effectiveCartons,
+                defective_bottles: effectiveDefectiveBottles,
+                defect_id: defectId,
+                defect_ids: defectIds,
+                mould: effectiveMould,
+                section_no: effectiveSection,
+                checker_id: checkerId,
+                qa_shift_ex_id: qaShiftExId,
+              };
+              if (!isNum) updateObj.lot_no = effectiveLotNo;
+              updates.push(updateObj);
+            }
+          } else {
+            const hasUserEnteredData =
+              row.kind === 'extra' ||
+              Boolean(effectiveTime) ||
+              Boolean(effectivePackType) ||
+              effectivePcsPack !== null ||
+              effectiveCartons !== null ||
+              effectiveDefectiveBottles !== null ||
+              Boolean(effectiveDefects) ||
+              Boolean(effectiveMould) ||
+              Boolean(effectiveSection) ||
+              Boolean(effectiveCheckerName) ||
+              Boolean(effectiveQaShiftEx) ||
+              (!isNum && Boolean(effectiveLotNo));
+
+            if (hasUserEnteredData) {
+              if (!effectiveTime) {
+                alert(`Please select a Time for ${effectiveJobName || 'new entry'} on Machine ${machineNo} before saving.`);
+                return;
+              }
+              const insertObj: any = {
+                production_date: dateKey,
+                machine_no: machineNo,
+                job_id: jobId,
+                bottle_id: bottleId,
+                pack_type: effectivePackType,
+                shift: effectiveShift,
+                entry_time: effectiveTime,
+                pcs_per_pack: effectivePcsPack,
+                cartons: effectiveCartons,
+                defective_bottles: effectiveDefectiveBottles,
+                defect_id: defectId,
+                defect_ids: defectIds,
+                mould: effectiveMould,
+                section_no: effectiveSection,
+                checker_id: checkerId,
+                qa_shift_ex_id: qaShiftExId,
+              };
+              if (!isNum) insertObj.lot_no = effectiveLotNo;
+              inserts.push(insertObj);
+            }
+          }
+        }
+      }
+
+      if (inserts.length === 0 && updates.length === 0) {
+        setSaveState('saved');
+        toast.info('No changes to save.');
+        if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = window.setTimeout(() => setSaveState('idle'), 1500);
+        return;
+      }
+
+      setSaveState('saving');
+
+      if (isNum) {
+        await repackingRepository.saveNumberingBatch(inserts, updates);
+        setNumberingExtras({});
+      } else {
+        await repackingRepository.saveSqcQcHoldBatch(inserts, updates);
+        setSqcExtras({});
+      }
+
+      await loadSavedData(dateKey);
+
+      setSaveState('saved');
+      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = window.setTimeout(() => setSaveState('idle'), 2500);
+
+      const label = isNum ? 'Numbering' : 'SQC/QC HOLD';
+      const countParts: string[] = [];
+      if (inserts.length > 0) countParts.push(`${inserts.length} new ${inserts.length === 1 ? 'row' : 'rows'}`);
+      if (updates.length > 0) countParts.push(`${updates.length} updated ${updates.length === 1 ? 'row' : 'rows'}`);
+      const countText = countParts.join(', ');
+      const msg = `Repacking ${label} entries for ${dateLabel} have been saved to the database successfully${countText ? ` (${countText})` : ''}.`;
+
+      toast.success(msg);
+      setSuccessPopupMsg(msg);
+      setShowSuccessPopup(true);
+    } catch (err: any) {
+      console.error('Batch save failed:', err);
+      const errMsg = err?.message || 'Failed to save repacking entries. Please check inputs and try again.';
+      toast.error(errMsg);
+      alert(errMsg);
+      setSaveState('idle');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+    };
+  }, []);
+
   const statusMessage = (emptyText: string): string => {
     if (loading) return `Loading production data for ${dateLabel}…`;
     if (loadError) return `Could not load production data — ${loadError}`;
@@ -1753,7 +2145,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         paddingBottom: '8px',
       }}
     >
-      {/* Save Button (UI Only) — Upper-right corner above the table */}
+      {/* Save Button — Upper-right corner above the table */}
       <div
         style={{
           display: 'flex',
@@ -1809,21 +2201,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         </button>
       </div>
 
-      {/* The NUMBERING / SQC/QC HOLD switch lives in the main navigation bar
-          of the parent module (QualityControlModule) — the `layout` prop
-          selects which report is rendered below. */}
-
       {layout === 'numbering' && (
         <>
           {machineNos.map((machineNo, machineIdx) => {
             const runs = machineRuns[machineNo] ?? [];
             const rowRuns = runs.filter((run) => run.points.length > 0);
-            // Manually added rows for THIS machine (NUMBERING store only —
-            // independent from the SQC/QC HOLD set), interleaved with the
-            // production rows so each added row sits directly below the row
-            // its (+) button was clicked on.
             const extras = numberingExtras[extraRowsKey(machineNo)] ?? [];
-            const orderedRows = buildOrderedRows(rowRuns, extras);
+            const dbEntries = savedNumbering[machineNo] ?? [];
+            const orderedRows = buildOrderedRows(dbEntries, rowRuns, extras, machineNo, dateKey);
             return (
               <div
                 key={machineNo}
@@ -1901,23 +2286,29 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 12
-                        // cells — only the prefill fallbacks, the row key and
-                        // the buttons differ.
-                        const key =
-                          row.kind === 'extra'
-                            ? extraRowKey(machineNo, row.extra.id)
-                            : rowKeyFor(machineNo, row.run, row.rowIdx);
+                        const key = row.rowKey;
+                        const isDbRow = row.kind === 'db';
+                        const dbEntryId = isDbRow ? String(row.dbEntry.entry_id) : null;
                         const jobNameFallback =
-                          row.kind === 'extra' ? row.extra.jobName : runJobName(row.run);
+                          row.kind === 'extra'
+                            ? row.extra.jobName
+                            : isDbRow
+                            ? (row.dbEntry.bottle_name || row.dbEntry.job_id || '')
+                            : runJobName(row.run);
                         const shiftFallback =
-                          row.kind === 'extra' ? row.extra.shift : runShift(row.run);
-                        // Anchor of a row added FROM this row: its bottle's
-                        // production row, or this added row itself — so the new
-                        // row is inserted immediately below this one.
+                          row.kind === 'extra'
+                            ? row.extra.shift
+                            : isDbRow
+                            ? String(row.dbEntry.shift || 1)
+                            : runShift(row.run);
                         const anchor =
-                          row.kind === 'extra' ? `x:${row.extra.id}` : `run:${row.rowIdx}`;
+                          row.kind === 'extra'
+                            ? `x:${row.extra.id}`
+                            : isDbRow
+                            ? `db:${row.dbEntry.entry_id}`
+                            : `run:${row.rowIdx}`;
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
+
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc', height: '32px' }}>
                             <td style={numCellTd(0, NUMBERING_COLUMNS.length, 'left')}>
@@ -1949,14 +2340,20 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                     onClick={() => removeExtraRow('numbering', machineNo, extraId)}
                                   />
                                 )}
+                                {isDbRow && dbEntryId && (
+                                  <RemoveRowButton
+                                    title="Delete this saved entry"
+                                    onClick={() => handleDeleteDbRow('numbering', machineNo, dbEntryId)}
+                                  />
+                                )}
                               </div>
                             </td>
                             <td style={numCellTd(1, NUMBERING_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(numberingValues, key, 'packType', '')}
+                                value={cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'packType', v)}
                                 machineNo={machineNo}
-                                packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                                packingTypes={machinePackagingOptions[machineNo] ?? []}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
@@ -1969,28 +2366,28 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(numberingValues, key, 'time', '')}
+                                value={cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'time', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(numberingValues, key, 'pcsPack', '')}
+                                value={cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : '')}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(5, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(numberingValues, key, 'cartons', '')}
+                                value={cellValue(numberingValues, key, 'cartons', isDbRow && row.dbEntry.cartons != null ? String(row.dbEntry.cartons) : '')}
                                 onChange={(v) => setNumberingCell(key, 'cartons', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(6, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(numberingValues, key, 'noOfBottle', '')}
+                                value={cellValue(numberingValues, key, 'noOfBottle', isDbRow && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
                                 onChange={(v) => setNumberingCell(key, 'noOfBottle', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
@@ -2000,7 +2397,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 cellKey={`num|${key}`}
                                 activeOpenKey={openDefectCellKey}
                                 onToggleOpen={setOpenDefectCellKey}
-                                value={cellValue(numberingValues, key, 'defects', '')}
+                                value={cellValue(numberingValues, key, 'defects', isDbRow ? (row.dbEntry.defect_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'defects', v)}
                                 defectGroups={defectGroups}
                                 isLoading={loadingDefects}
@@ -2008,21 +2405,22 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(8, NUMBERING_COLUMNS.length)}>
                               <CellTextInput
-                                value={cellValue(numberingValues, key, 'mould', '')}
+                                value={cellValue(numberingValues, key, 'mould', isDbRow ? (row.dbEntry.mould || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'mould', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(9, NUMBERING_COLUMNS.length)}>
-                              <CellNumInput
-                                value={cellValue(numberingValues, key, 'sectionNo', '')}
+                              <CellTextInput
+                                value={cellValue(numberingValues, key, 'sectionNo', isDbRow ? (row.dbEntry.section_no || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
+                                placeholder="F12"
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(10, NUMBERING_COLUMNS.length, 'left')}>
                               <CellEmployeeSelect
-                                value={cellValue(numberingValues, key, 'checkerName', '')}
+                                value={cellValue(numberingValues, key, 'checkerName', isDbRow ? (row.dbEntry.checker_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'checkerName', v)}
                                 options={employeeList}
                                 placeholder="Select Checker"
@@ -2032,7 +2430,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(11, NUMBERING_COLUMNS.length, 'center')}>
                               <CellEmployeeSelect
-                                value={cellValue(numberingValues, key, 'qaShiftEx', '')}
+                                value={cellValue(numberingValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
                                 options={employeeList}
                                 placeholder="Select QA Ex."
@@ -2043,7 +2441,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           </tr>
                         );
                       })}
-                      {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
                           <td colSpan={NUMBERING_COLUMNS.length} style={emptyStateTd(NUMBERING_COLUMNS.length)}>
@@ -2065,12 +2462,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           {machineNos.map((machineNo, machineIdx) => {
             const runs = machineRuns[machineNo] ?? [];
             const rowRuns = runs.filter((run) => run.points.length > 0);
-            // Manually added rows for THIS machine (SQC store only —
-            // independent from the NUMBERING set), interleaved with the
-            // production rows so each added row sits directly below the row
-            // its (+) button was clicked on.
             const extras = sqcExtras[extraRowsKey(machineNo)] ?? [];
-            const orderedRows = buildOrderedRows(rowRuns, extras);
+            const dbEntries = savedSqc[machineNo] ?? [];
+            const orderedRows = buildOrderedRows(dbEntries, rowRuns, extras, machineNo, dateKey);
             return (
               <div
                 key={machineNo}
@@ -2148,23 +2542,29 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 13
-                        // cells — only the prefill fallbacks, the row key and
-                        // the buttons differ.
-                        const key =
-                          row.kind === 'extra'
-                            ? extraRowKey(machineNo, row.extra.id)
-                            : rowKeyFor(machineNo, row.run, row.rowIdx);
+                        const key = row.rowKey;
+                        const isDbRow = row.kind === 'db';
+                        const dbEntryId = isDbRow ? String(row.dbEntry.entry_id) : null;
                         const jobNameFallback =
-                          row.kind === 'extra' ? row.extra.jobName : runJobName(row.run);
+                          row.kind === 'extra'
+                            ? row.extra.jobName
+                            : isDbRow
+                            ? (row.dbEntry.bottle_name || row.dbEntry.job_id || '')
+                            : runJobName(row.run);
                         const shiftFallback =
-                          row.kind === 'extra' ? row.extra.shift : runShift(row.run);
-                        // Anchor of a row added FROM this row: its bottle's
-                        // production row, or this added row itself — so the new
-                        // row is inserted immediately below this one.
+                          row.kind === 'extra'
+                            ? row.extra.shift
+                            : isDbRow
+                            ? String(row.dbEntry.shift || 1)
+                            : runShift(row.run);
                         const anchor =
-                          row.kind === 'extra' ? `x:${row.extra.id}` : `run:${row.rowIdx}`;
+                          row.kind === 'extra'
+                            ? `x:${row.extra.id}`
+                            : isDbRow
+                            ? `db:${row.dbEntry.entry_id}`
+                            : `run:${row.rowIdx}`;
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
+
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc', height: '32px' }}>
                             <td style={sqcCellTd(0, SQC_COLUMNS.length)}>
@@ -2176,7 +2576,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(1, SQC_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(sqcValues, key, 'time', '')}
+                                value={cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'time', v)}
                                 style={SQC_INPUT_STYLE}
                               />
@@ -2210,41 +2610,47 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                     onClick={() => removeExtraRow('sqc', machineNo, extraId)}
                                   />
                                 )}
+                                {isDbRow && dbEntryId && (
+                                  <RemoveRowButton
+                                    title="Delete this saved entry"
+                                    onClick={() => handleDeleteDbRow('sqc', machineNo, dbEntryId)}
+                                  />
+                                )}
                               </div>
                             </td>
                             <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(sqcValues, key, 'packType', '')}
+                                value={cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'packType', v)}
                                 machineNo={machineNo}
-                                packingTypes={packingTypesPerMachine[machineNo] ?? []}
+                                packingTypes={machinePackagingOptions[machineNo] ?? []}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(4, SQC_COLUMNS.length)}>
                               <CellTextInput
-                                value={cellValue(sqcValues, key, 'lotNo', '')}
+                                value={cellValue(sqcValues, key, 'lotNo', isDbRow && 'lot_no' in row.dbEntry ? (row.dbEntry.lot_no || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'lotNo', v)}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(5, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'pcsPack', '')}
+                                value={cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : '')}
                                 onChange={(v) => setSqcCell(key, 'pcsPack', v)}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(6, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'cartons', '')}
+                                value={cellValue(sqcValues, key, 'cartons', isDbRow && row.dbEntry.cartons != null ? String(row.dbEntry.cartons) : '')}
                                 onChange={(v) => setSqcCell(key, 'cartons', v)}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(7, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'noOfBottle', '')}
+                                value={cellValue(sqcValues, key, 'noOfBottle', isDbRow && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
                                 onChange={(v) => setSqcCell(key, 'noOfBottle', v)}
                                 style={SQC_INPUT_STYLE}
                               />
@@ -2254,7 +2660,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 cellKey={`sqc|${key}`}
                                 activeOpenKey={openDefectCellKey}
                                 onToggleOpen={setOpenDefectCellKey}
-                                value={cellValue(sqcValues, key, 'defects', '')}
+                                value={cellValue(sqcValues, key, 'defects', isDbRow ? (row.dbEntry.defect_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'defects', v)}
                                 defectGroups={defectGroups}
                                 isLoading={loadingDefects}
@@ -2262,21 +2668,21 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(9, SQC_COLUMNS.length)}>
                               <CellTextInput
-                                value={cellValue(sqcValues, key, 'mould', '')}
+                                value={cellValue(sqcValues, key, 'mould', isDbRow ? (row.dbEntry.mould || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'mould', v)}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(10, SQC_COLUMNS.length)}>
                               <CellTextInput
-                                value={cellValue(sqcValues, key, 'section', '')}
+                                value={cellValue(sqcValues, key, 'section', isDbRow ? (row.dbEntry.section_no || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'section', v)}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
                             <td style={sqcCellTd(11, SQC_COLUMNS.length, 'left')}>
                               <CellEmployeeSelect
-                                value={cellValue(sqcValues, key, 'checkerName', '')}
+                                value={cellValue(sqcValues, key, 'checkerName', isDbRow ? (row.dbEntry.checker_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'checkerName', v)}
                                 options={employeeList}
                                 placeholder="Select Checker"
@@ -2286,7 +2692,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(12, SQC_COLUMNS.length, 'center')}>
                               <CellEmployeeSelect
-                                value={cellValue(sqcValues, key, 'qaShiftEx', '')}
+                                value={cellValue(sqcValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'qaShiftEx', v)}
                                 options={employeeList}
                                 placeholder="Select QA Ex."
@@ -2297,7 +2703,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           </tr>
                         );
                       })}
-                      {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
                           <td colSpan={SQC_COLUMNS.length} style={emptyStateTd(SQC_COLUMNS.length)}>
@@ -2313,6 +2718,118 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           })}
         </>
       )}
+
+      {/* Success Popup Message Modal rendered through Portal to document.body */}
+      {showSuccessPopup &&
+        createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              zIndex: 99999,
+              backgroundColor: 'rgba(15, 23, 42, 0.45)',
+              backdropFilter: 'blur(3px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '16px',
+              boxSizing: 'border-box',
+            }}
+            onClick={() => setShowSuccessPopup(false)}
+          >
+            <div
+              style={{
+                backgroundColor: '#ffffff',
+                borderRadius: '12px',
+                maxWidth: '430px',
+                width: '100%',
+                padding: '24px',
+                boxShadow: '0 20px 35px -5px rgba(15, 23, 42, 0.25), 0 8px 16px -4px rgba(15, 23, 42, 0.1)',
+                border: '1px solid #e2e8f0',
+                position: 'relative',
+                boxSizing: 'border-box',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => setShowSuccessPopup(false)}
+                style={{
+                  position: 'absolute',
+                  top: '14px',
+                  right: '14px',
+                  color: '#94a3b8',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: '4px',
+                  borderRadius: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = '#475569')}
+                onMouseLeave={(e) => (e.currentTarget.style.color = '#94a3b8')}
+              >
+                <X size={18} />
+              </button>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '14px' }}>
+                <div
+                  style={{
+                    width: '44px',
+                    height: '44px',
+                    borderRadius: '50%',
+                    backgroundColor: '#ecfdf5',
+                    border: '1px solid #a7f3d0',
+                    color: '#059669',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <CheckCircle2 size={24} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600, color: '#0f172a' }}>
+                    Data Saved Successfully
+                  </h3>
+                  <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#64748b' }}>
+                    Database update completed
+                  </p>
+                </div>
+              </div>
+
+              <p style={{ margin: '0 0 20px 0', fontSize: '13.5px', color: '#334155', lineHeight: 1.5 }}>
+                {successPopupMsg || `Repacking ${layout === 'numbering' ? 'Numbering' : 'SQC/QC HOLD'} records have been successfully saved to the database.`}
+              </p>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowSuccessPopup(false)}
+                  style={{
+                    padding: '7px 22px',
+                    fontSize: '13px',
+                    fontWeight: 500,
+                    color: '#ffffff',
+                    backgroundColor: '#2563eb',
+                    border: 'none',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.15s ease',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#1d4ed8')}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#2563eb')}
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };
