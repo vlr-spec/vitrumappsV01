@@ -47,12 +47,15 @@
  * existing Vitrum Glass ERP blue-and-white theme.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { ChevronDown, Save, Check, Loader2 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   qualityRepository,
   QualityDayHourly,
   QualityHourlyEntry,
+  QualityShiftMap,
   hasMeaningfulData,
 } from '../../services/qualityRepository';
 
@@ -79,99 +82,96 @@ const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
 
 const NUMBERING_COLUMNS = [
-  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Defective Bottles',
-  'Lot No.', 'Defects', 'Mould', 'Section No.', 'Checker Name',
+  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Bottle',
+  'Defects', 'Mould', 'Section No.', 'Checker Name',
   'QA-Shift Ex.',
 ];
 
-/** Numbering table: column widths (small columns reduced, Defects widened). */
+/** Numbering table: column min-widths for the header cells. */
 const NUMBERING_COL_WIDTHS: Record<string, string> = {
-  'Job Name': '150px',
-  'Pack Type': '78px',
-  'Shift': '68px',
-  'Time': '92px',
-  'Pcs/Pack': '68px',
-  'Cartons': '68px',
-  'Defective Bottles': '78px',
-  'Lot No.': '78px',
-  'Defects': '280px',
-  'Mould': '68px',
-  'Section No.': '68px',
-  'Checker Name': '118px',
-  'QA-Shift Ex.': '78px',
+  'Job Name': '160px',
+  'Pack Type': '80px',
+  'Shift': '70px',
+  'Time': '95px',
+  'Pcs/Pack': '70px',
+  'Cartons': '70px',
+  'Bottle': '85px',
+  'Defects': '200px',
+  'Mould': '70px',
+  'Section No.': '70px',
+  'Checker Name': '110px',
+  'QA-Shift Ex.': '90px',
 };
 
 /** Numbering table: percentage widths so the table fills all available
- *  horizontal space (sums to ~100%). */
+ *  horizontal space (sums to 100.0%). */
 const NUMBERING_COL_PERCENTS: Record<string, string> = {
-  'Job Name': '11.6%',
-  'Pack Type': '6.0%',
-  'Shift': '5.3%',
-  'Time': '7.1%',
-  'Pcs/Pack': '5.3%',
-  'Cartons': '5.3%',
-  'Defective Bottles': '6.0%',
-  'Lot No.': '6.0%',
-  'Defects': '21.7%',
-  'Mould': '5.3%',
-  'Section No.': '5.3%',
-  'Checker Name': '9.1%',
-  'QA-Shift Ex.': '6.0%',
+  'Job Name': '13.0%',
+  'Pack Type': '7.0%',
+  'Shift': '6.0%',
+  'Time': '8.0%',
+  'Pcs/Pack': '6.0%',
+  'Cartons': '6.0%',
+  'Defective Bottles': '7.5%',
+  'Defects': '20.5%',
+  'Mould': '5.5%',
+  'Section No.': '5.5%',
+  'Checker Name': '8.5%',
+  'QA-Shift Ex.': '6.5%',
 };
 
 /** Numbering table: 0-based column indices that end a visual section
- *  (Production Details, Defect Details (Mould Wise), Verification). */
-const NUMBERING_SECTION_ENDS = new Set([7, 10]); // after 'Lot No.' and 'Section No.'
-const NUMBERING_SECTION_DIVIDER = '2px solid #94a3b8';
+ *  (Production Details after 'Defective Bottles' (6), Defect Details after 'Section No.' (9)). */
+const NUMBERING_SECTION_ENDS = new Set([6, 9]);
+const NUMBERING_SECTION_DIVIDER = '2px solid #cbd5e1';
 
 const SQC_COLUMNS = [
   'Shift', 'Time', 'Job Name', 'Pack Type', 'Lot No.', 'Pcs/Pack', 'Cartons',
-  'Defective Bottles', 'Defects', 'Mould', 'Section', 'Checker Name',
+  'Bottle', 'Defects', 'Mould', 'Section', 'Checker Name',
   'QA-Shift Ex.',
 ];
 
 /** SQC/QC HOLD table: percentage widths so the table fills all available
- *  horizontal space (sums to ~100%). */
+ *  horizontal space (sums to 100.0%). */
 const SQC_COL_PERCENTS: Record<string, string> = {
-  'Shift': '5.3%',
-  'Time': '7.2%',
-  'Job Name': '11.4%',
-  'Pack Type': '6.1%',
-  'Lot No.': '6.1%',
-  'Pcs/Pack': '5.3%',
-  'Cartons': '5.3%',
-  'Defective Bottles': '6.1%',
-  'Defects': '21.3%',
-  'Mould': '5.3%',
-  'Section': '5.3%',
-  'Checker Name': '9.1%',
-  'QA-Shift Ex.': '6.1%',
+  'Shift': '5.5%',
+  'Time': '7.5%',
+  'Job Name': '13.0%',
+  'Pack Type': '6.5%',
+  'Lot No.': '6.5%',
+  'Pcs/Pack': '5.5%',
+  'Cartons': '5.5%',
+  'Defective Bottles': '7.0%',
+  'Defects': '19.0%',
+  'Mould': '5.5%',
+  'Section': '5.5%',
+  'Checker Name': '7.5%',
+  'QA-Shift Ex.': '5.5%',
 };
 
 /** SQC/QC HOLD table: pixel minimums for the header cells. */
 const SQC_COL_WIDTHS: Record<string, string> = {
   'Shift': '70px',
   'Time': '95px',
-  'Job Name': '150px',
+  'Job Name': '160px',
   'Pack Type': '80px',
   'Lot No.': '80px',
   'Pcs/Pack': '70px',
   'Cartons': '70px',
-  'Defective Bottles': '80px',
-  'Defects': '220px',
+  'Bottle': '85px',
+  'Defects': '190px',
   'Mould': '70px',
   'Section': '70px',
-  'Checker Name': '120px',
-  'QA-Shift Ex.': '80px',
+  'Checker Name': '110px',
+  'QA-Shift Ex.': '90px',
 };
 
-/** SQC/QC HOLD: 0-based column indices that end a visual section. */
-const SQC_SECTION_ENDS = new Set([7, 10]); // after 'Defective Bottles' and 'Section'
+/** SQC/QC HOLD: 0-based column indices that end a visual section (after 'Defective Bottles' (7) and 'Section' (10)). */
+const SQC_SECTION_ENDS = new Set([7, 10]);
 
 /** Minimum rendered table width — below it the card body scrolls horizontally. */
-// 13 columns (two 80px default-width columns more than the original 11) at the
-// same per-column minimums, so every column keeps its existing width and the
-// card body just starts scrolling horizontally a little earlier.
+const TABLE_MIN_WIDTH_NUMBERING = '1170px';
+const TABLE_MIN_WIDTH_SQC = '1240px';
 const TABLE_MIN_WIDTH = '1220px';
 
 const EMPTY_DAY: QualityDayHourly = {};
@@ -384,23 +384,22 @@ const CELL_INPUT_STYLE: React.CSSProperties = {
   width: '100%',
   height: '26px',
   boxSizing: 'border-box',
-  padding: '3px 8px',
+  padding: '2px 4px',
   fontSize: '12px',
   lineHeight: 1.3,
-  backgroundColor: C.white,
-  border: `1px solid ${C.border}`,
-  borderRadius: '6px',
+  backgroundColor: 'transparent',
+  border: '1px solid transparent',
+  borderRadius: '0px',
   outline: 'none',
-  transition: 'border-color 0.15s ease, box-shadow 0.15s ease',
+  transition: 'background-color 0.15s ease, box-shadow 0.15s ease',
 };
 
 const focusCellBorder = (
   e: React.FocusEvent<HTMLElement>,
   focused: boolean
 ) => {
-  e.currentTarget.style.borderColor = focused ? C.blueActive : C.border;
-  // Soft blue focus ring, matching the modern ERP card inputs.
-  e.currentTarget.style.boxShadow = focused ? '0 0 0 2px rgba(37, 99, 235, 0.12)' : 'none';
+  e.currentTarget.style.backgroundColor = focused ? '#eff6ff' : 'transparent';
+  e.currentTarget.style.boxShadow = focused ? 'inset 0 0 0 1.5px #2563eb' : 'none';
 };
 
 /** Editable text cell — left-aligned for names, centered otherwise. */
@@ -523,6 +522,496 @@ const PackTypeCell: React.FC<{
     >
       {packingTypes.map((cat) => (
         <option key={cat} value={cat}>{cat}</option>
+      ))}
+    </select>
+  );
+};
+
+
+// ─── Defect Styles & Dropdown (mirrors Quality Module) ──────────────────────
+const GROUP_STYLE: Record<string, { color: string; bg: string; border: string }> = {
+  Critical: { color: '#be123c', bg: '#fff1f2', border: '#fecdd3' },
+  Major: { color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+  Minor: { color: '#1d4ed8', bg: '#eff6ff', border: '#bfdbfe' },
+};
+
+/**
+ * Defects dropdown popover: rendered through a portal to document.body.
+ * Overlays the page without affecting row height, column widths, or machine cards.
+ * Flips upward when close to the bottom of the viewport and closes on outside click or Escape.
+ */
+const DefectDropdown: React.FC<{
+  isOpen: boolean;
+  onToggle: (open: boolean) => void;
+  selected: string[];
+  onChange: (v: string[]) => void;
+  defectGroups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[];
+  isLoading?: boolean;
+  disabled?: boolean;
+}> = ({ isOpen, onToggle, selected, onChange, defectGroups, isLoading = false, disabled = false }) => {
+  const [search, setSearch] = useState('');
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<{
+    top?: number;
+    bottom?: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+    flip: boolean;
+  }>({ left: 0, width: 280, maxHeight: 320, flip: false });
+
+  // Update floating popover coordinates anchored to the trigger cell
+  const updatePosition = useCallback(() => {
+    if (!triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) {
+      onToggle(false);
+      return;
+    }
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const flip = spaceBelow < 330 && spaceAbove > spaceBelow;
+    const popoverWidth = 280;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - popoverWidth - 8));
+    const maxHeight = Math.min(320, Math.max(160, flip ? spaceAbove - 16 : spaceBelow - 16));
+
+    setCoords({
+      top: flip ? undefined : rect.bottom + 4,
+      bottom: flip ? window.innerHeight - rect.top + 4 : undefined,
+      left,
+      width: popoverWidth,
+      maxHeight,
+      flip,
+    });
+  }, [onToggle]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setSearch('');
+      return;
+    }
+    updatePosition();
+    const handleScroll = (e: Event) => {
+      // Ignore scroll events from within the popover's internal defect list
+      if (popoverRef.current && popoverRef.current.contains(e.target as Node)) {
+        return;
+      }
+      updatePosition();
+    };
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [isOpen, updatePosition]);
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    if (!isOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (triggerRef.current && triggerRef.current.contains(target)) return;
+      if (popoverRef.current && popoverRef.current.contains(target)) return;
+      onToggle(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onToggle(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen, onToggle]);
+
+  const toggleItem = (item: string) => {
+    if (disabled) return;
+    onChange(selected.includes(item) ? selected.filter((x) => x !== item) : [...selected, item]);
+  };
+
+  const q = search.toLowerCase();
+  const filtered = defectGroups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((d) => d.toLowerCase().includes(q)),
+    }))
+    .filter((g) => g.items.length > 0);
+
+  const MAX_TAGS = 1;
+  const visible = selected.slice(0, MAX_TAGS);
+  const extra = selected.length - MAX_TAGS;
+
+  return (
+    <div style={{ position: 'relative', width: '100%', minWidth: '150px' }}>
+      {/* Trigger: Fixed height and nowrap so opening/closing never shifts row height or column widths */}
+      <div
+        ref={triggerRef}
+        onClick={() => {
+          if (!disabled) onToggle(!isOpen);
+        }}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '3px',
+          height: '24px',
+          minHeight: '24px',
+          maxHeight: '24px',
+          padding: '1px 5px',
+          border: `1px solid ${isOpen ? '#2563eb' : '#cbd5e1'}`,
+          borderRadius: '4px',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.6 : 1,
+          backgroundColor: '#ffffff',
+          boxShadow: isOpen ? '0 0 0 2px #dbeafe' : 'none',
+          transition: 'border-color 0.15s',
+          boxSizing: 'border-box',
+          overflow: 'hidden',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {selected.length === 0 ? (
+          <span style={{ fontSize: '11px', color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {isLoading ? 'Loading defects...' : 'Select defects'}
+          </span>
+        ) : (
+          <>
+            {visible.map((d) => {
+              const grp = defectGroups.find((g) => g.items.includes(d))?.group ?? 'Minor';
+              const s = GROUP_STYLE[grp] ?? GROUP_STYLE.Minor;
+              return (
+                <span
+                  key={d}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '2px',
+                    backgroundColor: s.bg,
+                    color: s.color,
+                    border: `1px solid ${s.border}`,
+                    borderRadius: '3px',
+                    padding: '0 4px',
+                    fontSize: '10px',
+                    fontWeight: 500,
+                    lineHeight: '18px',
+                    height: '18px',
+                    maxWidth: '105px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                  title={d}
+                >
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{d}</span>
+                  <span
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      toggleItem(d);
+                    }}
+                    style={{ cursor: 'pointer', lineHeight: 1, opacity: 0.7, fontSize: '11px', marginLeft: '1px' }}
+                  >
+                    ×
+                  </span>
+                </span>
+              );
+            })}
+            {extra > 0 && (
+              <span
+                style={{
+                  fontSize: '9.5px',
+                  color: '#2563eb',
+                  fontWeight: 600,
+                  backgroundColor: '#eff6ff',
+                  border: '1px solid #bfdbfe',
+                  borderRadius: '3px',
+                  padding: '0 4px',
+                  lineHeight: '18px',
+                  height: '18px',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+              >
+                +{extra} more
+              </span>
+            )}
+          </>
+        )}
+        <span style={{ marginLeft: 'auto', color: '#94a3b8', fontSize: '10px', paddingLeft: '4px', flexShrink: 0 }}>▾</span>
+      </div>
+
+      {/* Floating Popover rendered through Portal to document.body */}
+      {isOpen &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            style={{
+              position: 'fixed',
+              top: coords.top !== undefined ? `${coords.top}px` : 'auto',
+              bottom: coords.bottom !== undefined ? `${coords.bottom}px` : 'auto',
+              left: `${coords.left}px`,
+              width: `${coords.width}px`,
+              maxHeight: `${coords.maxHeight}px`,
+              zIndex: 99999,
+              backgroundColor: '#ffffff',
+              border: '1px solid #cbd5e1',
+              borderRadius: '7px',
+              boxShadow: '0 12px 32px rgba(15, 23, 42, 0.2), 0 2px 6px rgba(0, 0, 0, 0.08)',
+              display: 'flex',
+              flexDirection: 'column',
+              boxSizing: 'border-box',
+              overflow: 'hidden',
+            }}
+          >
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', flexShrink: 0 }}>
+              <input
+                autoFocus
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search defects..."
+                style={{
+                  width: '100%',
+                  padding: '5px 8px',
+                  fontSize: '12px',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '5px',
+                  outline: 'none',
+                  color: '#1e293b',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+              {filtered.length === 0 && (
+                <div style={{ padding: '14px', textAlign: 'center', fontSize: '12px', color: '#94a3b8' }}>
+                  {isLoading ? 'Loading defects...' : 'No defects found'}
+                </div>
+              )}
+              {filtered.map((g) => {
+                const s = GROUP_STYLE[g.group];
+                return (
+                  <div key={g.group}>
+                    <div
+                      style={{
+                        padding: '5px 10px 3px',
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        letterSpacing: '0.08em',
+                        textTransform: 'uppercase',
+                        color: s.color,
+                        backgroundColor: s.bg,
+                        borderTop: `1px solid ${s.border}`,
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 1,
+                      }}
+                    >
+                      {g.group} · {g.items.length}
+                    </div>
+                    {g.items.map((item) => {
+                      const checked = selected.includes(item);
+                      return (
+                        <label
+                          key={item}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '5px 12px',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            color: '#1e293b',
+                            backgroundColor: checked ? '#f8faff' : 'transparent',
+                            transition: 'background-color 0.1s',
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!checked) e.currentTarget.style.backgroundColor = '#f8fafc';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = checked ? '#f8faff' : 'transparent';
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleItem(item)}
+                            style={{ accentColor: '#2563eb', width: '13px', height: '13px', flexShrink: 0 }}
+                          />
+                          {item}
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+            {selected.length > 0 && (
+              <div
+                style={{
+                  padding: '6px 10px',
+                  borderTop: '1px solid #f1f5f9',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexShrink: 0,
+                  backgroundColor: '#ffffff',
+                }}
+              >
+                <span style={{ fontSize: '11.5px', color: '#64748b' }}>{selected.length} selected</span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onChange([]);
+                  }}
+                  style={{
+                    fontSize: '11.5px',
+                    color: '#dc2626',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: '0',
+                    fontWeight: 500,
+                  }}
+                >
+                  Clear all
+                </button>
+              </div>
+            )}
+          </div>,
+          document.body
+        )}
+    </div>
+  );
+};
+
+/** Cell wrapper for the multi-select DefectDropdown popover. */
+const CellDefectsDropdown: React.FC<{
+  cellKey: string;
+  activeOpenKey: string | null;
+  onToggleOpen: (k: string | null) => void;
+  value: string;
+  onChange: (v: string) => void;
+  defectGroups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[];
+  isLoading?: boolean;
+}> = ({ cellKey, activeOpenKey, onToggleOpen, value, onChange, defectGroups, isLoading }) => {
+  const isOpen = activeOpenKey === cellKey;
+  const selected = useMemo(() => {
+    return value ? value.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  }, [value]);
+
+  const handleChange = (items: string[]) => {
+    onChange(items.join(', '));
+  };
+
+  const handleToggle = (open: boolean) => {
+    onToggleOpen(open ? cellKey : null);
+  };
+
+  return (
+    <DefectDropdown
+      isOpen={isOpen}
+      onToggle={handleToggle}
+      selected={selected}
+      onChange={handleChange}
+      defectGroups={defectGroups}
+      isLoading={isLoading}
+    />
+  );
+};
+
+// ─── Employee Data Source ───────────────────────────────────────────────────
+// TODO: replace with employees fetched from DB
+/**
+ * Single source of truth for the employee list used in Checker Name and
+ * QA-Shift Ex. dropdowns across all Re-Packing Report tables.
+ * TODO: replace with employees fetched from DB
+ */
+export const DEFAULT_EMPLOYEE_LIST: string[] = [
+  'Ashish',
+  'Mangesh Kadam',
+  'Rajesh Shingote',
+  'Rama Zanjure',
+  'Ramesh Domala',
+  'Ravindra Shanbhag',
+  'Sanjeev Sinha',
+  'Shivanand Nayak',
+  'Sudhir Pai',
+  'Sumit Gupta',
+  'Vithob Shet',
+];
+
+/**
+ * Hook to retrieve the active employee roster.
+ * Combines the base employee list with the current logged-in user and any
+ * supervisors/executives assigned to the day's shifts.
+ * TODO: replace with employees fetched from DB
+ */
+export const useEmployeeList = (shiftAssignments?: QualityShiftMap): string[] => {
+  const { user: authUser } = useAuth();
+  return useMemo(() => {
+    // TODO: replace with employees fetched from DB
+    const set = new Set<string>(DEFAULT_EMPLOYEE_LIST);
+    if (authUser?.employee_name?.trim()) {
+      set.add(authUser.employee_name.trim());
+    }
+    if (shiftAssignments) {
+      Object.values(shiftAssignments).forEach((sa) => {
+        if (sa.supervisor?.trim()) set.add(sa.supervisor.trim());
+        if (sa.executive?.trim()) set.add(sa.executive.trim());
+      });
+    }
+    return Array.from(set).sort();
+  }, [authUser, shiftAssignments]);
+};
+
+/**
+ * Dropdown for employee selection (Checker Name and QA-Shift Ex.).
+ * Shows only the placeholder plus employee names from the list.
+ */
+const CellEmployeeSelect: React.FC<{
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+  align?: 'left' | 'center';
+  style?: React.CSSProperties;
+}> = ({ value, onChange, options, placeholder = 'Select', align = 'center', style }) => {
+  const allOptions = useMemo(() => {
+    const set = new Set<string>();
+    options.forEach((opt) => {
+      const t = opt?.trim();
+      if (t) set.add(t);
+    });
+    if (value && value.trim()) set.add(value.trim());
+    return Array.from(set).sort();
+  }, [options, value]);
+
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onFocus={(e) => focusCellBorder(e, true)}
+      onBlur={(e) => focusCellBorder(e, false)}
+      style={{
+        ...CELL_INPUT_STYLE,
+        padding: '2px 4px',
+        color: value ? C.textMain : '#94a3b8',
+        textAlign: align,
+        textAlignLast: align,
+        cursor: 'pointer',
+        appearance: 'auto',
+        fontSize: '11.5px',
+        ...(style ?? {}),
+      }}
+    >
+      <option value="">{placeholder}</option>
+      {allOptions.map((name) => (
+        <option key={name} value={name}>
+          {name}
+        </option>
       ))}
     </select>
   );
@@ -825,11 +1314,11 @@ const numThStyle = (colIndex: number, total: number, minWidth?: string, align: '
   const isLast = colIndex === total - 1;
   const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
   return {
-    padding: '6px 8px',
+    padding: '7px 6px',
     color: C.headerText,
     fontWeight: 700,
-    fontSize: '10.5px',
-    letterSpacing: '0.04em',
+    fontSize: '11px',
+    letterSpacing: '0.03em',
     textTransform: 'uppercase',
     borderBottom: `1px solid ${C.border}`,
     borderRight: isLast
@@ -841,8 +1330,9 @@ const numThStyle = (colIndex: number, total: number, minWidth?: string, align: '
     verticalAlign: 'middle',
     backgroundColor: C.headerBg,
     whiteSpace: 'nowrap',
-    minWidth: minWidth ?? '80px',
+    minWidth: minWidth ?? '70px',
     textAlign: align,
+    boxSizing: 'border-box',
   };
 };
 
@@ -851,18 +1341,20 @@ const numCellTd = (colIndex: number, total: number, align: 'left' | 'center' = '
   const isLast = colIndex === total - 1;
   const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
   return {
-    padding: '3px 6px',
+    padding: '3px 4px',
     borderBottom: `1px solid ${C.border}`,
     borderRight: isLast
       ? 'none'
       : isSectionEnd
         ? NUMBERING_SECTION_DIVIDER
         : `1px solid ${C.border}`,
-    fontSize: '12.5px',
+    fontSize: '12px',
     color: C.textMain,
     textAlign: align,
     verticalAlign: 'middle',
     whiteSpace: 'nowrap',
+    boxSizing: 'border-box',
+    height: '32px',
   };
 };
 
@@ -871,11 +1363,11 @@ const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: '
   const isLast = colIndex === total - 1;
   const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
   return {
-    padding: '6px 8px',
+    padding: '7px 6px',
     color: C.headerText,
     fontWeight: 700,
-    fontSize: '10.5px',
-    letterSpacing: '0.04em',
+    fontSize: '11px',
+    letterSpacing: '0.03em',
     textTransform: 'uppercase',
     borderBottom: `1px solid ${C.border}`,
     borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
@@ -883,8 +1375,9 @@ const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: '
     verticalAlign: 'middle',
     backgroundColor: C.headerBg,
     whiteSpace: 'nowrap',
-    minWidth: minWidth ?? '80px',
+    minWidth: minWidth ?? '70px',
     textAlign: align,
+    boxSizing: 'border-box',
   };
 };
 
@@ -893,14 +1386,16 @@ const sqcCellTd = (colIndex: number, total: number, align: 'left' | 'center' = '
   const isLast = colIndex === total - 1;
   const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
   return {
-    padding: '3px 6px',
+    padding: '3px 4px',
     borderBottom: `1px solid ${C.border}`,
     borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
-    fontSize: '12.5px',
+    fontSize: '12px',
     color: C.textMain,
     textAlign: align,
     verticalAlign: 'middle',
     whiteSpace: 'nowrap',
+    boxSizing: 'border-box',
+    height: '32px',
   };
 };
 
@@ -969,6 +1464,7 @@ const buildOrderedRows = (rowRuns: JobRun[], extras: ExtraRow[]): OrderedRow[] =
 
 const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = ({ date, layout = 'numbering' }) => {
   const { bottles } = useERP();
+  const { user: authUser } = useAuth();
   const machineNos = MACHINE_NOS;
 
   // ── Hourly Production Monitor data for the selected date ─────────────────
@@ -976,6 +1472,18 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   // and the Daily M/C Speed and Weight report use for the selected date —
   // no new endpoint, no change to any existing fetch.
   const [hourly, setHourly] = useState<QualityDayHourly>({});
+  const [shiftAssignments, setShiftAssignments] = useState<QualityShiftMap>({});
+  const [defectGroups, setDefectGroups] = useState<{ group: 'Critical' | 'Major' | 'Minor'; items: string[] }[]>([]);
+  const [loadingDefects, setLoadingDefects] = useState(true);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const saveTimeoutRef = useRef<number | null>(null);
+
+  // The date the stored `hourly` was loaded for. Rows are only ever built from
+  // it while it matches the selected date, so a date change can never show
+  // another day's jobs under the new date while the fetch is in flight.
+  // Single open dropdown tracker: ensures only one Defects popover is open at a time
+  const [openDefectCellKey, setOpenDefectCellKey] = useState<string | null>(null);
+
   // The date the stored `hourly` was loaded for. Rows are only ever built from
   // it while it matches the selected date, so a date change can never show
   // another day's jobs under the new date while the fetch is in flight.
@@ -1009,24 +1517,27 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     const token = (requestRef.current += 1);
     setLoading(true);
     try {
-      const { hourly: day, ok, error } = await qualityRepository.load(targetKey);
+      const { hourly: day, shifts: dayShifts, ok, error } = await qualityRepository.load(targetKey);
       if (token !== requestRef.current) return;
       setLoading(false);
       if (ok === false) {
         setLoadError(error || 'Could not load saved data.');
         setLoadedKey(targetKey);
         setHourly({});
+        setShiftAssignments({});
         return;
       }
       setLoadError('');
       setLoadedKey(targetKey);
       setHourly(day ?? {});
+      setShiftAssignments(dayShifts ?? {});
     } catch (err) {
       if (token !== requestRef.current) return;
       setLoading(false);
       setLoadError(err instanceof Error && err.message ? err.message : 'Could not load saved data.');
       setLoadedKey(targetKey);
       setHourly({});
+      setShiftAssignments({});
     }
   }, []);
 
@@ -1039,6 +1550,57 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
       requestRef.current += 1;
     };
   }, [dateKey, loadDay]);
+
+  // Load defects master data grouped into Critical, Major, Minor (same as Quality Module)
+  useEffect(() => {
+    let active = true;
+    qualityRepository
+      .getDefects(true)
+      .then((defects) => {
+        if (!active) return;
+        const groups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[] = (
+          ['Critical', 'Major', 'Minor'] as const
+        ).map((grp) => ({
+          group: grp,
+          items: defects
+            .filter((d) => d.defect_type === grp)
+            .sort((a, b) => a.defect_sr - b.defect_sr)
+            .map((d) => d.defect_name),
+        }));
+        setDefectGroups(groups);
+        setLoadingDefects(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setLoadingDefects(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Save button UI state handler
+  const handleSaveClick = () => {
+    if (saveState === 'saving') return;
+    setSaveState('saving');
+    if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+    saveTimeoutRef.current = window.setTimeout(() => {
+      setSaveState('saved');
+      saveTimeoutRef.current = window.setTimeout(() => {
+        setSaveState('idle');
+      }, 2500);
+    }, 600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
+    };
+  }, []);
+
+  // Employee roster for Checker Name and QA-Shift Ex. dropdowns
+  // TODO: replace with employees fetched from DB
+  const employeeList = useEmployeeList(shiftAssignments);
 
   // The hourly records of the SELECTED date's 24-hour window only. Entries are
   // never built from the store while it still holds another date, so the
@@ -1180,22 +1742,79 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   };
 
   return (
-    <div style={{ padding: '16px 20px', backgroundColor: '#f8fafc', minHeight: '100%' }}>
+    <div
+      style={{
+        width: '100%',
+        minWidth: 0,
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '12px',
+        paddingBottom: '8px',
+      }}
+    >
+      {/* Save Button (UI Only) — Upper-right corner above the table */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          alignItems: 'center',
+          width: '100%',
+          padding: '0 2px',
+          boxSizing: 'border-box',
+        }}
+      >
+        <button
+          type="button"
+          onClick={handleSaveClick}
+          disabled={saveState === 'saving'}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '6px 16px',
+            fontSize: '12.5px',
+            fontWeight: 500,
+            color: '#ffffff',
+            backgroundColor: saveState === 'saved' ? '#16a34a' : '#2563eb',
+            border: 'none',
+            borderRadius: '6px',
+            cursor: saveState === 'saving' ? 'wait' : 'pointer',
+            transition: 'all 0.15s ease',
+            boxShadow: '0 1px 2px rgba(0, 0, 0, 0.05)',
+          }}
+          onMouseEnter={(e) => {
+            if (saveState === 'idle') e.currentTarget.style.backgroundColor = '#1d4ed8';
+          }}
+          onMouseLeave={(e) => {
+            if (saveState === 'idle') e.currentTarget.style.backgroundColor = '#2563eb';
+          }}
+        >
+          {saveState === 'saving' ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>Saving...</span>
+            </>
+          ) : saveState === 'saved' ? (
+            <>
+              <Check className="w-3.5 h-3.5" />
+              <span>Saved</span>
+            </>
+          ) : (
+            <>
+              <Save className="w-3.5 h-3.5" />
+              <span>Save</span>
+            </>
+          )}
+        </button>
+      </div>
+
       {/* The NUMBERING / SQC/QC HOLD switch lives in the main navigation bar
           of the parent module (QualityControlModule) — the `layout` prop
           selects which report is rendered below. */}
 
-      {/* Date filter and navigation preserved from parent - via useERP context */}
-      {/* The parent component provides dateKey, dateLabel, shift navigation etc. */}
-
       {layout === 'numbering' && (
-        <div>
-          <div style={{ margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ width: '4px', height: '15px', borderRadius: '2px', backgroundColor: '#2563EB', display: 'inline-block' }} />
-            <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1e293b' }}>
-              Re-Packing Report — Numbering
-            </h3>
-          </div>
+        <>
           {machineNos.map((machineNo, machineIdx) => {
             const runs = machineRuns[machineNo] ?? [];
             const rowRuns = runs.filter((run) => run.points.length > 0);
@@ -1206,8 +1825,27 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
             const extras = numberingExtras[extraRowsKey(machineNo)] ?? [];
             const orderedRows = buildOrderedRows(rowRuns, extras);
             return (
-              <div key={machineNo} style={{ marginBottom: '12px', backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)', overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 12px', borderBottom: `1px solid ${C.border}`, backgroundColor: C.white }}>
+              <div
+                key={machineNo}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  backgroundColor: C.white,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: '10px',
+                  boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 12px',
+                    borderBottom: `1px solid ${C.border}`,
+                    backgroundColor: C.white,
+                  }}
+                >
                   <span
                     style={{
                       width: '22px',
@@ -1221,21 +1859,22 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
+                      lineHeight: 1,
                     }}
                   >
                     {machineNo}
                   </span>
-                  <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: '#1e293b' }}>
+                  <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: '#1e293b', lineHeight: 1.2 }}>
                     Machine {machineNo}
                   </h4>
                 </div>
-                <div style={{ overflowX: 'auto' }}>
+                <div style={{ width: '100%', overflowX: 'auto', boxSizing: 'border-box' }}>
                   <table
                     style={{
                       width: '100%',
                       borderCollapse: 'collapse',
                       tableLayout: 'fixed',
-                      minWidth: '1080px',
+                      minWidth: TABLE_MIN_WIDTH_NUMBERING,
                     }}
                   >
                     <colgroup>
@@ -1244,7 +1883,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       ))}
                     </colgroup>
                     <thead>
-                      <tr style={{ backgroundColor: C.headerBg }}>
+                      <tr style={{ backgroundColor: C.headerBg, height: '34px' }}>
                         {NUMBERING_COLUMNS.map((col, idx) => (
                           <th
                             key={col}
@@ -1262,7 +1901,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                     </thead>
                     <tbody>
                       {orderedRows.map((row) => {
-                        // Production and added rows share the exact same 13
+                        // Production and added rows share the exact same 12
                         // cells — only the prefill fallbacks, the row key and
                         // the buttons differ.
                         const key =
@@ -1280,14 +1919,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           row.kind === 'extra' ? `x:${row.extra.id}` : `run:${row.rowIdx}`;
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
                         return (
-                          <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc' }}>
-                            <td style={numCellTd(0, 13, 'left')}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc', height: '32px' }}>
+                            <td style={numCellTd(0, NUMBERING_COLUMNS.length, 'left')}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <CellTextInput
                                     value={cellValue(numberingValues, key, 'jobName', jobNameFallback)}
                                     onChange={(v) => setNumberingCell(key, 'jobName', v)}
                                     align="left"
+                                    placeholder="Job / Bottle Name"
                                     style={NUMBERING_INPUT_STYLE}
                                   />
                                 </div>
@@ -1311,7 +1951,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                               </div>
                             </td>
-                            <td style={numCellTd(1, 13)}>
+                            <td style={numCellTd(1, NUMBERING_COLUMNS.length)}>
                               <PackTypeCell
                                 value={cellValue(numberingValues, key, 'packType', '')}
                                 onChange={(v) => setNumberingCell(key, 'packType', v)}
@@ -1320,81 +1960,83 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(2, 13)}>
+                            <td style={numCellTd(2, NUMBERING_COLUMNS.length)}>
                               <CellShiftSelect
                                 value={cellValue(numberingValues, key, 'shift', shiftFallback)}
                                 onChange={(v) => setNumberingCell(key, 'shift', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(3, 13)}>
+                            <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
                               <CellTimePicker
                                 value={cellValue(numberingValues, key, 'time', '')}
                                 onChange={(v) => setNumberingCell(key, 'time', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(4, 13)}>
+                            <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'pcsPack', '')}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(5, 13)}>
+                            <td style={numCellTd(5, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'cartons', '')}
                                 onChange={(v) => setNumberingCell(key, 'cartons', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(6, 13)}>
+                            <td style={numCellTd(6, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'noOfBottle', '')}
                                 onChange={(v) => setNumberingCell(key, 'noOfBottle', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(7, 13)}>
-                              <CellTextInput
-                                value={cellValue(numberingValues, key, 'lotNo', '')}
-                                onChange={(v) => setNumberingCell(key, 'lotNo', v)}
-                                style={NUMBERING_INPUT_STYLE}
-                              />
-                            </td>
-                            <td style={numCellTd(8, 13)}>
-                              <CellNumInput
+                            <td style={numCellTd(7, NUMBERING_COLUMNS.length)}>
+                              <CellDefectsDropdown
+                                cellKey={`num|${key}`}
+                                activeOpenKey={openDefectCellKey}
+                                onToggleOpen={setOpenDefectCellKey}
                                 value={cellValue(numberingValues, key, 'defects', '')}
                                 onChange={(v) => setNumberingCell(key, 'defects', v)}
-                                style={NUMBERING_INPUT_STYLE}
+                                defectGroups={defectGroups}
+                                isLoading={loadingDefects}
                               />
                             </td>
-                            <td style={numCellTd(9, 13)}>
+                            <td style={numCellTd(8, NUMBERING_COLUMNS.length)}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'mould', '')}
                                 onChange={(v) => setNumberingCell(key, 'mould', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(10, 13)}>
+                            <td style={numCellTd(9, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
                                 value={cellValue(numberingValues, key, 'sectionNo', '')}
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(11, 13, 'left')}>
-                              <CellTextInput
+                            <td style={numCellTd(10, NUMBERING_COLUMNS.length, 'left')}>
+                              <CellEmployeeSelect
                                 value={cellValue(numberingValues, key, 'checkerName', '')}
                                 onChange={(v) => setNumberingCell(key, 'checkerName', v)}
+                                options={employeeList}
+                                placeholder="Select Checker"
                                 align="left"
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(12, 13, 'center')}>
-                              <CellTextInput
+                            <td style={numCellTd(11, NUMBERING_COLUMNS.length, 'center')}>
+                              <CellEmployeeSelect
                                 value={cellValue(numberingValues, key, 'qaShiftEx', '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
+                                options={employeeList}
+                                placeholder="Select QA Ex."
+                                align="center"
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
@@ -1404,7 +2046,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       {/* Empty / status state — only when there are NO rows at all */}
                       {orderedRows.length === 0 && (
                         <tr>
-                          <td colSpan={13} style={emptyStateTd(13)}>
+                          <td colSpan={NUMBERING_COLUMNS.length} style={emptyStateTd(NUMBERING_COLUMNS.length)}>
                             {statusMessage('No numbering data available for the selected date.')}
                           </td>
                         </tr>
@@ -1415,17 +2057,11 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               </div>
             );
           })}
-        </div>
+        </>
       )}
 
       {layout === 'sqc' && (
-        <div>
-          <div style={{ margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ width: '4px', height: '15px', borderRadius: '2px', backgroundColor: '#2563EB', display: 'inline-block' }} />
-            <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1e293b' }}>
-              Re-Packing Report — SQC/QC HOLD
-            </h3>
-          </div>
+        <>
           {machineNos.map((machineNo, machineIdx) => {
             const runs = machineRuns[machineNo] ?? [];
             const rowRuns = runs.filter((run) => run.points.length > 0);
@@ -1436,8 +2072,27 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
             const extras = sqcExtras[extraRowsKey(machineNo)] ?? [];
             const orderedRows = buildOrderedRows(rowRuns, extras);
             return (
-              <div key={machineNo} style={{ marginBottom: '12px', backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)', overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 12px', borderBottom: `1px solid ${C.border}`, backgroundColor: C.white }}>
+              <div
+                key={machineNo}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  backgroundColor: C.white,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: '10px',
+                  boxShadow: '0 1px 3px rgba(15, 23, 42, 0.06)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 12px',
+                    borderBottom: `1px solid ${C.border}`,
+                    backgroundColor: C.white,
+                  }}
+                >
                   <span
                     style={{
                       width: '22px',
@@ -1451,21 +2106,22 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
+                      lineHeight: 1,
                     }}
                   >
                     {machineNo}
                   </span>
-                  <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: '#1e293b' }}>
+                  <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 600, color: '#1e293b', lineHeight: 1.2 }}>
                     Machine {machineNo}
                   </h4>
                 </div>
-                <div style={{ overflowX: 'auto' }}>
+                <div style={{ width: '100%', overflowX: 'auto', boxSizing: 'border-box' }}>
                   <table
                     style={{
                       width: '100%',
                       borderCollapse: 'collapse',
                       tableLayout: 'fixed',
-                      minWidth: TABLE_MIN_WIDTH,
+                      minWidth: TABLE_MIN_WIDTH_SQC,
                     }}
                   >
                     <colgroup>
@@ -1474,7 +2130,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                       ))}
                     </colgroup>
                     <thead>
-                      <tr style={{ backgroundColor: C.headerBg }}>
+                      <tr style={{ backgroundColor: C.headerBg, height: '34px' }}>
                         {SQC_COLUMNS.map((col, idx) => (
                           <th
                             key={col}
@@ -1510,7 +2166,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           row.kind === 'extra' ? `x:${row.extra.id}` : `run:${row.rowIdx}`;
                         const extraId = row.kind === 'extra' ? row.extra.id : -1;
                         return (
-                          <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc' }}>
+                          <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc', height: '32px' }}>
                             <td style={sqcCellTd(0, SQC_COLUMNS.length)}>
                               <CellShiftSelect
                                 value={cellValue(sqcValues, key, 'shift', shiftFallback)}
@@ -1526,12 +2182,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               />
                             </td>
                             <td style={sqcCellTd(2, SQC_COLUMNS.length, 'left')}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <CellTextInput
                                     value={cellValue(sqcValues, key, 'jobName', jobNameFallback)}
                                     onChange={(v) => setSqcCell(key, 'jobName', v)}
                                     align="left"
+                                    placeholder="Job / Bottle Name"
                                     style={SQC_INPUT_STYLE}
                                   />
                                 </div>
@@ -1593,10 +2250,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               />
                             </td>
                             <td style={sqcCellTd(8, SQC_COLUMNS.length)}>
-                              <CellNumInput
+                              <CellDefectsDropdown
+                                cellKey={`sqc|${key}`}
+                                activeOpenKey={openDefectCellKey}
+                                onToggleOpen={setOpenDefectCellKey}
                                 value={cellValue(sqcValues, key, 'defects', '')}
                                 onChange={(v) => setSqcCell(key, 'defects', v)}
-                                style={SQC_INPUT_STYLE}
+                                defectGroups={defectGroups}
+                                isLoading={loadingDefects}
                               />
                             </td>
                             <td style={sqcCellTd(9, SQC_COLUMNS.length)}>
@@ -1614,17 +2275,22 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               />
                             </td>
                             <td style={sqcCellTd(11, SQC_COLUMNS.length, 'left')}>
-                              <CellTextInput
+                              <CellEmployeeSelect
                                 value={cellValue(sqcValues, key, 'checkerName', '')}
                                 onChange={(v) => setSqcCell(key, 'checkerName', v)}
+                                options={employeeList}
+                                placeholder="Select Checker"
                                 align="left"
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
-                            <td style={sqcCellTd(12, SQC_COLUMNS.length)}>
-                              <CellTextInput
+                            <td style={sqcCellTd(12, SQC_COLUMNS.length, 'center')}>
+                              <CellEmployeeSelect
                                 value={cellValue(sqcValues, key, 'qaShiftEx', '')}
                                 onChange={(v) => setSqcCell(key, 'qaShiftEx', v)}
+                                options={employeeList}
+                                placeholder="Select QA Ex."
+                                align="center"
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
@@ -1645,7 +2311,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               </div>
             );
           })}
-        </div>
+        </>
       )}
     </div>
   );
