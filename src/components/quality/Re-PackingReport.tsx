@@ -5,9 +5,9 @@
  * page background, white machine cards with subtle borders / rounded corners
  * / minimal shadows, and blue (#2563EB) as the primary accent.
  *   • NUMBERING (default): 4 machine tables with columns
- *     Job Name | Pack Type | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Lot No. | Defects | Mould | Section No. | Checker Name | QA-Shift Ex. (Numbering)
+ *     Job Name | Pack Type | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Lot No. | Defects | Mould | Section No. | Checker Name | Remarks
  *   • SQC/QC HOLD: 4 machine tables with columns
- *     Shift | Time | Job Name | Pack Type | Lot No. | Pcs/Pack | Cartons | Defective Bottles | Defects | Mould | Section | Checker Name | QA-Shift Ex.
+ *     Job Name | Shift | Time | Pack Type | Lot No. | Pcs/Pack | Cartons | Defective Bottles | Defects | Mould | Section | Checker Name | Remarks
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
@@ -48,7 +48,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Save, Check, Loader2, CheckCircle2, X } from 'lucide-react';
+import { Save, Check, Loader2, CheckCircle2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth } from '../../context/AuthContext';
@@ -70,10 +70,13 @@ import {
 
 const C = {
   border: '#e2e8f0',
+  // Light grey/blue-grey table-cell borders shared by both tables — clearly
+  // visible grid without being too dark.
+  tableBorder: '#cbd5e1',
   // Column-header highlight: light blue row with navy text (both tables).
   headerBg: '#dbeafe',
   headerText: '#1e3a8a',
-  textMain: '#1e293b',
+  textMain: '#0f172a',
   textMuted: '#64748b',
   white: '#ffffff',
   blueActive: '#2563eb',
@@ -93,40 +96,40 @@ const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d
 const NUMBERING_COLUMNS = [
   'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Bottle',
   'Defects', 'Mould', 'SECTION', 'Checker Name',
-  'QA-Shift Ex.',
+  'Remarks',
 ];
 
 /** Numbering table: column min-widths for the header cells. */
 const NUMBERING_COL_WIDTHS: Record<string, string> = {
   'Job Name': '160px',
-  'Pack Type': '80px',
-  'Shift': '70px',
-  'Time': '95px',
-  'Pcs/Pack': '70px',
-  'Cartons': '70px',
-  'Bottle': '85px',
+  'Pack Type': '70px',
+  'Shift': '60px',
+  'Time': '85px',
+  'Pcs/Pack': '60px',
+  'Cartons': '60px',
+  'Bottle': '75px',
   'Defects': '200px',
   'Mould': '70px',
   'SECTION': '70px',
   'Checker Name': '110px',
-  'QA-Shift Ex.': '90px',
+  'Remarks': '160px',
 };
 
 /** Numbering table: percentage widths so the table fills all available
  *  horizontal space (sums to 100.0%). */
 const NUMBERING_COL_PERCENTS: Record<string, string> = {
   'Job Name': '13.0%',
-  'Pack Type': '7.0%',
-  'Shift': '6.0%',
-  'Time': '8.0%',
-  'Pcs/Pack': '6.0%',
-  'Cartons': '6.0%',
+  'Pack Type': '6.0%',
+  'Shift': '5.0%',
+  'Time': '6.5%',
+  'Pcs/Pack': '5.0%',
+  'Cartons': '5.0%',
   'Defective Bottles': '7.5%',
-  'Defects': '20.5%',
+  'Defects': '18.0%',
   'Mould': '5.5%',
   'SECTION': '5.5%',
   'Checker Name': '8.5%',
-  'QA-Shift Ex.': '6.5%',
+  'Remarks': '14.5%',
 };
 
 /** Numbering table: 0-based column indices that end a visual section
@@ -135,47 +138,47 @@ const NUMBERING_SECTION_ENDS = new Set([6, 9]);
 const NUMBERING_SECTION_DIVIDER = '2px solid #cbd5e1';
 
 const SQC_COLUMNS = [
-  'Shift', 'Time', 'Job Name', 'Pack Type', 'Lot No.', 'Pcs/Pack', 'Cartons',
+  'Job Name', 'Shift', 'Time', 'Pack Type', 'Lot No.', 'Pcs/Pack', 'Cartons',
   'Bottle', 'Defects', 'Mould', 'Section', 'Checker Name',
-  'QA-Shift Ex.',
+  'Remarks',
 ];
 
 /** SQC/QC HOLD table: percentage widths so the table fills all available
  *  horizontal space (sums to 100.0%). */
 const SQC_COL_PERCENTS: Record<string, string> = {
-  'Shift': '5.5%',
-  'Time': '7.5%',
+  'Shift': '5.0%',
+  'Time': '6.5%',
   'Job Name': '13.0%',
-  'Pack Type': '6.5%',
-  'Lot No.': '6.5%',
-  'Pcs/Pack': '5.5%',
-  'Cartons': '5.5%',
+  'Pack Type': '5.5%',
+  'Lot No.': '5.5%',
+  'Pcs/Pack': '5.0%',
+  'Cartons': '5.0%',
   'Defective Bottles': '7.0%',
-  'Defects': '19.0%',
+  'Defects': '16.0%',
   'Mould': '5.5%',
   'Section': '5.5%',
   'Checker Name': '7.5%',
-  'QA-Shift Ex.': '5.5%',
+  'Remarks': '13.0%',
 };
 
 /** SQC/QC HOLD table: pixel minimums for the header cells. */
 const SQC_COL_WIDTHS: Record<string, string> = {
-  'Shift': '70px',
-  'Time': '95px',
+  'Shift': '60px',
+  'Time': '85px',
   'Job Name': '160px',
-  'Pack Type': '80px',
-  'Lot No.': '80px',
-  'Pcs/Pack': '70px',
-  'Cartons': '70px',
-  'Bottle': '85px',
+  'Pack Type': '70px',
+  'Lot No.': '70px',
+  'Pcs/Pack': '60px',
+  'Cartons': '60px',
+  'Bottle': '75px',
   'Defects': '190px',
   'Mould': '70px',
   'Section': '70px',
   'Checker Name': '110px',
-  'QA-Shift Ex.': '90px',
+  'Remarks': '160px',
 };
 
-/** SQC/QC HOLD: 0-based column indices that end a visual section (after 'Defective Bottles' (7) and 'Section' (10)). */
+/** SQC/QC HOLD: 0-based column indices that end a visual section (after 'Bottle' (7) and 'Section' (10)). */
 const SQC_SECTION_ENDS = new Set([7, 10]);
 
 /** Minimum rendered table width — below it the card body scrolls horizontally. */
@@ -395,6 +398,7 @@ const CELL_INPUT_STYLE: React.CSSProperties = {
   boxSizing: 'border-box',
   padding: '2px 4px',
   fontSize: '12px',
+  fontWeight: 600,
   lineHeight: 1.3,
   backgroundColor: 'transparent',
   border: '1px solid transparent',
@@ -954,8 +958,8 @@ const CellDefectsDropdown: React.FC<{
 // ─── Employee Data Source ───────────────────────────────────────────────────
 // TODO: replace with employees fetched from DB
 /**
- * Single source of truth for the employee list used in Checker Name and
- * QA-Shift Ex. dropdowns across all Re-Packing Report tables.
+ * Single source of truth for the employee list used in Checker Name dropdowns
+ * (Remarks is a free-text input) across all Re-Packing Report tables.
  * TODO: replace with employees fetched from DB
  */
 export const DEFAULT_EMPLOYEE_LIST: string[] = [
@@ -1055,186 +1059,52 @@ const CellEmployeeSelect: React.FC<{
 };
 
 // ─── CellTimePicker ─────────────────────────────────────────────────────────
-/**
- * Manual 12-hour (AM/PM) time picker for the Time columns. The trigger is
- * styled exactly like the other cell inputs; clicking it opens a compact
- * floating panel (same pattern as the HRP's bottle picker) with Hour /
- * Minute / AM-PM selects. The chosen time is committed through the SAME
- * controlled onChange path as every other cell, stored as "3:30 PM" — the
- * app's existing time-label convention. Times are NEVER auto-populated from
- * job schedules: an empty field stays empty until the operator picks a time.
- * The panel is position:fixed so the machine card's rounded-corner clipping
- * and the table's horizontal scroll can never cut it off, and it closes on
- * outside click, Escape or any scroll.
- */
-const TIME_PANEL_WIDTH = 216;
-
 /** Stored time shape: "h:mm AM/PM" (unpadded hour, padded minutes). */
 const TIME_VALUE_RE = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/;
 
-interface TimeDraft {
-  h: string;
-  m: string;
-  ap: 'AM' | 'PM';
-}
-
-/** Parses a stored cell time back into picker parts; null when unparseable/empty. */
-const parseTimeDraft = (value: string): TimeDraft | null => {
-  const match = TIME_VALUE_RE.exec(value);
-  if (!match) return null;
-  const h = parseInt(match[1], 10);
-  const mm = parseInt(match[2], 10);
-  if (h < 1 || h > 12 || mm < 0 || mm > 59) return null;
-  return { h: String(h), m: pad(mm), ap: match[3].toUpperCase() === 'PM' ? 'PM' : 'AM' };
-};
-
-const TIME_HOURS = Array.from({ length: 12 }, (_, i) => String(i + 1));
-const TIME_MINUTES = Array.from({ length: 60 }, (_, i) => pad(i));
-
-const PANEL_SELECT_STYLE: React.CSSProperties = {
-  ...CELL_INPUT_STYLE,
-  flex: 1,
-  minWidth: 0,
-  height: '24px',
-  padding: '2px 4px',
-  textAlign: 'center',
-  textAlignLast: 'center',
-  cursor: 'pointer',
-  appearance: 'auto',
-};
-
+/** Standard HTML5 time picker shown as a compact cell input.
+ *  The stored/displayed value stays in the app's "h:mm AM/PM" convention
+ *  (e.g. "3:30 PM"); conversion to/from the input's 24-hour "HH:MM" value
+ *  happens internally. The native browser picker opens below the field,
+ *  is never oversized or awkward, and requires minimal clicks.
+ */
 const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<TimeDraft>({ h: '12', m: '00', ap: 'AM' });
-  const [panelPos, setPanelPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
-  const rootRef = useRef<HTMLDivElement>(null);
+  // "h:mm AM/PM" (e.g. "3:30 PM") -> "HH:MM" (e.g. "15:30")
+  const time24 = useMemo(() => {
+    const match = TIME_VALUE_RE.exec(value);
+    if (!match) return '';
+    let h = parseInt(match[1], 10);
+    const mm = match[2];
+    const ap = match[3].toUpperCase();
+    if (ap === 'PM' && h !== 12) h += 12;
+    if (ap === 'AM' && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${mm}`;
+  }, [value]);
 
-  // Close on outside click / Escape — same behaviour as the HRP bottle picker.
-  useEffect(() => {
-    if (!open) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (rootRef.current && rootRef.current.contains(e.target as Node)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', onMouseDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
-
-  // A fixed panel would float over stale coordinates once anything scrolls —
-  // dismiss it on any scroll (capture phase also catches the table's own
-  // horizontal scroller, keeping the panel always anchored to its trigger).
-  useEffect(() => {
-    if (!open) return;
-    const hide = () => setOpen(false);
-    window.addEventListener('scroll', hide, true);
-    return () => window.removeEventListener('scroll', hide, true);
-  }, [open]);
-
-  const openPanel = () => {
-    const rect = rootRef.current?.getBoundingClientRect();
-    if (rect) {
-      const panelH = 46;
-      // Flip above the trigger when there is no room below (bottom rows).
-      const flip = rect.bottom + panelH + 8 > window.innerHeight && rect.top > panelH + 8;
-      const top = flip ? rect.top - panelH - 2 : rect.bottom + 2;
-      // Keep the panel inside the viewport on small screens.
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - TIME_PANEL_WIDTH - 8));
-      setPanelPos({ top, left });
-    }
-    setDraft(parseTimeDraft(value) ?? { h: '12', m: '00', ap: 'AM' });
-    setOpen(true);
-  };
-
-  const commitDraft = (next: TimeDraft) => {
-    setDraft(next);
-    // Same controlled onChange every other cell uses — the value goes straight
-    // into the existing per-row state store under this row's 'time' field.
-    onChange(`${parseInt(next.h, 10)}:${next.m} ${next.ap}`);
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v24 = e.target.value;
+    if (!v24) { onChange(''); return; }
+    const [h, m] = v24.split(':').map(Number);
+    const hh = h % 12 || 12;
+    const ap = h < 12 ? 'AM' : 'PM';
+    onChange(`${hh}:${String(m).padStart(2, '0')} ${ap}`);
   };
 
   return (
-    <div ref={rootRef} style={{ position: 'relative', width: '100%', minWidth: 0 }}>
-      <button
-        type="button"
-        onClick={() => (open ? setOpen(false) : openPanel())}
-        title={value || 'Select time'}
-        onFocus={(e) => focusCellBorder(e, true)}
-        onBlur={(e) => focusCellBorder(e, false)}
-        style={{
-          ...CELL_INPUT_STYLE,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '4px',
-          cursor: 'pointer',
-          textAlign: 'left',
-          color: value ? C.textMain : '#94a3b8',
-          ...(style ?? {}),
-        }}
-      >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {value || '— Select time'}
-        </span>
-        <ChevronDown size={12} style={{ flexShrink: 0, color: '#94a3b8' }} />
-      </button>
-      {open && (
-        <div
-          style={{
-            position: 'fixed',
-            top: panelPos.top,
-            left: panelPos.left,
-            zIndex: 1000,
-            width: TIME_PANEL_WIDTH,
-            maxWidth: 'calc(100vw - 16px)',
-            padding: '8px',
-            backgroundColor: C.white,
-            border: `1px solid ${C.border}`,
-            borderRadius: '6px',
-            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.18)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-          }}
-        >
-          <select
-            aria-label="Hour"
-            value={draft.h}
-            onChange={(e) => commitDraft({ ...draft, h: e.target.value })}
-            style={PANEL_SELECT_STYLE}
-          >
-            {TIME_HOURS.map((h) => (
-              <option key={h} value={h}>{h}</option>
-            ))}
-          </select>
-          <select
-            aria-label="Minute"
-            value={draft.m}
-            onChange={(e) => commitDraft({ ...draft, m: e.target.value })}
-            style={PANEL_SELECT_STYLE}
-          >
-            {TIME_MINUTES.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-          <select
-            aria-label="AM/PM"
-            value={draft.ap}
-            onChange={(e) => commitDraft({ ...draft, ap: e.target.value === 'PM' ? 'PM' : 'AM' })}
-            style={PANEL_SELECT_STYLE}
-          >
-            <option value="AM">AM</option>
-            <option value="PM">PM</option>
-          </select>
-        </div>
-      )}
-    </div>
+    <input
+      type="time"
+      value={time24}
+      onChange={handleChange}
+      onFocus={(e) => focusCellBorder(e, true)}
+      onBlur={(e) => focusCellBorder(e, false)}
+      style={{
+        ...CELL_INPUT_STYLE,
+        color: value ? C.textMain : '#94a3b8',
+        textAlign: 'center',
+        cursor: 'text',
+        ...(style ?? {}),
+      }}
+    />
   );
 };
 
@@ -1310,15 +1180,14 @@ const RemoveRowButton: React.FC<{ onClick: () => void; title: string }> = ({ onC
 );
 
 /** Compact table-header cell style — bold navy uppercase labels on a light blue strip. */
-const thStyle = (isLast: boolean, minWidth?: string): React.CSSProperties => ({
+const thStyle = (minWidth?: string): React.CSSProperties => ({
   padding: '6px 8px',
   color: C.headerText,
   fontWeight: 700,
   fontSize: '10.5px',
   letterSpacing: '0.04em',
   textTransform: 'uppercase',
-  borderBottom: `1px solid ${C.border}`,
-  borderRight: isLast ? 'none' : `1px solid ${C.border}`,
+  border: `1px solid ${C.tableBorder}`,
   lineHeight: 1.3,
   verticalAlign: 'middle',
   backgroundColor: C.headerBg,
@@ -1326,11 +1195,10 @@ const thStyle = (isLast: boolean, minWidth?: string): React.CSSProperties => ({
   minWidth: minWidth ?? '80px',
 });
 
-/** Data-cell <td> style — compact padding with the same borders as before. */
-const cellTd = (align: 'left' | 'center' = 'center', isLast = false): React.CSSProperties => ({
+/** Data-cell <td> style — compact padding with a clean dark grid border. */
+const cellTd = (align: 'left' | 'center' = 'center'): React.CSSProperties => ({
   padding: '3px 6px',
-  borderBottom: `1px solid ${C.border}`,
-  borderRight: isLast ? 'none' : `1px solid ${C.border}`,
+  border: `1px solid ${C.tableBorder}`,
   fontSize: '12.5px',
   color: C.textMain,
   textAlign: align,
@@ -1343,13 +1211,11 @@ const emptyStateTd = (colSpan: number): React.CSSProperties => ({
   textAlign: 'center',
   color: C.textMuted,
   fontSize: '13px',
-  borderBottom: `1px solid ${C.border}`,
+  border: `1px solid ${C.tableBorder}`,
 });
 
-/** Numbering table header cell — with section divider borders. */
+/** Numbering table header cell — dark grid borders, bold labels on the blue header strip. */
 const numThStyle = (colIndex: number, total: number, minWidth?: string, align: 'left' | 'center' = 'center'): React.CSSProperties => {
-  const isLast = colIndex === total - 1;
-  const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
   return {
     padding: '7px 6px',
     color: C.headerText,
@@ -1357,12 +1223,7 @@ const numThStyle = (colIndex: number, total: number, minWidth?: string, align: '
     fontSize: '11px',
     letterSpacing: '0.03em',
     textTransform: 'uppercase',
-    borderBottom: `1px solid ${C.border}`,
-    borderRight: isLast
-      ? 'none'
-      : isSectionEnd
-        ? NUMBERING_SECTION_DIVIDER
-        : `1px solid ${C.border}`,
+    border: `1px solid ${C.tableBorder}`,
     lineHeight: 1.3,
     verticalAlign: 'middle',
     backgroundColor: C.headerBg,
@@ -1373,18 +1234,11 @@ const numThStyle = (colIndex: number, total: number, minWidth?: string, align: '
   };
 };
 
-/** Numbering table data cell — with section divider borders. */
+/** Numbering table data cell — dark grid borders, dark semibold values. */
 const numCellTd = (colIndex: number, total: number, align: 'left' | 'center' = 'center'): React.CSSProperties => {
-  const isLast = colIndex === total - 1;
-  const isSectionEnd = NUMBERING_SECTION_ENDS.has(colIndex);
   return {
     padding: '3px 4px',
-    borderBottom: `1px solid ${C.border}`,
-    borderRight: isLast
-      ? 'none'
-      : isSectionEnd
-        ? NUMBERING_SECTION_DIVIDER
-        : `1px solid ${C.border}`,
+    border: `1px solid ${C.tableBorder}`,
     fontSize: '12px',
     color: C.textMain,
     textAlign: align,
@@ -1395,10 +1249,8 @@ const numCellTd = (colIndex: number, total: number, align: 'left' | 'center' = '
   };
 };
 
-/** SQC/QC HOLD header cell — mirrors Numbering's grouped-section dividers. */
+/** SQC/QC HOLD header cell — dark grid borders, bold labels on the blue header strip. */
 const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: 'left' | 'center' = 'center'): React.CSSProperties => {
-  const isLast = colIndex === total - 1;
-  const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
   return {
     padding: '7px 6px',
     color: C.headerText,
@@ -1406,8 +1258,7 @@ const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: '
     fontSize: '11px',
     letterSpacing: '0.03em',
     textTransform: 'uppercase',
-    borderBottom: `1px solid ${C.border}`,
-    borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
+    border: `1px solid ${C.tableBorder}`,
     lineHeight: 1.3,
     verticalAlign: 'middle',
     backgroundColor: C.headerBg,
@@ -1418,14 +1269,11 @@ const sqcThStyle = (colIndex: number, total: number, minWidth?: string, align: '
   };
 };
 
-/** SQC/QC HOLD data cell — mirrors Numbering's grouped-section dividers. */
+/** SQC/QC HOLD data cell — dark grid borders, dark semibold values. */
 const sqcCellTd = (colIndex: number, total: number, align: 'left' | 'center' = 'center'): React.CSSProperties => {
-  const isLast = colIndex === total - 1;
-  const isSectionEnd = SQC_SECTION_ENDS.has(colIndex);
   return {
     padding: '3px 4px',
-    borderBottom: `1px solid ${C.border}`,
-    borderRight: isLast ? 'none' : isSectionEnd ? NUMBERING_SECTION_DIVIDER : `1px solid ${C.border}`,
+    border: `1px solid ${C.tableBorder}`,
     fontSize: '12px',
     color: C.textMain,
     textAlign: align,
@@ -1452,6 +1300,9 @@ interface ExtraRow {
   id: number;
   jobName: string;
   shift: string;
+  packType: string;
+  pcsPack: string;
+  time: string;
   anchor: string;
 }
 
@@ -1758,16 +1609,37 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     return out;
   }, [dayHourly]);
 
-  const machinePackagingOptions = useMemo(() => {
-    const out: Record<number, string[]> = {};
-    for (const machineNo of MACHINE_NOS) {
-      const set = new Set<string>();
-      packagingMasterCodes.forEach((c) => set.add(c));
-      (packingTypesPerMachine[machineNo] ?? []).forEach((c) => set.add(c));
-      out[machineNo] = Array.from(set).sort();
-    }
-    return out;
-  }, [packagingMasterCodes, packingTypesPerMachine]);
+  /**
+   * All unique Pack Types (packing_category) reported in the Hourly Production
+   * Report for each machine + Job ID on the selected date. The Pack Type
+   * dropdown shows only these job-specific options — never the full master
+   * list or unrelated packing types.
+   */
+  const machineJobPackTypes = useMemo<Record<number, Record<string, string[]>>>(
+    () => {
+      const out: Record<number, Record<string, string[]>> = {};
+      for (const machineNo of MACHINE_NOS) {
+        const byTime = dayHourly[String(machineNo)] ?? {};
+        const map: Record<string, string[]> = {};
+        for (const entry of Object.values(byTime)) {
+          const jobId = String(entry.job_id ?? '').trim();
+          if (!jobId) continue;
+          if (!map[jobId]) map[jobId] = [];
+          if (Array.isArray(entry.packing_category)) {
+            entry.packing_category.forEach((cat) => {
+              if (cat && !map[jobId].includes(cat)) map[jobId].push(cat);
+            });
+          }
+        }
+        for (const jobId of Object.keys(map)) {
+          map[jobId].sort();
+        }
+        out[machineNo] = map;
+      }
+      return out;
+    },
+    [dayHourly]
+  );
 
   const machineRuns = useMemo<Record<number, JobRun[]>>(() => {
     const out: Record<number, JobRun[]> = {};
@@ -1776,6 +1648,35 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     }
     return out;
   }, [dayHourly]);
+
+  /**
+   * Pack Type (packing_category) and Pack Size / Pcs-Per-Pack (packing_size)
+   * read from the loaded production report (hourly_production), keyed per
+   * machine and Job ID. Used to prefill the Pack Type and Pcs/Pack columns of
+   * both tables from the corresponding production record.
+   */
+  const machineJobPacking = useMemo<Record<number, Record<string, { packType: string; pcsPack: string }>>>(
+    () => {
+      const out: Record<number, Record<string, { packType: string; pcsPack: string }>> = {};
+      for (const machineNo of MACHINE_NOS) {
+        const byTime = dayHourly[String(machineNo)] ?? {};
+        const map: Record<string, { packType: string; pcsPack: string }> = {};
+        for (const entry of Object.values(byTime)) {
+          const jobId = String(entry.job_id ?? '').trim();
+          if (!jobId || map[jobId]) continue;
+          map[jobId] = {
+            packType: Array.isArray(entry.packing_category)
+              ? entry.packing_category.filter(Boolean).join(', ')
+              : String(entry.packing_category ?? ''),
+            pcsPack: entry.packing_size != null ? String(entry.packing_size) : '',
+          };
+        }
+        out[machineNo] = map;
+      }
+      return out;
+    },
+    [dayHourly]
+  );
 
   const runJobName = useCallback(
     (run: JobRun): string => bottleNameFor(run.bottleId, bottles),
@@ -1790,6 +1691,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const cellValue = (store: ValuesStore, key: string, field: string, fallback: string): string =>
     store[key]?.[field] ?? fallback;
 
+  /** Production Job ID of a rendered row, used to match its production record. */
+  const productionJobIdFor = (row: OrderedRow): string => {
+    if (row.kind === 'db') return String((row.dbEntry as { job_id: string }).job_id ?? '');
+    if (row.kind === 'run') return row.run.jobId;
+    return row.extra.jobName;
+  };
+
   const setNumberingCell = useCallback((key: string, field: string, value: string) => {
     setNumberingValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), [field]: value } }));
   }, []);
@@ -1801,14 +1709,33 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const extraRowKey = (machineNo: number, extraId: number): string =>
     `${dateKey}|${machineNo}|x|${extraId}`;
 
+  /** Default the minutes of a stored time ("h:mm AM/PM") to 00, preserving
+   *  the hour and AM/PM. Returns '' when the value is not a valid time. */
+  const defaultMinutesToZero = (timeValue: string): string => {
+    const match = TIME_VALUE_RE.exec(timeValue);
+    if (!match) return '';
+    return `${match[1]}:00 ${match[3]}`;
+  };
+
   const addExtraRow = (
     target: 'numbering' | 'sqc',
     machineNo: number,
     anchor: string,
     jobName: string,
-    shift: string
+    shift: string,
+    packType: string,
+    pcsPack: string,
+    time: string
   ) => {
-    const row: ExtraRow = { id: (extraIdRef.current += 1), jobName, shift, anchor };
+    const row: ExtraRow = {
+      id: (extraIdRef.current += 1),
+      jobName,
+      shift,
+      packType,
+      pcsPack,
+      time,
+      anchor,
+    };
     const setter = target === 'numbering' ? setNumberingExtras : setSqcExtras;
     const storeKey = extraRowsKey(machineNo);
     setter((prev) => ({ ...prev, [storeKey]: [...(prev[storeKey] ?? []), row] }));
@@ -2301,6 +2228,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
+                        // Pack Type and Pcs/Pack are prefilled from the matching
+                        // production report record (machine + Job ID).
+                        const prodJobId = productionJobIdFor(row);
+                        const prodPacking = machineJobPacking[machineNo]?.[prodJobId];
+                        const basePackType = prodPacking?.packType ?? '';
+                        const basePcsPack = prodPacking?.pcsPack ?? '';
+                        // Pack Type dropdown options are limited to the packing
+                        // types reported for this job on this machine/date.
+                        const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
                         const anchor =
                           row.kind === 'extra'
                             ? `x:${row.extra.id}`
@@ -2330,7 +2266,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       machineNo,
                                       anchor,
                                       cellValue(numberingValues, key, 'jobName', jobNameFallback),
-                                      cellValue(numberingValues, key, 'shift', shiftFallback)
+                                      cellValue(numberingValues, key, 'shift', shiftFallback),
+                                      cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
+                                      cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
+                                      defaultMinutesToZero(cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : ''))
                                     )
                                   }
                                 />
@@ -2350,10 +2289,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(1, NUMBERING_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : '')}
+                                value={cellValue(numberingValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
                                 onChange={(v) => setNumberingCell(key, 'packType', v)}
                                 machineNo={machineNo}
-                                packingTypes={machinePackagingOptions[machineNo] ?? []}
+                                packingTypes={jobPackTypes}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
@@ -2366,14 +2305,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : '')}
+                                value={cellValue(numberingValues, key, 'time', row.kind === 'extra' ? row.extra.time : (isDbRow ? (row.dbEntry.entry_time || '') : ''))}
                                 onChange={(v) => setNumberingCell(key, 'time', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
                             <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : '')}
+                                value={cellValue(numberingValues, key, 'pcsPack', row.kind === 'extra' ? row.extra.pcsPack : basePcsPack)}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
@@ -2429,11 +2368,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               />
                             </td>
                             <td style={numCellTd(11, NUMBERING_COLUMNS.length, 'center')}>
-                              <CellEmployeeSelect
+                              <CellTextInput
                                 value={cellValue(numberingValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
-                                options={employeeList}
-                                placeholder="Select QA Ex."
+                                placeholder="Remarks"
                                 align="center"
                                 style={NUMBERING_INPUT_STYLE}
                               />
@@ -2557,6 +2495,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
+                        // Pack Type and Pcs/Pack are prefilled from the matching
+                        // production report record (machine + Job ID).
+                        const prodJobId = productionJobIdFor(row);
+                        const prodPacking = machineJobPacking[machineNo]?.[prodJobId];
+                        const basePackType = prodPacking?.packType ?? '';
+                        const basePcsPack = prodPacking?.pcsPack ?? '';
+                        // Pack Type dropdown options are limited to the packing
+                        // types reported for this job on this machine/date.
+                        const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
                         const anchor =
                           row.kind === 'extra'
                             ? `x:${row.extra.id}`
@@ -2567,21 +2514,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
                         return (
                           <tr key={key} style={{ backgroundColor: row.visualIdx % 2 === 0 ? C.white : '#f8fafc', height: '32px' }}>
-                            <td style={sqcCellTd(0, SQC_COLUMNS.length)}>
-                              <CellShiftSelect
-                                value={cellValue(sqcValues, key, 'shift', shiftFallback)}
-                                onChange={(v) => setSqcCell(key, 'shift', v)}
-                                style={SQC_INPUT_STYLE}
-                              />
-                            </td>
-                            <td style={sqcCellTd(1, SQC_COLUMNS.length)}>
-                              <CellTimePicker
-                                value={cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : '')}
-                                onChange={(v) => setSqcCell(key, 'time', v)}
-                                style={SQC_INPUT_STYLE}
-                              />
-                            </td>
-                            <td style={sqcCellTd(2, SQC_COLUMNS.length, 'left')}>
+                            <td style={sqcCellTd(0, SQC_COLUMNS.length, 'left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <CellTextInput
@@ -2600,7 +2533,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       machineNo,
                                       anchor,
                                       cellValue(sqcValues, key, 'jobName', jobNameFallback),
-                                      cellValue(sqcValues, key, 'shift', shiftFallback)
+                                      cellValue(sqcValues, key, 'shift', shiftFallback),
+                                      cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
+                                      cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
+                                      defaultMinutesToZero(cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : ''))
                                     )
                                   }
                                 />
@@ -2618,12 +2554,26 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                               </div>
                             </td>
+                            <td style={sqcCellTd(1, SQC_COLUMNS.length)}>
+                              <CellShiftSelect
+                                value={cellValue(sqcValues, key, 'shift', shiftFallback)}
+                                onChange={(v) => setSqcCell(key, 'shift', v)}
+                                style={SQC_INPUT_STYLE}
+                              />
+                            </td>
+                            <td style={sqcCellTd(2, SQC_COLUMNS.length)}>
+                              <CellTimePicker
+                                value={cellValue(sqcValues, key, 'time', row.kind === 'extra' ? row.extra.time : (isDbRow ? (row.dbEntry.entry_time || '') : ''))}
+                                onChange={(v) => setSqcCell(key, 'time', v)}
+                                style={SQC_INPUT_STYLE}
+                              />
+                            </td>
                             <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : '')}
+                                value={cellValue(sqcValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
                                 onChange={(v) => setSqcCell(key, 'packType', v)}
                                 machineNo={machineNo}
-                                packingTypes={machinePackagingOptions[machineNo] ?? []}
+                                packingTypes={jobPackTypes}
                                 style={SQC_INPUT_STYLE}
                               />
                             </td>
@@ -2636,7 +2586,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(5, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : '')}
+                                value={cellValue(sqcValues, key, 'pcsPack', row.kind === 'extra' ? row.extra.pcsPack : basePcsPack)}
                                 onChange={(v) => setSqcCell(key, 'pcsPack', v)}
                                 style={SQC_INPUT_STYLE}
                               />
@@ -2691,11 +2641,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                               />
                             </td>
                             <td style={sqcCellTd(12, SQC_COLUMNS.length, 'center')}>
-                              <CellEmployeeSelect
+                              <CellTextInput
                                 value={cellValue(sqcValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'qaShiftEx', v)}
-                                options={employeeList}
-                                placeholder="Select QA Ex."
+                                placeholder="Remarks"
                                 align="center"
                                 style={SQC_INPUT_STYLE}
                               />

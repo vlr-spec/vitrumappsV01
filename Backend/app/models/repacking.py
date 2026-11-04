@@ -1,5 +1,5 @@
 # pyrefly: ignore [missing-import]
-from sqlalchemy import Column, Integer, SmallInteger, BigInteger, String, Date, Time, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, SmallInteger, BigInteger, String, Text, Date, Time, DateTime, ForeignKey, func
 from app.db.base import Base, sqc_table_args, sqc_fk, production_fk, hpr_fk
 
 
@@ -26,7 +26,7 @@ class RepackingNumbering(Base):
     mould = Column(String, nullable=True)
     section_no = Column(String, nullable=True)
     checker_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
-    qa_shift_ex_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
+    qa_shift_ex_id = Column(Text, ForeignKey(production_fk("users.employee_id")), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now(), onupdate=func.now())
 
@@ -51,6 +51,6 @@ class RepackingSqcQcHold(Base):
     mould = Column(String, nullable=True)
     section_no = Column(String, nullable=True)
     checker_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
-    qa_shift_ex_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
+    qa_shift_ex_id = Column(Text, ForeignKey(production_fk("users.employee_id")), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now(), onupdate=func.now())
