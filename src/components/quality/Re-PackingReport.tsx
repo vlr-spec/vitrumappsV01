@@ -51,7 +51,6 @@ import { createPortal } from 'react-dom';
 import { Save, Check, Loader2, CheckCircle2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useERP } from '../../context/ERPContext';
-import { useAuth } from '../../context/AuthContext';
 import { planningRepository } from '../../services/planningRepository';
 import {
   repackingRepository,
@@ -956,56 +955,26 @@ const CellDefectsDropdown: React.FC<{
 };
 
 // ─── Employee Data Source ───────────────────────────────────────────────────
-// TODO: replace with employees fetched from DB
 /**
- * Single source of truth for the employee list used in Checker Name dropdowns
- * (Remarks is a free-text input) across all Re-Packing Report tables.
- * TODO: replace with employees fetched from DB
+ * Single source of truth for the employee list used in the Checker Name
+ * dropdowns across all Re-Packing Report tables (Remarks is a free-text input).
+ *
+ * The backend returns employees that are ACTIVE in ``hpr.employee_master``
+ * **and** ACTIVE in ``sqc.sqc_role`` together with their ``roles``. Only
+ * employees holding the ``CHECKER`` role are offered here, because the chosen
+ * name is resolved to ``employee_id`` and stored as
+ * ``sqc.repacking_* .checker_id`` (FK -> hpr.employee_master.employee_id).
  */
-export const DEFAULT_EMPLOYEE_LIST: string[] = [
-  'Ashish',
-  'Mangesh Kadam',
-  'Rajesh Shingote',
-  'Rama Zanjure',
-  'Ramesh Domala',
-  'Ravindra Shanbhag',
-  'Sanjeev Sinha',
-  'Shivanand Nayak',
-  'Sudhir Pai',
-  'Sumit Gupta',
-  'Vithob Shet',
-];
-
-/**
- * Hook to retrieve the active employee roster.
- * Combines database employees with the current logged-in user and any
- * supervisors/executives assigned to the day's shifts.
- */
-export const useEmployeeList = (
-  dbEmployees?: EmployeeItem[],
-  shiftAssignments?: QualityShiftMap
-): string[] => {
-  const { user: authUser } = useAuth();
+export const useEmployeeList = (dbEmployees?: EmployeeItem[]): string[] => {
   return useMemo(() => {
     const set = new Set<string>();
-    if (dbEmployees && dbEmployees.length > 0) {
-      dbEmployees.forEach((e) => {
-        if (e.employee_name?.trim()) set.add(e.employee_name.trim());
-      });
-    } else {
-      DEFAULT_EMPLOYEE_LIST.forEach((name) => set.add(name));
-    }
-    if (authUser?.employee_name?.trim()) {
-      set.add(authUser.employee_name.trim());
-    }
-    if (shiftAssignments) {
-      Object.values(shiftAssignments).forEach((sa) => {
-        if (sa.supervisor?.trim()) set.add(sa.supervisor.trim());
-        if (sa.executive?.trim()) set.add(sa.executive.trim());
-      });
-    }
+    (dbEmployees ?? []).forEach((e) => {
+      if (!(e.roles ?? []).includes('CHECKER')) return;
+      const name = e.employee_name?.trim();
+      if (name) set.add(name);
+    });
     return Array.from(set).sort();
-  }, [dbEmployees, authUser, shiftAssignments]);
+  }, [dbEmployees]);
 };
 
 /**
@@ -1383,7 +1352,6 @@ const buildOrderedRows = (
 
 const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = ({ date, layout = 'numbering' }) => {
   const { bottles } = useERP();
-  const { user: authUser } = useAuth();
   const machineNos = MACHINE_NOS;
 
   const [hourly, setHourly] = useState<QualityDayHourly>({});
@@ -1478,7 +1446,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           mould: entry.mould || '',
           sectionNo: entry.section_no || '',
           checkerName: entry.checker_name || '',
-          qaShiftEx: entry.qa_shift_ex_name || '',
+          // The last column is the free-text Remarks cell (legacy field name
+          // ``qaShiftEx``) — it is persisted in sqc.repacking_* .remarks.
+          qaShiftEx: entry.remarks || entry.qa_shift_ex_name || '',
         };
         numInitVals[key] = vals;
         numBase[key] = { ...vals };
@@ -1512,7 +1482,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           section: entry.section_no || '',
           sectionNo: entry.section_no || '',
           checkerName: entry.checker_name || '',
-          qaShiftEx: entry.qa_shift_ex_name || '',
+          // Free-text Remarks cell (legacy field name ``qaShiftEx``).
+          qaShiftEx: entry.remarks || entry.qa_shift_ex_name || '',
         };
         sqcInitVals[key] = vals;
         sqcBase[key] = { ...vals };
@@ -1590,7 +1561,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     };
   }, []);
 
-  const employeeList = useEmployeeList(dbEmployees, shiftAssignments);
+  const employeeList = useEmployeeList(dbEmployees);
 
   const dayHourly: QualityDayHourly = loadedKey === dateKey ? hourly : EMPTY_DAY;
 
@@ -1877,19 +1848,44 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           const effectiveMould = (currentVals.mould ?? '').trim() || null;
           const effectiveSection = (isNum ? currentVals.sectionNo : (currentVals.section ?? currentVals.sectionNo))?.trim() || null;
           const effectiveCheckerName = (currentVals.checkerName ?? '').trim();
-          const effectiveQaShiftEx = (currentVals.qaShiftEx ?? '').trim();
+          // The last column of the table is a free-text Remarks cell (the
+          // state key keeps its legacy name ``qaShiftEx``); it is persisted in
+          // sqc.repacking_* .remarks — the live tables have no QA-executive
+          // column to write to.
+          const effectiveRemarks = (currentVals.qaShiftEx ?? '').trim();
           const effectiveDefects = (currentVals.defects ?? '').trim();
           const effectiveLotNo = !isNum ? (currentVals.lotNo ?? '').trim() || null : undefined;
 
-          const checkerEmp = dbEmployees.find(
-            (e) => e.employee_name.toLowerCase() === effectiveCheckerName.toLowerCase() || e.employee_id === effectiveCheckerName
-          );
-          const checkerId = checkerEmp ? checkerEmp.employee_id : (effectiveCheckerName || null);
-
-          const qaEmp = dbEmployees.find(
-            (e) => e.employee_name.toLowerCase() === effectiveQaShiftEx.toLowerCase() || e.employee_id === effectiveQaShiftEx
-          );
-          const qaShiftExId = qaEmp ? qaEmp.employee_id : (effectiveQaShiftEx || null);
+          // ── Checker ─────────────────────────────────────────────────────
+          // The dropdown only offers employees that hold the ACTIVE CHECKER
+          // role, and what gets stored is ``employee_id`` (string, leading
+          // zeros preserved) — never the display name. An unrecognised value
+          // would violate the checker_id -> hpr.employee_master FK, so the
+          // save is blocked with a clear message instead of sending it.
+          let checkerId: string | null = null;
+          if (effectiveCheckerName) {
+            const unchangedDbValue =
+              row.kind === 'db' &&
+              !!row.dbEntry.checker_id &&
+              (row.dbEntry.checker_name || '').trim().toLowerCase() === effectiveCheckerName.toLowerCase();
+            const checkerEmp = dbEmployees.find(
+              (e) =>
+                e.employee_name?.trim().toLowerCase() === effectiveCheckerName.toLowerCase() ||
+                e.employee_id === effectiveCheckerName
+            );
+            if (unchangedDbValue) {
+              // Value came from the database and was not edited — keep the
+              // stored FK as-is (covers checkers that are no longer listed).
+              checkerId = row.kind === 'db' ? row.dbEntry.checker_id : null;
+            } else if (checkerEmp) {
+              checkerId = checkerEmp.employee_id;
+            } else {
+              alert(
+                `"${effectiveCheckerName}" is not an active employee. Please select a Checker from the dropdown.`
+              );
+              return;
+            }
+          }
 
           let defectId: string | null = null;
           const defectIds: string[] = [];
@@ -1955,7 +1951,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 mould: effectiveMould,
                 section_no: effectiveSection,
                 checker_id: checkerId,
-                qa_shift_ex_id: qaShiftExId,
+                remarks: effectiveRemarks,
               };
               if (!isNum) updateObj.lot_no = effectiveLotNo;
               updates.push(updateObj);
@@ -1972,7 +1968,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               Boolean(effectiveMould) ||
               Boolean(effectiveSection) ||
               Boolean(effectiveCheckerName) ||
-              Boolean(effectiveQaShiftEx) ||
+              Boolean(effectiveRemarks) ||
               (!isNum && Boolean(effectiveLotNo));
 
             if (hasUserEnteredData) {
@@ -1996,7 +1992,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 mould: effectiveMould,
                 section_no: effectiveSection,
                 checker_id: checkerId,
-                qa_shift_ex_id: qaShiftExId,
+                remarks: effectiveRemarks,
               };
               if (!isNum) insertObj.lot_no = effectiveLotNo;
               inserts.push(insertObj);
@@ -2369,7 +2365,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(11, NUMBERING_COLUMNS.length, 'center')}>
                               <CellTextInput
-                                value={cellValue(numberingValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
+                                value={cellValue(numberingValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.remarks || row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
                                 placeholder="Remarks"
                                 align="center"
@@ -2642,7 +2638,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(12, SQC_COLUMNS.length, 'center')}>
                               <CellTextInput
-                                value={cellValue(sqcValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.qa_shift_ex_name || '') : '')}
+                                value={cellValue(sqcValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.remarks || row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'qaShiftEx', v)}
                                 placeholder="Remarks"
                                 align="center"

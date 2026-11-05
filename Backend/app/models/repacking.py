@@ -25,8 +25,11 @@ class RepackingNumbering(Base):
     defect_id = Column(BigInteger, ForeignKey(hpr_fk("defect_master.defect_id")), nullable=True)
     mould = Column(String, nullable=True)
     section_no = Column(String, nullable=True)
-    checker_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
-    qa_shift_ex_id = Column(Text, ForeignKey(production_fk("users.employee_id")), nullable=True)
+    # Live schema: FK -> hpr.employee_master.employee_id (not production.users).
+    checker_id = Column(String, ForeignKey(hpr_fk("employee_master.employee_id")), nullable=True)
+    # The free-text remarks cell of the report. The table has no QA-executive
+    # column on the live database, so nothing else is mapped here.
+    remarks = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now(), onupdate=func.now())
 
@@ -50,7 +53,9 @@ class RepackingSqcQcHold(Base):
     defect_id = Column(BigInteger, ForeignKey(hpr_fk("defect_master.defect_id")), nullable=True)
     mould = Column(String, nullable=True)
     section_no = Column(String, nullable=True)
-    checker_id = Column(String, ForeignKey(production_fk("users.employee_id")), nullable=True)
-    qa_shift_ex_id = Column(Text, ForeignKey(production_fk("users.employee_id")), nullable=True)
+    # Live schema: FK -> hpr.employee_master.employee_id (not production.users).
+    checker_id = Column(String, ForeignKey(hpr_fk("employee_master.employee_id")), nullable=True)
+    # Free-text remarks cell of the report; no QA-executive column exists.
+    remarks = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now(), onupdate=func.now())

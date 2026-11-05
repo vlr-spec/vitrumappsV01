@@ -34,6 +34,8 @@ export interface RepackingNumberingEntry {
   checker_name?: string | null;
   qa_shift_ex_id: string | null;
   qa_shift_ex_name?: string | null;
+  /** Free-text remarks (sqc.repacking_* .remarks). */
+  remarks?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -63,13 +65,18 @@ export interface RepackingSqcQcHoldEntry {
   checker_name?: string | null;
   qa_shift_ex_id: string | null;
   qa_shift_ex_name?: string | null;
+  /** Free-text remarks (sqc.repacking_* .remarks). */
+  remarks?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
 
 export interface EmployeeItem {
+  /** ``hpr.employee_master.employee_id`` — always a string so leading zeros ("0003") survive. */
   employee_id: string;
   employee_name: string;
+  /** ACTIVE ``sqc.sqc_role`` role codes held by the employee (CHECKER, QA_EXECUTIVE, ...). */
+  roles?: string[];
 }
 
 let employeesCache: EmployeeItem[] | null = null;

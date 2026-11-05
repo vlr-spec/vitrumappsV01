@@ -33,8 +33,16 @@ def format_time_display(t: Optional[time]) -> str:
 
 
 class EmployeeResponse(BaseModel):
+    """One employee available for a dropdown.
+
+    ``roles`` lists the ACTIVE ``sqc.sqc_role`` role codes held by the employee
+    (e.g. CHECKER, QA_EXECUTIVE) so the frontend can populate the Checker and
+    QA Executive dropdowns from a single request.
+    """
+
     employee_id: str
     employee_name: str
+    roles: List[str] = []
 
 
 # --- Numbering Schemas ---
@@ -55,7 +63,7 @@ class NumberingEntryBase(BaseModel):
     mould: Optional[str] = None
     section_no: Optional[str] = None
     checker_id: Optional[str] = None
-    qa_shift_ex_id: Optional[str] = None
+    remarks: Optional[str] = None
 
     @field_validator("production_date", mode="before")
     @classmethod
@@ -121,7 +129,7 @@ class NumberingEntryUpdate(BaseModel):
     mould: Optional[str] = None
     section_no: Optional[str] = None
     checker_id: Optional[str] = None
-    qa_shift_ex_id: Optional[str] = None
+    remarks: Optional[str] = None
 
     @field_validator("production_date", mode="before")
     @classmethod
@@ -200,6 +208,7 @@ class NumberingEntryResponse(BaseModel):
     checker_name: Optional[str] = None
     qa_shift_ex_id: Optional[str] = None
     qa_shift_ex_name: Optional[str] = None
+    remarks: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -228,7 +237,7 @@ class SqcQcHoldEntryBase(BaseModel):
     mould: Optional[str] = None
     section_no: Optional[str] = None
     checker_id: Optional[str] = None
-    qa_shift_ex_id: Optional[str] = None
+    remarks: Optional[str] = None
 
     @field_validator("production_date", mode="before")
     @classmethod
@@ -295,7 +304,7 @@ class SqcQcHoldEntryUpdate(BaseModel):
     mould: Optional[str] = None
     section_no: Optional[str] = None
     checker_id: Optional[str] = None
-    qa_shift_ex_id: Optional[str] = None
+    remarks: Optional[str] = None
 
     @field_validator("production_date", mode="before")
     @classmethod
@@ -375,6 +384,7 @@ class SqcQcHoldEntryResponse(BaseModel):
     checker_name: Optional[str] = None
     qa_shift_ex_id: Optional[str] = None
     qa_shift_ex_name: Optional[str] = None
+    remarks: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
