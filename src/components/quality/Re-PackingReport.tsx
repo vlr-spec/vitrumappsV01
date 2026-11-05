@@ -186,7 +186,7 @@ const TABLE_MIN_WIDTH_SQC = '1240px';
 const TABLE_MIN_WIDTH = '1220px';
 
 /** Default time shown in the Time column when no time is set (00 minutes). */
-const DEFAULT_TIME = '12:00 AM';
+const DEFAULT_TIME = '00:00';
 
 const EMPTY_DAY: QualityDayHourly = {};
 
@@ -205,26 +205,36 @@ const SQC_INPUT_STYLE = NUMBERING_INPUT_STYLE;
 // ─── Production-day timeline (same canonical labels as the HRP) ─────────────
 /** Canonical production-day order (9 AM → 8 AM) — used for run detection only. */
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
-  { time: '9:00 AM', shift_id: 1 }, { time: '10:00 AM', shift_id: 1 },
-  { time: '11:00 AM', shift_id: 1 }, { time: '12:00 PM', shift_id: 1 },
-  { time: '1:00 PM', shift_id: 1 }, { time: '2:00 PM', shift_id: 1 },
-  { time: '3:00 PM', shift_id: 1 }, { time: '4:00 PM', shift_id: 1 },
-  { time: '5:00 PM', shift_id: 2 }, { time: '6:00 PM', shift_id: 2 },
-  { time: '7:00 PM', shift_id: 2 }, { time: '8:00 PM', shift_id: 2 },
-  { time: '9:00 PM', shift_id: 2 }, { time: '10:00 PM', shift_id: 2 },
-  { time: '11:00 PM', shift_id: 2 }, { time: '12:00 AM', shift_id: 2 },
-  { time: '1:00 AM', shift_id: 3 }, { time: '2:00 AM', shift_id: 3 },
-  { time: '3:00 AM', shift_id: 3 }, { time: '4:00 AM', shift_id: 3 },
-  { time: '5:00 AM', shift_id: 3 }, { time: '6:00 AM', shift_id: 3 },
-  { time: '7:00 AM', shift_id: 3 }, { time: '8:00 AM', shift_id: 3 },
+  { time: '09:00', shift_id: 1 }, { time: '10:00', shift_id: 1 },
+  { time: '11:00', shift_id: 1 }, { time: '12:00', shift_id: 1 },
+  { time: '13:00', shift_id: 1 }, { time: '14:00', shift_id: 1 },
+  { time: '15:00', shift_id: 1 }, { time: '16:00', shift_id: 1 },
+  { time: '17:00', shift_id: 2 }, { time: '18:00', shift_id: 2 },
+  { time: '19:00', shift_id: 2 }, { time: '20:00', shift_id: 2 },
+  { time: '21:00', shift_id: 2 }, { time: '22:00', shift_id: 2 },
+  { time: '23:00', shift_id: 2 }, { time: '00:00', shift_id: 2 },
+  { time: '01:00', shift_id: 3 }, { time: '02:00', shift_id: 3 },
+  { time: '03:00', shift_id: 3 }, { time: '04:00', shift_id: 3 },
+  { time: '05:00', shift_id: 3 }, { time: '06:00', shift_id: 3 },
+  { time: '07:00', shift_id: 3 }, { time: '08:00', shift_id: 3 },
 ];
 
 const parseReportLabelToMinutes = (label: string): number | null => {
-  const m = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(label);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const mins = parseInt(m[2], 10);
-  const ap = m[3].toUpperCase();
+  // Primary: 24-hour format "HH:mm" (e.g. "15:30").
+  const m24 = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(label);
+  if (m24) {
+    let h = parseInt(m24[1], 10);
+    const mins = parseInt(m24[2], 10);
+    if (h < 0 || h > 23 || mins < 0 || mins > 59) return null;
+    return h * 60 + mins;
+  }
+  // Backward compatibility: 12-hour format "h:mm AM/PM" (e.g. "3:30 PM")
+  // for existing data keys stored in the legacy convention.
+  const m12 = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(label);
+  if (!m12) return null;
+  let h = parseInt(m12[1], 10);
+  const mins = parseInt(m12[2], 10);
+  const ap = m12[3].toUpperCase();
   if (h < 1 || h > 12 || mins < 0 || mins > 59) return null;
   if (ap === 'AM') {
     if (h === 12) h = 0;
@@ -379,7 +389,7 @@ const splitMachineRuns = (
 };
 
 /**
- * "7:40 AM - 4:00 PM" — the run's ACTUAL production interval, read from the
+ * "07:40 - 16:00" — the run's ACTUAL production interval, read from the
  * first row's saved period start and the last row's period end (falling back
  * to the plain hourly labels when a row carries no period).
  */
@@ -387,8 +397,8 @@ const runIntervalLabel = (run: JobRun): string => {
   const first = run.points[0];
   const last = run.points[run.points.length - 1];
   if (!first || !last) return '';
-  const start = String(first.entry.period_start ?? '').trim() || first.slot.time;
-  const end = String(last.entry.period_end ?? '').trim() || last.slot.time;
+  const start = to24Hour(String(first.entry.period_start ?? '').trim()) || first.slot.time;
+  const end = to24Hour(String(last.entry.period_end ?? '').trim()) || last.slot.time;
   if (start && end && start !== end) return `${start} - ${end}`;
   return end || start;
 };
@@ -1030,53 +1040,315 @@ const CellEmployeeSelect: React.FC<{
   );
 };
 
-// ─── CellTimePicker ─────────────────────────────────────────────────────────
-/** Stored time shape: "h:mm AM/PM" (unpadded hour, padded minutes). */
-const TIME_VALUE_RE = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/;
+// ─── Time Picker Dropdown (24-hour, no AM/PM) ────────────────────────────────
+/** Stored time shape: "HH:mm" (24-hour, zero-padded hour and minutes). */
+const TIME_VALUE_RE = /^\s*(\d{1,2}):(\d{2})\s*$/;
 
-/** Standard HTML5 time picker shown as a compact cell input.
- *  The stored/displayed value stays in the app's "h:mm AM/PM" convention
- *  (e.g. "3:30 PM"); conversion to/from the input's 24-hour "HH:MM" value
- *  happens internally. The native browser picker opens below the field,
- *  is never oversized or awkward, and requires minimal clicks.
+/**
+ * Normalise any time value ("3:30 PM", "15:30", ...) to "HH:mm" (24-hour).
+ * Returns '' when the value is not a valid time.
  */
-const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
-  // "h:mm AM/PM" (e.g. "3:30 PM") -> "HH:MM" (e.g. "15:30")
-  const time24 = useMemo(() => {
-    const match = TIME_VALUE_RE.exec(value);
-    if (!match) return '';
-    let h = parseInt(match[1], 10);
-    const mm = match[2];
-    const ap = match[3].toUpperCase();
-    if (ap === 'PM' && h !== 12) h += 12;
-    if (ap === 'AM' && h === 12) h = 0;
-    return `${String(h).padStart(2, '0')}:${mm}`;
-  }, [value]);
+const to24Hour = (timeValue: string): string => {
+  if (!timeValue) return '';
+  const m24 = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(timeValue);
+  if (m24) {
+    const h = parseInt(m24[1], 10);
+    const mm = m24[2];
+    if (h >= 0 && h <= 23) return `${String(h).padStart(2, '0')}:${mm}`;
+    return '';
+  }
+  const m12 = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(timeValue);
+  if (!m12) return '';
+  let h = parseInt(m12[1], 10);
+  const mm = m12[2];
+  const ap = m12[3].toUpperCase();
+  if (h < 1 || h > 12) return '';
+  if (ap === 'AM') {
+    if (h === 12) h = 0;
+  } else if (h !== 12) {
+    h += 12;
+  }
+  return `${String(h).padStart(2, '0')}:${mm}`;
+};
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v24 = e.target.value;
-    if (!v24) { onChange(''); return; }
-    const [h, m] = v24.split(':').map(Number);
-    const hh = h % 12 || 12;
-    const ap = h < 12 ? 'AM' : 'PM';
-    onChange(`${hh}:${String(m).padStart(2, '0')} ${ap}`);
+/**
+ * Floating 24-hour time picker popover rendered through a portal.
+ * Shows hours 00–23 and minutes 00–59 in two columns, no AM/PM anywhere.
+ * Flips upward when close to the bottom of the viewport and closes on outside
+ * click or Escape.
+ */
+const TimePickerDropdown: React.FC<{
+  isOpen: boolean;
+  onToggle: (open: boolean) => void;
+  selected: string; // "HH:mm"
+  onChange: (v: string) => void;
+  triggerRef: React.RefObject<HTMLDivElement>;
+}> = ({ isOpen, onToggle, selected, onChange, triggerRef }) => {
+  const [hour, setHour] = useState(() => {
+    const m = /^(\d{2}):(\d{2})$/.exec(selected ?? '');
+    return m ? m[1] : '00';
+  });
+  const [minute, setMinute] = useState(() => {
+    const m = /^(\d{2}):(\d{2})$/.exec(selected ?? '');
+    return m ? m[2] : '00';
+  });
+
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<{
+    top?: number;
+    bottom?: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+    flip: boolean;
+  }>({ left: 0, width: 260, maxHeight: 360, flip: false });
+
+  const hours = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
+  const minutes = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
+
+  const updatePosition = useCallback(() => {
+    if (!triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    if (rect.bottom < 0 || rect.top > window.innerHeight) {
+      onToggle(false);
+      return;
+    }
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const flip = spaceBelow < 380 && spaceAbove > spaceBelow;
+    const popoverWidth = 260;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - popoverWidth - 8));
+    const maxHeight = Math.min(380, Math.max(220, flip ? spaceAbove - 16 : spaceBelow - 16));
+
+    setCoords({
+      top: flip ? undefined : rect.bottom + 4,
+      bottom: flip ? window.innerHeight - rect.top + 4 : undefined,
+      left,
+      width: popoverWidth,
+      maxHeight,
+      flip,
+    });
+  }, [onToggle]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    updatePosition();
+    const handleScroll = (e: Event) => {
+      if (popoverRef.current && popoverRef.current.contains(e.target as Node)) {
+        return;
+      }
+      updatePosition();
+    };
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [isOpen, updatePosition]);
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    if (!isOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (triggerRef.current && triggerRef.current.contains(target)) return;
+      if (popoverRef.current && popoverRef.current.contains(target)) return;
+      onToggle(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onToggle(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isOpen, onToggle]);
+
+  const pickHour = (h: string) => {
+    setHour(h);
+    onChange(`${h}:${minute}`);
+  };
+  const pickMinute = (m: string) => {
+    setMinute(m);
+    onChange(`${hour}:${m}`);
+  };
+
+  const colStyle: React.CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    overflowY: 'auto',
+    flex: 1,
+    minWidth: 0,
+  };
+
+  const itemStyle = (selectedValue: string, value: string): React.CSSProperties => ({
+    padding: '6px 8px',
+    fontSize: '13px',
+    color: value === selectedValue ? '#ffffff' : '#1e293b',
+    backgroundColor: value === selectedValue ? '#2563eb' : 'transparent',
+    cursor: 'pointer',
+    userSelect: 'none',
+    textAlign: 'center',
+  });
+
+  return (
+    <div style={{ position: 'relative', width: '100%' }}>
+      {isOpen &&
+        createPortal(
+          <div
+            ref={popoverRef}
+            style={{
+              position: 'fixed',
+              top: coords.top !== undefined ? `${coords.top}px` : 'auto',
+              bottom: coords.bottom !== undefined ? `${coords.bottom}px` : 'auto',
+              left: `${coords.left}px`,
+              width: `${coords.width}px`,
+              maxHeight: `${coords.maxHeight}px`,
+              zIndex: 99999,
+              backgroundColor: '#ffffff',
+              border: '1px solid #cbd5e1',
+              borderRadius: '8px',
+              boxShadow: '0 12px 32px rgba(15, 23, 42, 0.2), 0 2px 6px rgba(0, 0, 0, 0.08)',
+              display: 'flex',
+              flexDirection: 'column',
+              boxSizing: 'border-box',
+              overflow: 'hidden',
+            }}
+          >
+            {/* Header showing "HH : MM" */}
+            <div
+              style={{
+                padding: '10px 12px',
+                borderBottom: '1px solid #e2e8f0',
+                backgroundColor: '#eff6ff',
+                textAlign: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a', letterSpacing: '-0.5px' }}>
+                {hour}
+              </span>
+              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a', margin: '0 4px' }}>:</span>
+              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a' }}>
+                {minute}
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+              {/* Hours column: 00–23 */}
+              <div style={{ ...colStyle, borderRight: '1px solid #f1f5f9' }}>
+                <div style={{ paddingTop: '4px' }}>
+                  {hours.map((h) => (
+                    <div
+                      key={h}
+                      style={itemStyle(hour, h)}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        pickHour(h);
+                      }}
+                    >
+                      {h}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Minutes column: 00–59 */}
+              <div style={colStyle}>
+                <div style={{ paddingTop: '4px' }}>
+                  {minutes.map((m) => (
+                    <div
+                      key={m}
+                      style={itemStyle(minute, m)}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        pickMinute(m);
+                      }}
+                    >
+                      {m}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </div>
+  );
+};
+
+/** 24-hour time cell input. Click opens a dropdown with hours 00–23 and
+ *  minutes 00–59 (no AM/PM). The displayed value is always "HH:mm". */
+const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const time24 = useMemo(() => to24Hour(value), [value]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = to24Hour(e.target.value);
+    onChange(v);
   };
 
   return (
-    <input
-      type="time"
-      value={time24}
-      onChange={handleChange}
-      onFocus={(e) => focusCellBorder(e, true)}
-      onBlur={(e) => focusCellBorder(e, false)}
+    <div
+      ref={triggerRef}
       style={{
-        ...CELL_INPUT_STYLE,
-        color: value ? C.textMain : '#94a3b8',
-        textAlign: 'center',
-        cursor: 'text',
-        ...(style ?? {}),
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        width: '100%',
       }}
-    />
+    >
+      <input
+        type="text"
+        value={time24}
+        onChange={handleInputChange}
+        onFocus={(e) => focusCellBorder(e, true)}
+        onBlur={(e) => focusCellBorder(e, false)}
+        onClick={(e) => {
+          e.stopPropagation();
+          setIsOpen(true);
+        }}
+        readOnly
+        style={{
+          ...CELL_INPUT_STYLE,
+          color: value ? C.textMain : '#94a3b8',
+          textAlign: 'center',
+          cursor: 'pointer',
+          ...(style ?? {}),
+        }}
+      />
+      <span
+        style={{
+          marginLeft: 'auto',
+          color: '#94a3b8',
+          fontSize: '10px',
+          paddingRight: '4px',
+          flexShrink: 0,
+        }}
+      >
+        ▾
+      </span>
+
+      {isOpen && (
+        <TimePickerDropdown
+          isOpen={isOpen}
+          onToggle={setIsOpen}
+          selected={time24}
+          onChange={(v) => {
+            onChange(v);
+            setIsOpen(false);
+          }}
+          triggerRef={triggerRef}
+        />
+      )}
+    </div>
   );
 };
 
@@ -1438,7 +1710,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           jobName: entry.bottle_name || entry.job_id || '',
           packType: entry.pack_type || '',
           shift: String(entry.shift || 1),
-          time: entry.entry_time || '',
+          time: to24Hour(entry.entry_time || '') || '',
           pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
           cartons: entry.cartons != null ? String(entry.cartons) : '',
           noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
@@ -1473,7 +1745,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           packType: entry.pack_type || '',
           lotNo: entry.lot_no || '',
           shift: String(entry.shift || 1),
-          time: entry.entry_time || '',
+          time: to24Hour(entry.entry_time || '') || '',
           pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
           cartons: entry.cartons != null ? String(entry.cartons) : '',
           noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
@@ -1680,12 +1952,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const extraRowKey = (machineNo: number, extraId: number): string =>
     `${dateKey}|${machineNo}|x|${extraId}`;
 
-  /** Default the minutes of a stored time ("h:mm AM/PM") to 00, preserving
-   *  the hour and AM/PM. Returns '' when the value is not a valid time. */
+  /** Default the minutes of a stored time ("HH:mm") to 00, preserving
+   *  the hour. Returns '' when the value is not a valid time. */
   const defaultMinutesToZero = (timeValue: string): string => {
     const match = TIME_VALUE_RE.exec(timeValue);
     if (!match) return '';
-    return `${match[1]}:00 ${match[3]}`;
+    return `${match[1]}:00`;
   };
 
   const addExtraRow = (
@@ -2050,7 +2322,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
       if (inserts.length > 0) countParts.push(`${inserts.length} new ${inserts.length === 1 ? 'row' : 'rows'}`);
       if (updates.length > 0) countParts.push(`${updates.length} updated ${updates.length === 1 ? 'row' : 'rows'}`);
       const countText = countParts.join(', ');
-      const msg = `Repacking ${label} entries for ${dateLabel} have been saved to the database successfully${countText ? ` (${countText})` : ''}.`;
+      const msg = `${label} entries for ${dateLabel} have been saved to the database successfully${countText ? ` (${countText})` : ''}.`;
 
       toast.success(msg);
       setSuccessPopupMsg(msg);
@@ -2767,7 +3039,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               </div>
 
               <p style={{ margin: '0 0 20px 0', fontSize: '13.5px', color: '#334155', lineHeight: 1.5 }}>
-                {successPopupMsg || `Repacking ${layout === 'numbering' ? 'Numbering' : 'SQC/QC HOLD'} records have been successfully saved to the database.`}
+                {successPopupMsg || `${layout === 'numbering' ? 'Numbering' : 'SQC/QC HOLD'} entries have been successfully saved to the database.`}
               </p>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
