@@ -914,7 +914,7 @@ export const DashboardModule: React.FC = () => {
     }
     const shiftEff = [0, 1, 2].map((i) => calcUnitEfficiency(shiftUnits[i], shiftTheoretical[i]));
     const overallEff = calcUnitEfficiency(actualUnits, asPerSpeedUnits);
-    return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff, runtimeMinutes };
+    return { shiftUnits, shiftTheoretical, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff, runtimeMinutes };
   }, [rows]);
 
   const hasData = rows.some((r) => r.asPerSpeedUnits > 0 || r.actualUnits > 0);
@@ -995,11 +995,6 @@ export const DashboardModule: React.FC = () => {
 
     const startLabels = jobStartLabels(dayHourly);
 
-    // Date + machine-wise remarks for the selected production date: each
-    // machine shows only its own remarks recorded in this date's hourly
-    // records, across all of that machine's jobs, in production-timeline
-    // (chronological) order with serial numbering. Job ID is never used for
-    // grouping here. Joined as one sentence-wise line in the same row cell.
     const remarkByMachine = new Map<number, string>();
     for (const machineNo of MACHINE_NOS) {
       const byTime = dayHourly[String(machineNo)] ?? {};
@@ -1102,6 +1097,44 @@ export const DashboardModule: React.FC = () => {
     [rows]
   );
 
+  // Shift-wise efficiency chart data — derived from existing per-machine shift
+  // efficiencies already computed by machineEffData. No new calculation formula;
+  // only a view-layer aggregation of values the Quality Module already produces.
+  const shiftEffChartData = useMemo(() => {
+    return [0, 1, 2].map((i) => {
+      const vals = machineEffData.map((m) => [m.shift1, m.shift2, m.shift3][i]).filter((v): v is number => v !== null);
+      return {
+        name: `Shift - ${['I', 'II', 'III'][i]}`,
+        efficiency: vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : null,
+      };
+    });
+  }, [machineEffData]);
+
+  // Machine-wise performance summary cards — derived from existing `rows` only.
+  // No new calculation formula; aggregates values the Quality Module already produces.
+  const machineSummaryData = useMemo(() => {
+    return MACHINE_NOS.map((m) => {
+      const rs = rows.filter((r) => r.machineNo === m);
+      const actualUnits = rs.reduce((s, r) => s + r.actualUnits, 0);
+      const theoreticalUnits = rs.reduce((s, r) => s + r.asPerSpeedUnits, 0);
+      const actualDraw = rs.reduce((s, r) => s + r.actualDraw, 0);
+      const shiftUnits = [0, 0, 0];
+      rs.forEach((r) => {
+        r.shiftUnits.forEach((u, i) => {
+          shiftUnits[i] += u;
+        });
+      });
+      return {
+        machineNo: m,
+        actualUnits,
+        theoreticalUnits,
+        actualDraw,
+        overallEff: calcUnitEfficiency(actualUnits, theoreticalUnits),
+        shiftUnits,
+      };
+    });
+  }, [rows]);
+
   const kpis: KpiDef[] = [
     {
       label: 'Total Actual Units',
@@ -1190,81 +1223,256 @@ export const DashboardModule: React.FC = () => {
       className="dash-print-root"
       ref={printAreaRef}
       style={{
-        padding: '14px 18px 18px',
+        padding: '16px 20px 20px',
         display: 'flex',
         flexDirection: 'column',
-        gap: 14,
+        gap: 16,
         printColorAdjust: 'exact',
       }}
     >
       <style>{`
+        :root {
+          --dash-border: #e2e8f0;
+          --dash-header-bg: #f8fafc;
+          --dash-text-main: #1e293b;
+          --dash-text-muted: #64748b;
+          --dash-white: #ffffff;
+          --m1: #3B82F6;
+          --m2: #22C55E;
+          --m3: #F59E0B;
+          --m4: #8B5CF6;
+        }
         .dash-card {
           background-color: #ffffff;
           border: 1px solid #e2e8f0;
-          border-radius: 10px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+          border-radius: 12px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
           print-color-adjust: exact;
           -webkit-print-color-adjust: exact;
         }
-        .dash-kpi-grid {
+        .dash-section {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .dash-section-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .dash-section-title {
+          font-size: 14px;
+          font-weight: 700;
+          color: #0f172a;
+          letter-spacing: -0.01em;
+          margin: 0;
+        }
+        .dash-section-sub {
+          font-size: 11.5px;
+          color: #64748b;
+          font-weight: 500;
+          margin: 0;
+        }
+        .dash-grid-6 {
           display: grid;
           grid-template-columns: repeat(6, 1fr);
           gap: 12px;
         }
+        .dash-grid-4 {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 12px;
+        }
+        .dash-grid-2 {
+          display: grid;
+          grid-template-columns: repeat(2, 1fr);
+          gap: 14px;
+        }
         .dash-kpi-card {
           display: flex;
           align-items: center;
-          gap: 10px;
-          padding: 10px 14px;
+          gap: 12px;
+          padding: 14px 16px;
           min-width: 0;
+          border-radius: 10px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
         }
         .dash-kpi-icon {
-          width: 38px;
-          height: 38px;
-          border-radius: 9px;
+          width: 40px;
+          height: 40px;
+          border-radius: 10px;
           display: flex;
           align-items: center;
           justify-content: center;
           flex-shrink: 0;
         }
+        .dash-kpi-body {
+          min-width: 0;
+        }
         .dash-kpi-label {
-          font-size: 11px;
-          font-weight: 500;
+          font-size: 11.5px;
+          font-weight: 600;
           color: #64748b;
           line-height: 1.25;
+          letter-spacing: 0.01em;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
         }
         .dash-kpi-value {
-          font-size: 21px;
+          font-size: 24px;
           font-weight: 800;
-          line-height: 1.15;
+          line-height: 1.1;
           white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 100%;
+          display: block;
         }
         .dash-kpi-unit {
           font-size: 10.5px;
           color: #94a3b8;
+          font-weight: 500;
+          margin-top: 1px;
         }
-        .dash-chart-grid {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 14px;
+        .dash-machine-card {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          padding: 14px 16px;
+          border-radius: 10px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          min-width: 0;
+        }
+        .dash-machine-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .dash-machine-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          font-weight: 700;
+          color: #ffffff;
+          padding: 4px 8px;
+          border-radius: 6px;
+        }
+        .dash-meta-row {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          font-size: 11.5px;
+        }
+        .dash-meta-cell {
+          flex: 1;
+          min-width: 0;
+        }
+        .dash-meta-label {
+          font-size: 10px;
+          font-weight: 600;
+          color: #94a3b8;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          line-height: 1;
+        }
+        .dash-meta-value {
+          font-size: 13px;
+          font-weight: 700;
+          color: #1e293b;
+          line-height: 1.2;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .dash-meta-value.muted { color: #94a3b8; font-weight: 500; }
+        .dash-chart-card {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 14px 16px;
+          border-radius: 10px;
+          border: 1px solid #e2e8f0;
+          background: #ffffff;
+          min-width: 0;
+          min-height: 300px;
+        }
+        .dash-chart-wrap {
+          height: 240px;
+          width: 100%;
+          position: relative;
+          display: flex;
+          align-items: flex-start;
         }
         .dash-chart {
-          height: 250px;
+          height: 100%;
           width: 100%;
+        }
+        .dash-chart-empty {
+          height: 240px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #94a3b8;
+          font-size: 13px;
+          border-radius: 8px;
+          border: 1px dashed #e2e8f0;
+          background: #fafafa;
         }
         .dash-table-scroll {
           overflow-x: auto;
+          border-radius: 8px;
+          border: 1px solid #e2e8f0;
         }
         .dash-table {
           width: 100%;
           border-collapse: collapse;
+          font-size: 12.5px;
         }
-        .dash-table tbody tr:not(.dash-total):hover td { background-color: #f8fafc; }
-        .dash-table tbody tr.dash-total:hover td { background-color: #f0f4fa; }
+        .dash-table thead th {
+          background-color: #f8fafc;
+          color: #1e293b;
+          font-weight: 600;
+          font-size: 10.5px;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+          text-align: center;
+          padding: 8px 6px;
+          border-bottom: 2px solid #e2e8f0;
+          border-right: 1px solid #e2e8f0;
+          white-space: nowrap;
+          vertical-align: middle;
+        }
+        .dash-table thead th:last-child { border-right: none; }
+        .dash-table tbody td {
+          padding: 7px 8px;
+          border-bottom: 1px solid #e2e8f0;
+          border-right: 1px solid #e2e8f0;
+          color: #1e293b;
+          text-align: center;
+          white-space: nowrap;
+          vertical-align: middle;
+        }
+        .dash-table tbody td:last-child { border-right: none; }
+        .dash-table tbody tr:hover td { background-color: #f8fafc; }
         .dash-table tbody tr.dash-m1:hover td { background-color: #EFF6FF; }
         .dash-table tbody tr.dash-m2:hover td { background-color: #F0FDF4; }
         .dash-table tbody tr.dash-m3:hover td { background-color: #FFFBEB; }
         .dash-table tbody tr.dash-m4:hover td { background-color: #F5F3FF; }
+        .dash-table tbody tr.dash-total {
+          background-color: #f0f4fa;
+          border-top: 2px solid #e2e8f0;
+        }
+        .dash-table tbody tr.dash-total td { font-weight: 700; color: #0f172a; }
+        .dash-table tbody tr.dash-total:hover td { background-color: #e7edf6; }
+        .dash-table td.dash-left { text-align: left; white-space: normal; }
+        .dash-table td.dash-bold { font-weight: 600; }
+        .dash-table td.dash-mono { font-variant-numeric: tabular-nums; }
+        .dash-table td.dash-mono.bold { font-weight: 700; }
         .dash-jobchange {
           position: absolute;
           top: 0;
@@ -1367,22 +1575,26 @@ export const DashboardModule: React.FC = () => {
           margin-bottom: 4px;
         }
         @media (max-width: 1280px) {
-          .dash-kpi-grid { grid-template-columns: repeat(3, 1fr); }
+          .dash-grid-6 { grid-template-columns: repeat(3, 1fr); }
+          .dash-grid-4 { grid-template-columns: repeat(2, 1fr); }
+          .dash-grid-2 { grid-template-columns: 1fr; }
         }
         @media (max-width: 640px) {
-          .dash-kpi-grid { grid-template-columns: repeat(2, 1fr); }
-        }
-        @media (max-width: 1200px) {
-          .dash-chart-grid { grid-template-columns: 1fr; }
+          .dash-grid-6 { grid-template-columns: repeat(2, 1fr); }
+          .dash-grid-4 { grid-template-columns: repeat(2, 1fr); }
+          .dash-grid-2 { grid-template-columns: 1fr; }
+          .dash-kpi-value { font-size: 20px; }
         }
         @media print {
           .no-print { display: none !important; }
           [${PRINT_HIDDEN_ATTR}] { display: none !important; }
           .dash-print-root { padding: 0 !important; gap: 10px !important; }
           .dash-card { box-shadow: none !important; break-inside: avoid; }
-          .dash-kpi-grid { grid-template-columns: repeat(6, 1fr) !important; gap: 6px !important; }
+          .dash-grid-6 { grid-template-columns: repeat(6, 1fr) !important; gap: 6px !important; }
+          .dash-grid-4 { grid-template-columns: repeat(4, 1fr) !important; gap: 6px !important; }
+          .dash-grid-2 { grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important; }
           .dash-chart { height: 210px !important; }
-          .dash-chart-grid { grid-template-columns: repeat(3, 1fr) !important; gap: 8px !important; }
+          .dash-chart-wrap { min-height: 210px !important; }
           .dash-table-scroll { overflow: visible !important; }
           .dash-table { width: 100% !important; min-width: 0 !important; table-layout: fixed !important; }
           .dash-table th, .dash-table td { padding: 1px 2px !important; font-size: 7px !important; line-height: 1.15 !important; white-space: normal !important; }
@@ -1394,8 +1606,9 @@ export const DashboardModule: React.FC = () => {
         }
       `}</style>
 
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 240 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 260 }}>
           <BarChart3 size={22} color="#2563EB" />
           <h1 style={{ fontSize: 19, fontWeight: 800, color: '#0F172A', margin: 0, whiteSpace: 'nowrap' }}>
             Daily Production Performance Dashboard
@@ -1511,28 +1724,371 @@ export const DashboardModule: React.FC = () => {
         </div>
       )}
 
-      <div className="dash-kpi-grid">
-        {kpis.map((k) => (
-          <div key={k.label} className="dash-card dash-kpi-card">
-            <div className="dash-kpi-icon" style={{ backgroundColor: k.tint, color: k.color }}>
-              <k.icon size={20} strokeWidth={2} />
+      {/* ─── KPI Cards ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">Key Performance Indicators</h2>
+          <p className="dash-section-sub">{dateLabel} &middot; All figures from Quality Module hourly records</p>
+        </div>
+        <div className="dash-grid-6">
+          {kpis.map((k) => (
+            <div key={k.label} className="dash-kpi-card" style={{ borderLeft: `4px solid ${k.color}` }}>
+              <div className="dash-kpi-icon" style={{ backgroundColor: k.tint, color: k.color }}>
+                <k.icon size={18} strokeWidth={2} />
+              </div>
+              <div className="dash-kpi-body">
+                <div className="dash-kpi-label">{k.label}</div>
+                <div className="dash-kpi-value" style={{ color: k.valueColor }}>{k.value}</div>
+                {k.unit && <div className="dash-kpi-unit">{k.unit}</div>}
+              </div>
             </div>
-            <div style={{ minWidth: 0 }}>
-              <div className="dash-kpi-label">{k.label}</div>
-              <div className="dash-kpi-value" style={{ color: k.valueColor }}>{k.value}</div>
-              {k.unit && <div className="dash-kpi-unit">{k.unit}</div>}
+          ))}
+        </div>
+      </section>
+
+      {/* ─── Machine-wise Performance Summary Cards ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">Machine-wise Performance Summary</h2>
+          <p className="dash-section-sub">Actual vs theoretical production and efficiency per machine</p>
+        </div>
+        <div className="dash-grid-4">
+          {machineSummaryData.map((m) => {
+            const color = MACHINE_COLORS[m.machineNo].main;
+            const tint = MACHINE_COLORS[m.machineNo].light;
+            const eff = m.overallEff;
+            return (
+              <div key={`m-summary-${m.machineNo}`} className="dash-machine-card" style={{ borderTop: `4px solid ${color}` }}>
+                <div className="dash-machine-head">
+                  <div className="dash-machine-badge" style={{ backgroundColor: color }}>
+                    M/C {m.machineNo}
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: '#64748b' }}>
+                    {eff === null ? '—' : `${eff.toFixed(2)}%`} Overall
+                  </div>
+                </div>
+                <div className="dash-meta-row">
+                  <div className="dash-meta-cell">
+                    <div className="dash-meta-label">Actual Units</div>
+                    <div className="dash-meta-value">{fmtUnits(m.actualUnits)}</div>
+                  </div>
+                  <div className="dash-meta-cell">
+                    <div className="dash-meta-label">Theoretical Units</div>
+                    <div className="dash-meta-value">{fmtUnits(m.theoreticalUnits)}</div>
+                  </div>
+                  <div className="dash-meta-cell">
+                    <div className="dash-meta-label">Efficiency</div>
+                    <div className={`dash-meta-value ${eff === null ? 'muted' : ''}`}>
+                      {eff === null ? '—' : `${eff.toFixed(2)}%`}
+                    </div>
+                  </div>
+                  <div className="dash-meta-cell">
+                    <div className="dash-meta-label">Draw (Tons)</div>
+                    <div className="dash-meta-value">{m.actualDraw > 0 ? fmt3(m.actualDraw) : '—'}</div>
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, borderTop: '1px solid #f1f5f9', paddingTop: 8 }}>
+                  {['Shift I', 'Shift II', 'Shift III'].map((label, i) => (
+                    <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: 4, background: '#fafafa', borderRadius: 6, border: `1px solid ${tint}` }}>
+                      <div style={{ fontSize: 9.5, fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.03em' }}>{label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#1e293b', fontVariantNumeric: 'tabular-nums' }}>{fmtUnits(m.shiftUnits[i])}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ─── Charts Grid ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">Production Analytics</h2>
+          <p className="dash-section-sub">Machine-wise and shift-wise production &amp; efficiency</p>
+        </div>
+        <div className="dash-grid-2">
+          {/* Chart 1: Machine-wise Actual vs Theoretical */}
+          <div className="dash-chart-card">
+            <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#1e293b' }}>
+              Machine-wise Actual vs Theoretical Production
+            </h3>
+            <div className="dash-chart-wrap">
+              {hasData ? (
+                <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={machineProdData} margin={{ top: 22, right: 16, left: 0, bottom: 8 }}>
+                      <CartesianGrid stroke="#EDF1F7" vertical={false} />
+                      <XAxis
+                        dataKey="name"
+                        tick={{ fontSize: 11, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#E2E8F0' }}
+                      />
+                      <YAxis
+                        domain={[0, 'auto']}
+                        ticks={[0, 200000, 400000, 600000, 800000]}
+                        tickFormatter={kfmt}
+                        tick={{ fontSize: 11, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={46}
+                      />
+                      <Tooltip
+                        content={<ChartTooltip format={(v) => fmtUnits(Number(v ?? 0))} />}
+                        cursor={{ fill: 'rgba(148,163,184,0.10)' }}
+                      />
+                      <Legend
+                        iconType="rect"
+                        iconSize={9}
+                        verticalAlign="top"
+                        align="right"
+                        wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
+                      />
+                      <Bar
+                        dataKey="theoretical"
+                        name="As Per Speed (Theoretical)"
+                        fill="#93C5FD"
+                        radius={[4, 4, 0, 0]}
+                        barSize={26}
+                        isAnimationActive={false}
+                      >
+                        <LabelList
+                          dataKey="theoretical"
+                          position="top"
+                          fontSize={10}
+                          fill="#475569"
+                          formatter={(v: unknown) => fmtUnits(Number(v))}
+                        />
+                      </Bar>
+                      <Bar
+                        dataKey="actual"
+                        name="Actual Production"
+                        fill="#1D4ED8"
+                        radius={[4, 4, 0, 0]}
+                        barSize={26}
+                        isAnimationActive={false}
+                      >
+                        <LabelList
+                          dataKey="actual"
+                          position="top"
+                          fontSize={10}
+                          fill="#1E3A8A"
+                          fontWeight={700}
+                          formatter={(v: unknown) => fmtUnits(Number(v))}
+                        />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="dash-chart-empty">No production data for the selected date</div>
+              )}
             </div>
           </div>
-        ))}
-      </div>
 
-      <section className="dash-card" style={{ padding: '12px 14px' }}>
-        <h3 style={{ margin: '0 0 10px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-          24-Hour Job Timeline (09:00 AM – 08:59 AM)
-        </h3>
+          {/* Chart 2: Shift-wise Production */}
+          <div className="dash-chart-card">
+            <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#1e293b' }}>
+              Shift-wise Production
+            </h3>
+            <div className="dash-chart-wrap">
+              {hasData ? (
+                <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={shiftData} margin={{ top: 22, right: 16, left: 0, bottom: 8 }}>
+                      <defs>
+                        <linearGradient id="dashShift1" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#7FB3E8" />
+                          <stop offset="100%" stopColor="#4A90D9" />
+                        </linearGradient>
+                        <linearGradient id="dashShift2" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#3B7DD8" />
+                          <stop offset="100%" stopColor="#2B5EA7" />
+                        </linearGradient>
+                        <linearGradient id="dashShift3" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#2447A3" />
+                          <stop offset="100%" stopColor="#1B3577" />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid stroke="#EDF1F7" vertical={false} />
+                      <XAxis
+                        dataKey="name"
+                        tick={{ fontSize: 11, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#E2E8F0' }}
+                      />
+                      <YAxis
+                        domain={[0, 'auto']}
+                        ticks={[0, 200000, 400000, 600000, 800000]}
+                        tickFormatter={kfmt}
+                        tick={{ fontSize: 11, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={46}
+                      />
+                      <Tooltip
+                        content={<ChartTooltip format={(v) => fmtUnits(Number(v ?? 0))} />}
+                        cursor={{ fill: 'rgba(148,163,184,0.10)' }}
+                      />
+                      <Bar
+                        dataKey="units"
+                        name="Actual Production"
+                        radius={[4, 4, 0, 0]}
+                        barSize={52}
+                        isAnimationActive={false}
+                      >
+                        {shiftData.map((s, i) => (
+                          <Cell key={s.name} fill={['url(#dashShift1)', 'url(#dashShift2)', 'url(#dashShift3)'][i]} />
+                        ))}
+                        <LabelList
+                          dataKey="units"
+                          position="top"
+                          fontSize={11}
+                          fill="#1E3A8A"
+                          fontWeight={700}
+                          formatter={(v: unknown) => fmtUnits(Number(v))}
+                        />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="dash-chart-empty">No production data for the selected date</div>
+              )}
+            </div>
+          </div>
+
+          {/* Chart 3: Machine-wise Efficiency */}
+          <div className="dash-chart-card">
+            <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#1e293b' }}>
+              Machine-wise Efficiency
+            </h3>
+            <div className="dash-chart-wrap">
+              {hasData ? (
+                <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={machineEffData} margin={{ top: 22, right: 16, left: 0, bottom: 8 }}>
+                      <CartesianGrid stroke="#EDF1F7" vertical={false} />
+                      <XAxis
+                        dataKey="name"
+                        tick={{ fontSize: 11, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#E2E8F0' }}
+                      />
+                      <YAxis
+                        domain={[0, 200]}
+                        ticks={[0, 50, 100, 150, 200]}
+                        tick={{ fontSize: 11, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={34}
+                        unit="%"
+                      />
+                      <Tooltip
+                        content={<ChartTooltip format={(v) => (v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%')} />}
+                        cursor={{ fill: 'rgba(148,163,184,0.10)' }}
+                      />
+                      <Legend
+                        iconType="rect"
+                        iconSize={9}
+                        verticalAlign="top"
+                        align="right"
+                        wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
+                      />
+                      <Bar
+                        dataKey="overall"
+                        name="Overall Efficiency"
+                        fill="#1D4ED8"
+                        radius={[4, 4, 0, 0]}
+                        barSize={30}
+                        isAnimationActive={false}
+                      >
+                        <LabelList
+                          dataKey="overall"
+                          position="top"
+                          fontSize={10}
+                          fill="#1E3A8A"
+                          fontWeight={700}
+                          formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
+                        />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="dash-chart-empty">No production data for the selected date</div>
+              )}
+            </div>
+          </div>
+
+          {/* Chart 4: Shift-wise Efficiency */}
+          <div className="dash-chart-card">
+            <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#1e293b' }}>
+              Shift-wise Efficiency
+            </h3>
+            <div className="dash-chart-wrap">
+              {hasData ? (
+                <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={shiftEffChartData} margin={{ top: 22, right: 16, left: 0, bottom: 8 }}>
+                      <CartesianGrid stroke="#EDF1F7" vertical={false} />
+                      <XAxis
+                        dataKey="name"
+                        tick={{ fontSize: 11, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#E2E8F0' }}
+                      />
+                      <YAxis
+                        domain={[0, 200]}
+                        ticks={[0, 50, 100, 150, 200]}
+                        tick={{ fontSize: 11, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={34}
+                        unit="%"
+                      />
+                      <Tooltip
+                        content={<ChartTooltip format={(v) => (v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%')} />}
+                        cursor={{ fill: 'rgba(148,163,184,0.10)' }}
+                      />
+                      <Bar
+                        dataKey="efficiency"
+                        name="Shift Efficiency"
+                        fill="#2563EB"
+                        radius={[4, 4, 0, 0]}
+                        barSize={36}
+                        isAnimationActive={false}
+                      >
+                        <LabelList
+                          dataKey="efficiency"
+                          position="top"
+                          fontSize={11}
+                          fill="#1E3A8A"
+                          fontWeight={700}
+                          formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
+                        />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="dash-chart-empty">No production data for the selected date</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 24-Hour Production Timeline ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">24-Hour Production Timeline</h2>
+          <p className="dash-section-sub">09:00 AM – 08:59 AM &middot; Machine-wise job segments</p>
+        </div>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-            <div style={{ width: 40, flexShrink: 0 }} />
+            <div style={{ width: 44, flexShrink: 0 }} />
             <div style={{ position: 'relative', flex: 1, height: 16 }}>
               {TIMELINE_TICKS.map((t, i) => (
                 <span
@@ -1548,7 +2104,7 @@ export const DashboardModule: React.FC = () => {
                           : 'translateX(-50%)',
                     fontSize: 10.5,
                     color: '#64748b',
-                    fontWeight: 500,
+                    fontWeight: 600,
                     whiteSpace: 'nowrap',
                   }}
                 >
@@ -1558,14 +2114,14 @@ export const DashboardModule: React.FC = () => {
             </div>
           </div>
           {timeline.map((row) => (
-            <div key={row.machineNo} style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+            <div key={row.machineNo} style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
               <div
                 style={{
-                  width: 40,
+                  width: 44,
                   flexShrink: 0,
                   textAlign: 'center',
                   fontSize: 11,
-                  fontWeight: 700,
+                  fontWeight: 800,
                   color: '#ffffff',
                   backgroundColor: MACHINE_COLORS[row.machineNo].main,
                   borderRadius: 6,
@@ -1655,297 +2211,39 @@ export const DashboardModule: React.FC = () => {
         </div>
       </section>
 
-      <div className="dash-chart-grid">
-        <section className="dash-card" style={{ padding: '12px 14px' }}>
-          <h3 style={{ margin: '0 0 8px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-            Machine-wise Production (Units)
-          </h3>
-          {hasData ? (
-            <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={machineProdData} margin={{ top: 18, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid stroke="#EDF1F7" vertical={false} />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fontSize: 11, fill: '#64748b' }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#E2E8F0' }}
-                  />
-                  <YAxis
-                    domain={[0, 800000]}
-                    ticks={[0, 200000, 400000, 600000, 800000]}
-                    tickFormatter={kfmt}
-                    tick={{ fontSize: 11, fill: '#94a3b8' }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={46}
-                  />
-                  <Tooltip
-                    content={<ChartTooltip format={(v) => fmtUnits(Number(v ?? 0))} />}
-                    cursor={{ fill: 'rgba(148,163,184,0.10)' }}
-                  />
-                  <Legend
-                    iconType="rect"
-                    iconSize={9}
-                    verticalAlign="top"
-                    align="right"
-                    wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
-                  />
-                  <Bar
-                    dataKey="theoretical"
-                    name="As Per Speed (Theoretical)"
-                    fill="#93C5FD"
-                    radius={[3, 3, 0, 0]}
-                    barSize={30}
-                    isAnimationActive={false}
-                  >
-                    <LabelList
-                      dataKey="theoretical"
-                      position="top"
-                      fontSize={10}
-                      fill="#475569"
-                      formatter={(v: unknown) => fmtUnits(Number(v))}
-                    />
-                  </Bar>
-                  <Bar
-                    dataKey="actual"
-                    name="Actual Production"
-                    fill="#1D4ED8"
-                    radius={[3, 3, 0, 0]}
-                    barSize={30}
-                    isAnimationActive={false}
-                  >
-                    <LabelList
-                      dataKey="actual"
-                      position="top"
-                      fontSize={10}
-                      fill="#1E3A8A"
-                      fontWeight={700}
-                      formatter={(v: unknown) => fmtUnits(Number(v))}
-                    />
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div
-              style={{
-                height: 250,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#94A3B8',
-                fontSize: 13,
-              }}
-            >
-              No production data for the selected date
-            </div>
-          )}
-        </section>
-
-        <section className="dash-card" style={{ padding: '12px 14px' }}>
-          <h3 style={{ margin: '0 0 8px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-            Shift-wise Actual Production (Units)
-          </h3>
-          {hasData ? (
-            <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={shiftData} margin={{ top: 18, right: 8, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="dashShift1" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#7FB3E8" />
-                      <stop offset="100%" stopColor="#4A90D9" />
-                    </linearGradient>
-                    <linearGradient id="dashShift2" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#3B7DD8" />
-                      <stop offset="100%" stopColor="#2B5EA7" />
-                    </linearGradient>
-                    <linearGradient id="dashShift3" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#2447A3" />
-                      <stop offset="100%" stopColor="#1B3577" />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="#EDF1F7" vertical={false} />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fontSize: 11, fill: '#64748b' }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#E2E8F0' }}
-                  />
-                  <YAxis
-                    domain={[0, 800000]}
-                    ticks={[0, 200000, 400000, 600000, 800000]}
-                    tickFormatter={kfmt}
-                    tick={{ fontSize: 11, fill: '#94a3b8' }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={46}
-                  />
-                  <Tooltip
-                    content={<ChartTooltip format={(v) => fmtUnits(Number(v ?? 0))} />}
-                    cursor={{ fill: 'rgba(148,163,184,0.10)' }}
-                  />
-                  <Bar
-                    dataKey="units"
-                    name="Actual Production"
-                    radius={[3, 3, 0, 0]}
-                    barSize={52}
-                    isAnimationActive={false}
-                  >
-                    {shiftData.map((s, i) => (
-                      <Cell key={s.name} fill={['url(#dashShift1)', 'url(#dashShift2)', 'url(#dashShift3)'][i]} />
-                    ))}
-                    <LabelList
-                      dataKey="units"
-                      position="top"
-                      fontSize={11}
-                      fill="#1E3A8A"
-                      fontWeight={700}
-                      formatter={(v: unknown) => fmtUnits(Number(v))}
-                    />
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div
-              style={{
-                height: 250,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#94A3B8',
-                fontSize: 13,
-              }}
-            >
-              No production data for the selected date
-            </div>
-          )}
-        </section>
-
-        <section className="dash-card" style={{ padding: '12px 14px' }}>
-          <h3 style={{ margin: '0 0 8px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-            Machine-wise Efficiency (%)
-          </h3>
-          {hasData ? (
-            <div className="dash-chart" style={{ printColorAdjust: 'exact' } as React.CSSProperties}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={machineEffData} margin={{ top: 18, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid stroke="#EDF1F7" vertical={false} />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fontSize: 11, fill: '#64748b' }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#E2E8F0' }}
-                  />
-                  <YAxis
-                    domain={[0, 200]}
-                    ticks={[0, 50, 100, 150, 200]}
-                    tick={{ fontSize: 11, fill: '#94a3b8' }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={34}
-                    unit="%"
-                  />
-                  <Tooltip
-                    content={<ChartTooltip format={(v) => (v === null || v === undefined ? '—' : Number(v).toFixed(2) + '%')} />}
-                    cursor={{ fill: 'rgba(148,163,184,0.10)' }}
-                  />
-                  <Legend
-                    iconType="rect"
-                    iconSize={9}
-                    verticalAlign="top"
-                    align="right"
-                    wrapperStyle={{ fontSize: 11, paddingBottom: 8 }}
-                  />
-                  <Bar dataKey="shift1" name="Shift - I" fill="#3B82F6" radius={[3, 3, 0, 0]} barSize={16} isAnimationActive={false}>
-                    <LabelList
-                      dataKey="shift1"
-                      position="top"
-                      fontSize={9.5}
-                      fill="#475569"
-                      formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
-                    />
-                  </Bar>
-                  <Bar dataKey="shift2" name="Shift - II" fill="#22C55E" radius={[3, 3, 0, 0]} barSize={16} isAnimationActive={false}>
-                    <LabelList
-                      dataKey="shift2"
-                      position="top"
-                      fontSize={9.5}
-                      fill="#475569"
-                      formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
-                    />
-                  </Bar>
-                  <Bar dataKey="shift3" name="Shift - III" fill="#F97316" radius={[3, 3, 0, 0]} barSize={16} isAnimationActive={false}>
-                    <LabelList
-                      dataKey="shift3"
-                      position="top"
-                      fontSize={9.5}
-                      fill="#475569"
-                      formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
-                    />
-                  </Bar>
-                  <Bar dataKey="overall" name="Overall" fill="#1E3A8A" radius={[3, 3, 0, 0]} barSize={16} isAnimationActive={false}>
-                    <LabelList
-                      dataKey="overall"
-                      position="top"
-                      fontSize={9.5}
-                      fill="#1E3A8A"
-                      fontWeight={700}
-                      formatter={(v: unknown) => (v === null || v === undefined ? '—' : Number(v).toFixed(2))}
-                    />
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div
-              style={{
-                height: 250,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#94A3B8',
-                fontSize: 13,
-              }}
-            >
-              No production data for the selected date
-            </div>
-          )}
-        </section>
-      </div>
-
-      <section className="dash-card" style={{ padding: '12px 14px' }}>
-        <h3 style={{ margin: '0 0 10px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-          Machine-wise Performance Details
-        </h3>
+      {/* ─── Machine-Wise Performance Details ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">Machine-Wise Performance Details</h2>
+          <p className="dash-section-sub">Per job segment: units, draw, weight, speed, efficiency</p>
+        </div>
         <div className="dash-table-scroll">
-          <table className="dash-table" style={{ minWidth: '1520px' }}>
+          <table className="dash-table" style={{ minWidth: '1560px' }}>
             <thead>
               <tr style={{ backgroundColor: C.headerBg }}>
-                <th rowSpan={2} style={{ ...thStyle(), width: '54px', borderBottom: `2px solid ${C.border}` }}>M/C No</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '132px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '56px', borderBottom: `2px solid ${C.border}` }}>M/C No</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '140px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
                 <th rowSpan={2} style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '74px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
-                <th rowSpan={2} style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>MIN</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '72px', borderBottom: `2px solid ${C.border}` }}>Weight</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '72px', borderBottom: `2px solid ${C.border}` }}>Speed</th>
+                <th rowSpan={2} style={{ ...thStyle(), width: '62px', borderBottom: `2px solid ${C.border}` }}>MIN</th>
                 <th colSpan={2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>As Per Speed</th>
                 <th colSpan={3} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Actual Production</th>
                 <th colSpan={2} style={{ ...thStyle(), borderBottom: `1px solid ${C.border}` }}>Actual Total</th>
                 <th colSpan={4} style={{ ...thStyle(true), borderBottom: `1px solid ${C.border}` }}>Efficiency %</th>
               </tr>
               <tr style={{ backgroundColor: C.headerBg }}>
-                <th style={{ ...thStyle(), width: '98px', borderBottom: `2px solid ${C.border}` }}>Total Units</th>
-                <th style={{ ...thStyle(), width: '90px', borderBottom: `2px solid ${C.border}` }}>Total Draw</th>
-                <th style={{ ...thStyle(), width: '94px', borderBottom: `2px solid ${C.border}` }}>Shift - I</th>
-                <th style={{ ...thStyle(), width: '94px', borderBottom: `2px solid ${C.border}` }}>Shift - II</th>
-                <th style={{ ...thStyle(), width: '94px', borderBottom: `2px solid ${C.border}` }}>Shift - III</th>
-                <th style={{ ...thStyle(), width: '98px', borderBottom: `2px solid ${C.border}` }}>Units</th>
-                <th style={{ ...thStyle(), width: '90px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
-                <th style={{ ...thStyle(), width: '76px', borderBottom: `2px solid ${C.border}` }}>Shift - I</th>
-                <th style={{ ...thStyle(), width: '76px', borderBottom: `2px solid ${C.border}` }}>Shift - II</th>
-                <th style={{ ...thStyle(), width: '76px', borderBottom: `2px solid ${C.border}` }}>Shift - III</th>
-                <th style={{ ...thStyle(true), width: '82px', borderBottom: `2px solid ${C.border}` }}>Overall</th>
+                <th style={{ ...thStyle(), width: '96px', borderBottom: `2px solid ${C.border}` }}>Total Units</th>
+                <th style={{ ...thStyle(), width: '86px', borderBottom: `2px solid ${C.border}` }}>Total Draw</th>
+                <th style={{ ...thStyle(), width: '92px', borderBottom: `2px solid ${C.border}` }}>Shift - I</th>
+                <th style={{ ...thStyle(), width: '92px', borderBottom: `2px solid ${C.border}` }}>Shift - II</th>
+                <th style={{ ...thStyle(), width: '92px', borderBottom: `2px solid ${C.border}` }}>Shift - III</th>
+                <th style={{ ...thStyle(), width: '94px', borderBottom: `2px solid ${C.border}` }}>Units</th>
+                <th style={{ ...thStyle(), width: '86px', borderBottom: `2px solid ${C.border}` }}>Draw</th>
+                <th style={{ ...thStyle(), width: '72px', borderBottom: `2px solid ${C.border}` }}>Shift - I</th>
+                <th style={{ ...thStyle(), width: '72px', borderBottom: `2px solid ${C.border}` }}>Shift - II</th>
+                <th style={{ ...thStyle(), width: '72px', borderBottom: `2px solid ${C.border}` }}>Shift - III</th>
+                <th style={{ ...thStyle(true), width: '80px', borderBottom: `2px solid ${C.border}` }}>Overall</th>
               </tr>
             </thead>
             <tbody>
@@ -1956,26 +2254,26 @@ export const DashboardModule: React.FC = () => {
                   style={{ backgroundColor: MACHINE_ROW_BG[r.machineNo] ?? 'transparent', printColorAdjust: 'exact' }}
                 >
                   <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
-                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.bottleName || undefined}>
+                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal', maxWidth: 130 }} className="dash-left" title={r.bottleName || undefined}>
                     {r.bottleName || '—'}
                   </td>
-                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.bottleName) || undefined}>
+                  <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal', maxWidth: 140 }} className="dash-left" title={(r.packingName || r.bottleName) || undefined}>
                     {r.packingName || r.bottleName || '—'}
                   </td>
-                  <td style={td}>{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
-                  <td style={td}>{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
-                  <td style={td}>{r.runtimeMinutes > 0 ? r.runtimeMinutes : '—'}</td>
-                  <td style={td}>{fmtUnits(r.asPerSpeedUnits)}</td>
-                  <td style={td}>{fmt3(r.asPerSpeedDraw)}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[0])}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[1])}</td>
-                  <td style={td}>{fmtUnits(r.shiftUnits[2])}</td>
-                  <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.actualUnits)}</td>
-                  <td style={td}>{fmt3(r.actualDraw)}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[0])}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[1])}</td>
-                  <td style={td}>{fmtEff(r.shiftEff[2])}</td>
-                  <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(r.overallEff)}</td>
+                  <td style={td} className="dash-mono">{r.weight > 0 ? fmt1(r.weight) : '—'}</td>
+                  <td style={td} className="dash-mono">{r.speed > 0 ? fmt1(r.speed) : '—'}</td>
+                  <td style={td} className="dash-mono">{r.runtimeMinutes > 0 ? r.runtimeMinutes : '—'}</td>
+                  <td style={td} className="dash-mono">{fmtUnits(r.asPerSpeedUnits)}</td>
+                  <td style={td} className="dash-mono">{fmt3(r.asPerSpeedDraw)}</td>
+                  <td style={td} className="dash-mono">{fmtUnits(r.shiftUnits[0])}</td>
+                  <td style={td} className="dash-mono">{fmtUnits(r.shiftUnits[1])}</td>
+                  <td style={td} className="dash-mono">{fmtUnits(r.shiftUnits[2])}</td>
+                  <td style={{ ...td, fontWeight: 600 }} className="dash-mono">{fmtUnits(r.actualUnits)}</td>
+                  <td style={td} className="dash-mono">{fmt3(r.actualDraw)}</td>
+                  <td style={td} className="dash-mono">{fmtEff(r.shiftEff[0])}</td>
+                  <td style={td} className="dash-mono">{fmtEff(r.shiftEff[1])}</td>
+                  <td style={td} className="dash-mono">{fmtEff(r.shiftEff[2])}</td>
+                  <td style={{ ...tdLast, fontWeight: 700 }} className="dash-mono">{fmtEff(r.overallEff)}</td>
                 </tr>
               ))}
 
@@ -1984,17 +2282,17 @@ export const DashboardModule: React.FC = () => {
                 <td style={td} />
                 <td style={td} />
                 <td style={td}></td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.asPerSpeedUnits)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.asPerSpeedDraw)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[0])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[1])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[2])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.actualUnits)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.actualDraw)}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[0])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[1])}</td>
-                <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[2])}</td>
-                <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(totals.overallEff)}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtUnits(totals.asPerSpeedUnits)}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmt3(totals.asPerSpeedDraw)}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtUnits(totals.shiftUnits[0])}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtUnits(totals.shiftUnits[1])}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtUnits(totals.shiftUnits[2])}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtUnits(totals.actualUnits)}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmt3(totals.actualDraw)}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtEff(totals.shiftEff[0])}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtEff(totals.shiftEff[1])}</td>
+                <td style={{ ...td, fontWeight: 700 }} className="dash-mono">{fmtEff(totals.shiftEff[2])}</td>
+                <td style={{ ...tdLast, fontWeight: 700 }} className="dash-mono">{fmtEff(totals.overallEff)}</td>
               </tr>
             </tbody>
           </table>
@@ -2007,10 +2305,12 @@ export const DashboardModule: React.FC = () => {
         )}
       </section>
 
-      <section className="dash-card" style={{ padding: '12px 14px' }}>
-        <h3 style={{ margin: '0 0 10px', fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>
-          Job-wise Production Summary
-        </h3>
+      {/* ─── Job-Wise Production Summary ─── */}
+      <section className="dash-card dash-section" style={{ padding: '14px 16px' }}>
+        <div className="dash-section-head">
+          <h2 className="dash-section-title">Job-Wise Production Summary</h2>
+          <p className="dash-section-sub">One row per machine + Job ID &middot; Actual production to date</p>
+        </div>
 
         {jobLoadedKey !== dateKey && !loadError && (
           <div style={{ padding: '8px 14px', fontSize: 12, color: C.textMuted }}>
@@ -2020,15 +2320,15 @@ export const DashboardModule: React.FC = () => {
 
         {jobLoadedKey === dateKey && jobWiseRows.length > 0 && (
           <div className="dash-table-scroll">
-            <table className="dash-table" style={{ minWidth: '940px' }}>
+            <table className="dash-table" style={{ minWidth: '960px' }}>
               <thead>
                 <tr style={{ backgroundColor: C.headerBg }}>
-                  <th style={{ ...thStyle(), width: '64px', borderBottom: `2px solid ${C.border}` }}>M/C</th>
-                  <th style={{ ...thStyle(), width: '240px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
-                  <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
-                  <th style={{ ...thStyle(), width: '130px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
-                  <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
-                  <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
+                  <th style={{ ...thStyle(), width: '56px', borderBottom: `2px solid ${C.border}` }}>M/C</th>
+                  <th style={{ ...thStyle(), width: '170px', borderBottom: `2px solid ${C.border}` }}>Production Bottle Name</th>
+                  <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Packed Bottle Name</th>
+                  <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
+                  <th style={{ ...thStyle(), width: '110px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
+                  <th style={{ ...thStyle(), width: '140px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
                   <th style={{ ...thStyle(true), borderBottom: `2px solid ${C.border}` }}>Remark</th>
                 </tr>
               </thead>
@@ -2036,15 +2336,15 @@ export const DashboardModule: React.FC = () => {
                 {jobWiseRows.map((r) => (
                   <tr key={r.key}>
                     <td style={{ ...td, fontWeight: 600 }}>{r.machineNo}</td>
-                    <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={r.itemName || undefined}>
+                    <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal', maxWidth: 160 }} className="dash-left" title={r.itemName || undefined}>
                       {r.itemName || '—'}
                     </td>
-                    <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal' }} title={(r.packingName || r.itemName) || undefined}>
+                    <td style={{ ...td, textAlign: 'left', whiteSpace: 'normal', maxWidth: 140 }} className="dash-left" title={(r.packingName || r.itemName) || undefined}>
                       {r.packingName || r.itemName || '—'}
                     </td>
                     <td style={td}>{r.dateText}</td>
                     <td style={td}>{r.timeText}</td>
-                    <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.units)}</td>
+                    <td style={{ ...td, fontWeight: 600 }} className="dash-mono">{fmtUnits(r.units)}</td>
                     <td style={{ ...tdLast, textAlign: 'left', whiteSpace: 'normal' }}>
                       {r.remark ? (
                         <span
