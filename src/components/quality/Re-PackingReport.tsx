@@ -1082,7 +1082,7 @@ const TimePickerDropdown: React.FC<{
   onToggle: (open: boolean) => void;
   selected: string; // "HH:mm"
   onChange: (v: string) => void;
-  triggerRef: React.RefObject<HTMLDivElement>;
+  triggerRef: React.RefObject<HTMLDivElement | null>;
 }> = ({ isOpen, onToggle, selected, onChange, triggerRef }) => {
   const [hour, setHour] = useState(() => {
     const m = /^(\d{2}):(\d{2})$/.exec(selected ?? '');
