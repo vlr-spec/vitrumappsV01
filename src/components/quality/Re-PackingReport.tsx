@@ -1710,6 +1710,22 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     const setter = target === 'numbering' ? setNumberingExtras : setSqcExtras;
     const storeKey = extraRowsKey(machineNo);
     setter((prev) => ({ ...prev, [storeKey]: [...(prev[storeKey] ?? []), row] }));
+
+    // Also initialize the new row's values in the values state so the UI
+    // correctly displays the inherited packType and pcsPack for the new entry.
+    const valuesKey = `${dateKey}|${machineNo}|x|${row.id}`;
+    const valuesSetter = target === 'numbering' ? setNumberingValues : setSqcValues;
+    valuesSetter((prev) => ({
+      ...prev,
+      [valuesKey]: {
+        jobName,
+        shift,
+        packType,
+        pcsPack,
+        time,
+        // Other fields will fall back to their defaults/baselines when rendered.
+      },
+    }));
   };
 
   const removeExtraRow = (target: 'numbering' | 'sqc', machineNo: number, extraId: number) => {
@@ -1842,7 +1858,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           const effectiveShift = parseInt(currentVals.shift ?? shiftFallback, 10) || 1;
           const effectiveTime = (currentVals.time ?? '').trim();
           const effectivePackType = (currentVals.packType ?? '').trim() || null;
-          const effectivePcsPack = currentVals.pcsPack ? parseInt(currentVals.pcsPack, 10) || null : null;
+          const effectivePcsPack = currentVals.pcsPack != null && currentVals.pcsPack !== '' ? parseInt(currentVals.pcsPack, 10) : null;
           const effectiveCartons = currentVals.cartons ? parseInt(currentVals.cartons, 10) || null : null;
           const effectiveDefectiveBottles = currentVals.noOfBottle ? parseInt(currentVals.noOfBottle, 10) || null : null;
           const effectiveMould = (currentVals.mould ?? '').trim() || null;
