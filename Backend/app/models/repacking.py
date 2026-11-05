@@ -1,6 +1,8 @@
 # pyrefly: ignore [missing-import]
 from sqlalchemy import Column, Integer, SmallInteger, BigInteger, String, Text, Date, Time, DateTime, ForeignKey, func
-from app.db.base import Base, sqc_table_args, sqc_fk, production_fk, hpr_fk
+from app.db.base import Base, sqc_table_args, production_fk, hpr_fk
+# Import for its Base metadata registration: checker_id references employee_master.
+from app.models.employee import EmployeeMaster  # noqa: F401
 
 
 def _autoinc_bigint():
