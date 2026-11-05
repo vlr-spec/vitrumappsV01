@@ -18,6 +18,7 @@ from app.schemas.repacking import (
     NumberingEntryUpdate,
     NumberingEntryResponse,
     NumberingSaveRequest,
+    RepackingDataResponse,
     SqcQcHoldEntryCreate,
     SqcQcHoldEntryUpdate,
     SqcQcHoldEntryResponse,
@@ -710,6 +711,43 @@ def get_repacking_employees(
         if role_code and role_code not in item.roles:
             item.roles.append(role_code)
     return list(by_employee.values())
+
+
+# ---------------------------------------------------------------------------
+# Combined repacking data fetch
+# ---------------------------------------------------------------------------
+
+@router.get("/", response_model=RepackingDataResponse)
+def get_repacking_data(
+    production_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _user: AuthUser = Depends(require_module_read(MODULE_QUALITY_CONTROL)),
+):
+    """Fetch both numbering and SQC/QC HOLD entries for a production date in one request.
+
+    Replaces two separate GET /numbering and GET /sqc-qc-hold calls with a single
+    round-trip, returning both datasets together for the given date.
+    """
+    conditions = []
+    params = {}
+
+    if production_date:
+        try:
+            parsed_date = datetime.strptime(production_date.strip(), "%Y-%m-%d").date()
+            conditions.append("n.production_date = :p_date")
+            params["p_date"] = parsed_date
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    numbering_results = db.execute(text(_numbering_select(where_clause)), params).mappings().all()
+    sqc_results = db.execute(text(_sqc_select(where_clause)), params).mappings().all()
+
+    return RepackingDataResponse(
+        numbering=_group_numbering_rows(numbering_results),
+        sqc_qc_hold=_group_sqc_rows(sqc_results),
+    )
 
 
 # ---------------------------------------------------------------------------

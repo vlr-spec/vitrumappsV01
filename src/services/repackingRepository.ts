@@ -81,6 +81,14 @@ export interface EmployeeItem {
 
 let employeesCache: EmployeeItem[] | null = null;
 
+// Cache for combined repacking data, keyed by production date (YYYY-MM-DD).
+// Avoids re-fetching numbering + SQC/QC HOLD when revisiting the same date
+// (e.g. navigating away and back, or switching layouts on a previously loaded date).
+const repackingDataCache: Record<
+  string,
+  { numbering: RepackingNumberingEntry[]; sqc: RepackingSqcQcHoldEntry[] } | null
+> = {};
+
 export const repackingRepository = {
   // --- Employee list ---
   async getEmployees(): Promise<EmployeeItem[]> {
@@ -96,6 +104,50 @@ export const repackingRepository = {
       console.error('Failed to fetch employees:', err);
       return [];
     }
+  },
+
+  /**
+   * Fetch both numbering and SQC/QC HOLD entries for one production date in a
+   * single API request (GET /api/production/repacking/). Results are cached by
+   * date so revisiting the same date does not trigger a repeated request.
+   * Falls back to the two legacy endpoints if the combined endpoint is not yet
+   * available. Use invalidateRepackingCache() to evict a date after a save.
+   */
+  async getRepackingData(
+    productionDate: string
+  ): Promise<{ numbering: RepackingNumberingEntry[]; sqc: RepackingSqcQcHoldEntry[] }> {
+    const cached = repackingDataCache[productionDate];
+    if (cached) return cached;
+
+    try {
+      const qs = new URLSearchParams({ production_date: productionDate }).toString();
+      const data = (await apiFetch(`/api/production/repacking/?${qs}`)) as {
+        numbering?: unknown;
+        sqc_qc_hold?: unknown;
+      };
+
+      const result = {
+        numbering: Array.isArray(data?.numbering) ? (data.numbering as RepackingNumberingEntry[]) : [],
+        sqc: Array.isArray(data?.sqc_qc_hold) ? (data.sqc_qc_hold as RepackingSqcQcHoldEntry[]) : [],
+      };
+
+      repackingDataCache[productionDate] = result;
+      return result;
+    } catch (combinedErr) {
+      // Fallback: fetch numbering and SQC/QC HOLD separately (legacy endpoints).
+      const [numbering, sqc] = await Promise.all([
+        this.getNumbering(productionDate),
+        this.getSqcQcHold(productionDate),
+      ]);
+      const result = { numbering, sqc };
+      repackingDataCache[productionDate] = result;
+      return result;
+    }
+  },
+
+  /** Evict the cached repacking data for a date so the next fetch is fresh (call after a save). */
+  invalidateRepackingCache(productionDate: string): void {
+    delete repackingDataCache[productionDate];
   },
 
   // --- Numbering APIs ---

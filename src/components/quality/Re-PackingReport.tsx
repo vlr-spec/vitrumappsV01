@@ -185,6 +185,9 @@ const TABLE_MIN_WIDTH_NUMBERING = '1170px';
 const TABLE_MIN_WIDTH_SQC = '1240px';
 const TABLE_MIN_WIDTH = '1220px';
 
+/** Default time shown in the Time column when no time is set (00 minutes). */
+const DEFAULT_TIME = '12:00 AM';
+
 const EMPTY_DAY: QualityDayHourly = {};
 
 /** Numbering table inputs: no rounded inner borders, transparent fill so the
@@ -1419,16 +1422,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
   const loadSavedData = useCallback(async (targetKey: string) => {
     try {
-      const [numData, sqcData] = await Promise.all([
-        repackingRepository.getNumbering(targetKey),
-        repackingRepository.getSqcQcHold(targetKey),
-      ]);
+      const { numbering, sqc } = await repackingRepository.getRepackingData(targetKey);
 
       const numMap: Record<number, RepackingNumberingEntry[]> = {};
       const numInitVals: ValuesStore = {};
       const numBase: ValuesStore = {};
 
-      numData.forEach((entry) => {
+      numbering.forEach((entry) => {
         const m = entry.machine_no;
         if (!numMap[m]) numMap[m] = [];
         numMap[m].push(entry);
@@ -1462,7 +1462,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
       const sqcInitVals: ValuesStore = {};
       const sqcBase: ValuesStore = {};
 
-      sqcData.forEach((entry) => {
+      sqc.forEach((entry) => {
         const m = entry.machine_no;
         if (!sqcMap[m]) sqcMap[m] = [];
         sqcMap[m].push(entry);
@@ -1722,7 +1722,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         shift,
         packType,
         pcsPack,
-        time,
+        time: time || DEFAULT_TIME,
         // Other fields will fall back to their defaults/baselines when rendered.
       },
     }));
@@ -2035,6 +2035,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         setSqcExtras({});
       }
 
+      // Invalidate the repacking cache for this date so the reload below
+      // fetches fresh post-save data instead of stale cached data.
+      repackingRepository.invalidateRepackingCache(dateKey);
+
       await loadSavedData(dateKey);
 
       setSaveState('saved');
@@ -2281,7 +2285,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(numberingValues, key, 'shift', shiftFallback),
                                       cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
-                                      defaultMinutesToZero(cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : ''))
+                                      defaultMinutesToZero(cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))
                                     )
                                   }
                                 />
@@ -2317,7 +2321,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(numberingValues, key, 'time', row.kind === 'extra' ? row.extra.time : (isDbRow ? (row.dbEntry.entry_time || '') : ''))}
+                                value={cellValue(numberingValues, key, 'time', row.kind === 'extra' ? (row.extra.time || DEFAULT_TIME) : (isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))}
                                 onChange={(v) => setNumberingCell(key, 'time', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
@@ -2548,7 +2552,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(sqcValues, key, 'shift', shiftFallback),
                                       cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
-                                      defaultMinutesToZero(cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || '') : ''))
+                                      defaultMinutesToZero(cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))
                                     )
                                   }
                                 />
@@ -2575,7 +2579,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(2, SQC_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(sqcValues, key, 'time', row.kind === 'extra' ? row.extra.time : (isDbRow ? (row.dbEntry.entry_time || '') : ''))}
+                                value={cellValue(sqcValues, key, 'time', row.kind === 'extra' ? (row.extra.time || DEFAULT_TIME) : (isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))}
                                 onChange={(v) => setSqcCell(key, 'time', v)}
                                 style={SQC_INPUT_STYLE}
                               />

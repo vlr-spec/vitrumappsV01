@@ -398,3 +398,13 @@ class RepackingSaveResponse(BaseModel):
     inserted_count: int
     updated_count: int
     items: List[Union[NumberingEntryResponse, SqcQcHoldEntryResponse]]
+
+
+class RepackingDataResponse(BaseModel):
+    """Combined response for both numbering and SQC/QC HOLD entries of one date.
+
+    Allows the frontend to fetch all saved repacking data for a production date
+    in a single API request instead of two separate round-trips.
+    """
+    numbering: List[NumberingEntryResponse] = []
+    sqc_qc_hold: List[SqcQcHoldEntryResponse] = []

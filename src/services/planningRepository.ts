@@ -32,6 +32,16 @@ let _holidays: { holiday_date: string; holiday_name: string }[] = [];
 let _initialized = false;
 let _cacheVersion = 0;
 
+// Cached packaging master data (hpr.packaging_master). Loaded once and reused
+// across mounts so the Repacking Report (and other modules) do not re-fetch
+// the same master data on every render.
+let _packagingMastersCache: { ok: boolean; rows: PackagingMasterRow[]; error?: string } | null = null;
+
+/** Evict the cached packaging masters so the next fetch is fresh (call after a create/update/delete). */
+function invalidatePackagingMastersCache(): void {
+  _packagingMastersCache = null;
+}
+
 // Complete chronological production-job history, independent of the currently
 // filtered planning window (_jobs). The cumulative Qty column must continue a
 // Job ID from BEFORE the selected date range (e.g. a job spanning a month
@@ -1149,6 +1159,7 @@ export const planningRepository = {
     rows: PackagingMasterRow[];
     error?: string;
   }> {
+    if (_packagingMastersCache) return _packagingMastersCache;
     try {
       const raw = await apiFetch('/api/production/packaging/');
       const rows = (raw as Record<string, unknown>[]).map((p) => ({
@@ -1156,13 +1167,16 @@ export const planningRepository = {
         packaging_code: toStr(p.packaging_code),
         packaging_description: toStr(p.packaging_description),
       }));
-      return { ok: true, rows };
+      _packagingMastersCache = { ok: true, rows };
+      return _packagingMastersCache;
     } catch (err: any) {
-      return {
+      const result = {
         ok: false,
         rows: [],
         error: err.message || 'Failed to load packaging records.',
       };
+      _packagingMastersCache = result;
+      return result;
     }
   },
 
@@ -1175,6 +1189,7 @@ export const planningRepository = {
         method: 'POST',
         body: JSON.stringify({ packaging_code, packaging_description }),
       });
+      invalidatePackagingMastersCache();
       return { ok: true };
     } catch (err: any) {
       return { ok: false, error: err.message || 'Failed to create packaging record.' };
@@ -1191,6 +1206,7 @@ export const planningRepository = {
         method: 'PUT',
         body: JSON.stringify({ packaging_code, packaging_description }),
       });
+      invalidatePackagingMastersCache();
       return { ok: true };
     } catch (err: any) {
       return { ok: false, error: err.message || 'Failed to update packaging record.' };
@@ -1200,6 +1216,7 @@ export const planningRepository = {
   async deletePackagingMaster(packaging_id: number): Promise<{ ok: boolean; error?: string }> {
     try {
       await apiFetch(`/api/production/packaging/${packaging_id}`, { method: 'DELETE' });
+      invalidatePackagingMastersCache();
       return { ok: true };
     } catch (err: any) {
       return { ok: false, error: err.message || 'Failed to delete packaging record.' };
