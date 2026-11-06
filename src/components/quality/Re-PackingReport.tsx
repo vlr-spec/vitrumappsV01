@@ -11,9 +11,11 @@
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
- * keeps its own independent values in component state. The Time columns are a
- * MANUAL time picker (hours + minutes + AM/PM) that is never auto-populated
- * from job schedules. Switching between NUMBERING and SQC/QC HOLD keeps the
+ * keeps its own independent values in component state. The Time columns use a
+ * custom dropdown 12-hour time picker (Hour, Minute, AM/PM) whose available
+ * hours are restricted to the cell's selected shift; times are never
+ * auto-populated from job schedules. Switching between NUMBERING and SQC/QC
+ * HOLD keeps the
  * entered values for the current component session; a date change re-derives
  * the entries from that date's production records.
  *
@@ -86,7 +88,7 @@ const C = {
 const MACHINE_NOS = [1, 2, 3, 4];
 
 /** Subtle per-machine indicator colors for the numbered card badges. */
-const MACHINE_INDICATOR_COLORS = ['#2563EB', '#0EA5E9', '#6366F1', '#8B5CF6'];
+const MACHINE_INDICATOR_COLORS = ['#2563EB', '#2563EB', '#2563EB', '#2563EB'];
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -103,7 +105,7 @@ const NUMBERING_COL_WIDTHS: Record<string, string> = {
   'Job Name': '160px',
   'Pack Type': '70px',
   'Shift': '60px',
-  'Time': '85px',
+  'Time': '70px',
   'Pcs/Pack': '60px',
   'Cartons': '60px',
   'Bottle': '75px',
@@ -120,7 +122,7 @@ const NUMBERING_COL_PERCENTS: Record<string, string> = {
   'Job Name': '13.0%',
   'Pack Type': '6.0%',
   'Shift': '5.0%',
-  'Time': '6.5%',
+  'Time': '8%',
   'Pcs/Pack': '5.0%',
   'Cartons': '5.0%',
   'Defective Bottles': '7.5%',
@@ -128,7 +130,7 @@ const NUMBERING_COL_PERCENTS: Record<string, string> = {
   'Mould': '5.5%',
   'SECTION': '5.5%',
   'Checker Name': '8.5%',
-  'Remarks': '14.5%',
+  'Remarks': '13%',
 };
 
 /** Numbering table: 0-based column indices that end a visual section
@@ -146,7 +148,7 @@ const SQC_COLUMNS = [
  *  horizontal space (sums to 100.0%). */
 const SQC_COL_PERCENTS: Record<string, string> = {
   'Shift': '5.0%',
-  'Time': '6.5%',
+  'Time': '8%',
   'Job Name': '13.0%',
   'Pack Type': '5.5%',
   'Lot No.': '5.5%',
@@ -157,13 +159,13 @@ const SQC_COL_PERCENTS: Record<string, string> = {
   'Mould': '5.5%',
   'Section': '5.5%',
   'Checker Name': '7.5%',
-  'Remarks': '13.0%',
+  'Remarks': '11.5%',
 };
 
 /** SQC/QC HOLD table: pixel minimums for the header cells. */
 const SQC_COL_WIDTHS: Record<string, string> = {
   'Shift': '60px',
-  'Time': '85px',
+  'Time': '70px',
   'Job Name': '160px',
   'Pack Type': '70px',
   'Lot No.': '70px',
@@ -185,8 +187,31 @@ const TABLE_MIN_WIDTH_NUMBERING = '1170px';
 const TABLE_MIN_WIDTH_SQC = '1240px';
 const TABLE_MIN_WIDTH = '1220px';
 
-/** Default time shown in the Time column when no time is set (00 minutes). */
-const DEFAULT_TIME = '00:00';
+// ─── Shift-based 12-hour time windows for the TIME column picker ────────────
+/** Valid (hour, AM/PM) pairs per shift. Within a shift each hour pairs with
+ *  exactly one period, so the picker can never assemble an out-of-shift time:
+ *  Shift 1: 7:00 AM - 3:00 PM · Shift 2: 4:00 PM - 11:00 PM · Shift 3:
+ *  12:00 AM - 6:00 AM. */
+const SHIFT_TIME_RANGES: Record<string, { hour: number; period: 'AM' | 'PM' }[]> = {
+  '1': [
+    { hour: 7, period: 'AM' }, { hour: 8, period: 'AM' }, { hour: 9, period: 'AM' },
+    { hour: 10, period: 'AM' }, { hour: 11, period: 'AM' }, { hour: 12, period: 'PM' },
+    { hour: 1, period: 'PM' }, { hour: 2, period: 'PM' }, { hour: 3, period: 'PM' },
+  ],
+  '2': [
+    { hour: 4, period: 'PM' }, { hour: 5, period: 'PM' }, { hour: 6, period: 'PM' },
+    { hour: 7, period: 'PM' }, { hour: 8, period: 'PM' }, { hour: 9, period: 'PM' },
+    { hour: 10, period: 'PM' }, { hour: 11, period: 'PM' },
+  ],
+  '3': [
+    { hour: 12, period: 'AM' }, { hour: 1, period: 'AM' }, { hour: 2, period: 'AM' },
+    { hour: 3, period: 'AM' }, { hour: 4, period: 'AM' }, { hour: 5, period: 'AM' },
+    { hour: 6, period: 'AM' },
+  ],
+};
+
+/** All minutes 00-59 for the minute selector. */
+const ALL_MINUTES = Array.from({ length: 60 }, (_, i) => i);
 
 const EMPTY_DAY: QualityDayHourly = {};
 
@@ -205,18 +230,18 @@ const SQC_INPUT_STYLE = NUMBERING_INPUT_STYLE;
 // ─── Production-day timeline (same canonical labels as the HRP) ─────────────
 /** Canonical production-day order (9 AM → 8 AM) — used for run detection only. */
 const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
-  { time: '09:00', shift_id: 1 }, { time: '10:00', shift_id: 1 },
-  { time: '11:00', shift_id: 1 }, { time: '12:00', shift_id: 1 },
-  { time: '13:00', shift_id: 1 }, { time: '14:00', shift_id: 1 },
-  { time: '15:00', shift_id: 1 }, { time: '16:00', shift_id: 1 },
-  { time: '17:00', shift_id: 2 }, { time: '18:00', shift_id: 2 },
-  { time: '19:00', shift_id: 2 }, { time: '20:00', shift_id: 2 },
-  { time: '21:00', shift_id: 2 }, { time: '22:00', shift_id: 2 },
-  { time: '23:00', shift_id: 2 }, { time: '00:00', shift_id: 2 },
-  { time: '01:00', shift_id: 3 }, { time: '02:00', shift_id: 3 },
-  { time: '03:00', shift_id: 3 }, { time: '04:00', shift_id: 3 },
-  { time: '05:00', shift_id: 3 }, { time: '06:00', shift_id: 3 },
-  { time: '07:00', shift_id: 3 }, { time: '08:00', shift_id: 3 },
+  { time: '9:00 AM', shift_id: 1 }, { time: '10:00 AM', shift_id: 1 },
+  { time: '11:00 AM', shift_id: 1 }, { time: '12:00 PM', shift_id: 1 },
+  { time: '1:00 PM', shift_id: 1 }, { time: '2:00 PM', shift_id: 1 },
+  { time: '3:00 PM', shift_id: 1 }, { time: '4:00 PM', shift_id: 1 },
+  { time: '5:00 PM', shift_id: 2 }, { time: '6:00 PM', shift_id: 2 },
+  { time: '7:00 PM', shift_id: 2 }, { time: '8:00 PM', shift_id: 2 },
+  { time: '9:00 PM', shift_id: 2 }, { time: '10:00 PM', shift_id: 2 },
+  { time: '11:00 PM', shift_id: 2 }, { time: '12:00 AM', shift_id: 2 },
+  { time: '1:00 AM', shift_id: 3 }, { time: '2:00 AM', shift_id: 3 },
+  { time: '3:00 AM', shift_id: 3 }, { time: '4:00 AM', shift_id: 3 },
+  { time: '5:00 AM', shift_id: 3 }, { time: '6:00 AM', shift_id: 3 },
+  { time: '7:00 AM', shift_id: 3 }, { time: '8:00 AM', shift_id: 3 },
 ];
 
 const parseReportLabelToMinutes = (label: string): number | null => {
@@ -397,8 +422,8 @@ const runIntervalLabel = (run: JobRun): string => {
   const first = run.points[0];
   const last = run.points[run.points.length - 1];
   if (!first || !last) return '';
-  const start = to24Hour(String(first.entry.period_start ?? '').trim()) || first.slot.time;
-  const end = to24Hour(String(last.entry.period_end ?? '').trim()) || last.slot.time;
+  const start = String(first.entry.period_start ?? '').trim() || first.slot.time;
+  const end = String(last.entry.period_end ?? '').trim() || last.slot.time;
   if (start && end && start !== end) return `${start} - ${end}`;
   return end || start;
 };
@@ -1040,59 +1065,24 @@ const CellEmployeeSelect: React.FC<{
   );
 };
 
-// ─── Time Picker Dropdown (24-hour, no AM/PM) ────────────────────────────────
-/** Stored time shape: "HH:mm" (24-hour, zero-padded hour and minutes). */
-const TIME_VALUE_RE = /^\s*(\d{1,2}):(\d{2})\s*$/;
 
 /**
- * Normalise any time value ("3:30 PM", "15:30", ...) to "HH:mm" (24-hour).
- * Returns '' when the value is not a valid time.
+ * Custom 12-hour time picker for the TIME column.
+ * Opens as a dropdown popover (portal to document.body) anchored to the trigger
+ * cell, so opening/closing never shifts row height or column widths.
+ * Three separate selectors: Hour, Minute, AM/PM. Hours are restricted to the
+ * cell's selected shift (Shift 1: 7 AM-3 PM · Shift 2: 4 PM-11 PM · Shift 3:
+ * 12 AM-6 AM), so an out-of-shift time can never be assembled. Confirm writes
+ * the time back to the cell's editable value; no time is hardcoded as a default.
  */
-const to24Hour = (timeValue: string): string => {
-  if (!timeValue) return '';
-  const m24 = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(timeValue);
-  if (m24) {
-    const h = parseInt(m24[1], 10);
-    const mm = m24[2];
-    if (h >= 0 && h <= 23) return `${String(h).padStart(2, '0')}:${mm}`;
-    return '';
-  }
-  const m12 = /^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])\s*$/.exec(timeValue);
-  if (!m12) return '';
-  let h = parseInt(m12[1], 10);
-  const mm = m12[2];
-  const ap = m12[3].toUpperCase();
-  if (h < 1 || h > 12) return '';
-  if (ap === 'AM') {
-    if (h === 12) h = 0;
-  } else if (h !== 12) {
-    h += 12;
-  }
-  return `${String(h).padStart(2, '0')}:${mm}`;
-};
-
-/**
- * Floating 24-hour time picker popover rendered through a portal.
- * Shows hours 00–23 and minutes 00–59 in two columns, no AM/PM anywhere.
- * Flips upward when close to the bottom of the viewport and closes on outside
- * click or Escape.
- */
-const TimePickerDropdown: React.FC<{
+const CellTimePicker: React.FC<{
   isOpen: boolean;
   onToggle: (open: boolean) => void;
-  selected: string; // "HH:mm"
-  onChange: (v: string) => void;
-  triggerRef: React.RefObject<HTMLDivElement | null>;
-}> = ({ isOpen, onToggle, selected, onChange, triggerRef }) => {
-  const [hour, setHour] = useState(() => {
-    const m = /^(\d{2}):(\d{2})$/.exec(selected ?? '');
-    return m ? m[1] : '00';
-  });
-  const [minute, setMinute] = useState(() => {
-    const m = /^(\d{2}):(\d{2})$/.exec(selected ?? '');
-    return m ? m[2] : '00';
-  });
-
+  value: string;
+  shift: string;
+  onConfirm: (time: string) => void;
+}> = ({ isOpen, onToggle, value, shift, onConfirm }) => {
+  const triggerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{
     top?: number;
@@ -1101,10 +1091,51 @@ const TimePickerDropdown: React.FC<{
     width: number;
     maxHeight: number;
     flip: boolean;
-  }>({ left: 0, width: 260, maxHeight: 360, flip: false });
+  }>({ left: 0, width: 210, maxHeight: 220, flip: false });
 
-  const hours = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
-  const minutes = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
+  const allowed = SHIFT_TIME_RANGES[shift ?? '1'] ?? SHIFT_TIME_RANGES['1'];
+  const distinctHours = useMemo(() => {
+    const seen = new Set<number>();
+    return allowed.filter((a) => !seen.has(a.hour) && !!seen.add(a.hour)).map((a) => a.hour);
+  }, [allowed]);
+
+  const periodsFor = (h: number): ('AM' | 'PM')[] =>
+    allowed.filter((a) => a.hour === h).map((a) => a.period);
+
+  const parseCellTime = (v: string): { hour: number; minute: number; period: 'AM' | 'PM' } | null => {
+    // 12-hour format "h:mm AM/PM" (e.g. "7:00 AM").
+    const m12 = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*$/i.exec(v);
+    if (m12) {
+      const h = parseInt(m12[1], 10);
+      const mins = parseInt(m12[2], 10);
+      if (h < 1 || h > 12 || mins < 0 || mins > 59) return null;
+      return { hour: h, minute: mins, period: m12[3].toUpperCase() as 'AM' | 'PM' };
+    }
+    // Legacy 24-hour "HH:mm" (e.g. "15:00").
+    const m24 = /^\s*(\d{1,2}):(\d{2})\s*$/.exec(v);
+    if (m24) {
+      const h = parseInt(m24[1], 10);
+      const mins = parseInt(m24[2], 10);
+      if (h < 0 || h > 23 || mins < 0 || mins > 59) return null;
+      return { hour: h % 12 || 12, minute: mins, period: h < 12 ? 'AM' : 'PM' };
+    }
+    return null;
+  };
+
+  const buildSelection = (): { hour: number; minute: number; period: 'AM' | 'PM' } | null => {
+    const p = parseCellTime(value);
+    return p && allowed.some((a) => a.hour === p.hour && a.period === p.period) ? p : null;
+  };
+
+  const init = buildSelection();
+  const defaultHour = distinctHours[0] ?? null;
+  const [hour, setHour] = useState<number | null>(init?.hour ?? defaultHour);
+  const [minute, setMinute] = useState<number | null>(init?.minute ?? 0);
+  const [period, setPeriod] = useState<'AM' | 'PM' | null>(
+    init?.period ?? (defaultHour != null ? periodsFor(defaultHour)[0] ?? null : null)
+  );
+
+  const isReady = hour != null && minute != null && period != null;
 
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
@@ -1115,41 +1146,53 @@ const TimePickerDropdown: React.FC<{
     }
     const spaceBelow = window.innerHeight - rect.bottom;
     const spaceAbove = rect.top;
-    const flip = spaceBelow < 380 && spaceAbove > spaceBelow;
-    const popoverWidth = 260;
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - popoverWidth - 8));
-    const maxHeight = Math.min(380, Math.max(220, flip ? spaceAbove - 16 : spaceBelow - 16));
-
+    const flip = spaceBelow < 300 && spaceAbove > spaceBelow;
+    const width = 210;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
     setCoords({
       top: flip ? undefined : rect.bottom + 4,
       bottom: flip ? window.innerHeight - rect.top + 4 : undefined,
       left,
-      width: popoverWidth,
-      maxHeight,
+      width,
+      maxHeight: Math.min(260, Math.max(140, flip ? spaceAbove - 16 : spaceBelow - 16)),
       flip,
     });
   }, [onToggle]);
 
+  // (Re)initialize the picker's working selection from the cell's saved time
+  // whenever the picker opens or the shift/time changes. Nothing is pre-filled
+  // when the cell has no valid saved time.
   useEffect(() => {
-    if (!isOpen) {
-      return;
+    if (!isOpen) return;
+    const sel = buildSelection();
+    // Only override the working selection when the cell's saved time is valid
+    // for the current shift. Otherwise keep the in-shift defaults (first
+    // allowed hour, :00, first valid period) so the dropdowns are never blank.
+    if (sel) {
+      setHour(sel.hour);
+      setMinute(sel.minute);
+      setPeriod(sel.period);
     }
     updatePosition();
-    const handleScroll = (e: Event) => {
-      if (popoverRef.current && popoverRef.current.contains(e.target as Node)) {
-        return;
-      }
-      updatePosition();
-    };
+    const handleScroll = () => updatePosition();
     window.addEventListener('resize', updatePosition);
     window.addEventListener('scroll', handleScroll, true);
     return () => {
       window.removeEventListener('resize', updatePosition);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [isOpen, updatePosition]);
+  }, [isOpen, value, allowed, updatePosition, onToggle]);
 
-  // Close on outside click or Escape
+  // Keep AM/PM consistent with the chosen hour within the shift.
+  useEffect(() => {
+    if (hour === null || period === null) return;
+    if (!allowed.some((a) => a.hour === hour && a.period === period)) {
+      const valid = periodsFor(hour);
+      if (valid.length) setPeriod(valid[0]);
+    }
+  }, [hour, period, allowed]);
+
+  // Close on outside click or Escape.
   useEffect(() => {
     if (!isOpen) return;
     const onMouseDown = (e: MouseEvent) => {
@@ -1169,35 +1212,83 @@ const TimePickerDropdown: React.FC<{
     };
   }, [isOpen, onToggle]);
 
-  const pickHour = (h: string) => {
-    setHour(h);
-    onChange(`${h}:${minute}`);
-  };
-  const pickMinute = (m: string) => {
-    setMinute(m);
-    onChange(`${hour}:${m}`);
+  const handleConfirm = () => {
+    if (!isReady) return;
+    onConfirm(`${hour}:${pad(minute)} ${period}`);
+    onToggle(false);
   };
 
-  const colStyle: React.CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    overflowY: 'auto',
-    flex: 1,
-    minWidth: 0,
-  };
+  const rangeLabel = `${allowed[0].hour}:00 ${allowed[0].period} - ${allowed[allowed.length - 1].hour}:00 ${allowed[allowed.length - 1].period}`;
 
-  const itemStyle = (selectedValue: string, value: string): React.CSSProperties => ({
-    padding: '6px 8px',
-    fontSize: '13px',
-    color: value === selectedValue ? '#ffffff' : '#1e293b',
-    backgroundColor: value === selectedValue ? '#2563eb' : 'transparent',
+  const pickerSelectStyle: React.CSSProperties = {
+    width: 52,
+    height: 26,
+    fontSize: 12,
+    fontWeight: 600,
+    backgroundColor: '#ffffff',
+    border: '1px solid #cbd5e1',
+    borderRadius: '4px',
+    color: '#1e293b',
+    padding: '0 4px',
     cursor: 'pointer',
-    userSelect: 'none',
-    textAlign: 'center',
-  });
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
 
   return (
     <div style={{ position: 'relative', width: '100%' }}>
+      <div
+        ref={triggerRef}
+        onClick={() => onToggle(!isOpen)}
+        title={value || 'Click to select time'}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '100%',
+          height: '26px',
+          minHeight: '26px',
+          padding: '0 24px 0 8px',
+          border: `1px solid ${isOpen ? '#2563eb' : '#cbd5e1'}`,
+          borderRadius: '4px',
+          cursor: 'pointer',
+          backgroundColor: '#ffffff',
+          boxShadow: isOpen ? '0 0 0 2px #dbeafe' : 'none',
+          boxSizing: 'border-box',
+          fontSize: '12px',
+          color: value ? C.textMain : '#94a3b8',
+          overflow: 'hidden',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            textAlign: 'center',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {value || <span style={{ color: '#94a3b8' }}>—</span>}
+        </span>
+        <span
+          style={{
+            position: 'absolute',
+            right: '8px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            color: '#94a3b8',
+            fontSize: '11px',
+            pointerEvents: 'none',
+            flexShrink: 0,
+          }}
+        >
+          ▼
+        </span>
+      </div>
+
       {isOpen &&
         createPortal(
           <div
@@ -1212,7 +1303,7 @@ const TimePickerDropdown: React.FC<{
               zIndex: 99999,
               backgroundColor: '#ffffff',
               border: '1px solid #cbd5e1',
-              borderRadius: '8px',
+              borderRadius: '7px',
               boxShadow: '0 12px 32px rgba(15, 23, 42, 0.2), 0 2px 6px rgba(0, 0, 0, 0.08)',
               display: 'flex',
               flexDirection: 'column',
@@ -1220,61 +1311,89 @@ const TimePickerDropdown: React.FC<{
               overflow: 'hidden',
             }}
           >
-            {/* Header showing "HH : MM" */}
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid #f1f5f9', flexShrink: 0 }}>
+              <div
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  color: '#64748b',
+                  marginBottom: '6px',
+                }}
+              >
+                Shift {shift} · {rangeLabel}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                <select
+                  value={hour ?? ''}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setHour(Number.isNaN(v) ? null : v);
+                  }}
+                  style={pickerSelectStyle}
+                >
+                  {distinctHours.map((h) => (
+                    <option key={h} value={h}>
+                      {h}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={minute ?? ''}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setMinute(Number.isNaN(v) ? null : v);
+                  }}
+                  style={pickerSelectStyle}
+                >
+                  {ALL_MINUTES.map((m) => (
+                    <option key={m} value={m}>
+                      {pad(m)}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={period ?? ''}
+                  onChange={(e) => setPeriod(e.target.value as 'AM' | 'PM')}
+                  style={pickerSelectStyle}
+                >
+                  {hour === null ? null : periodsFor(hour).map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
             <div
               style={{
-                padding: '10px 12px',
-                borderBottom: '1px solid #e2e8f0',
-                backgroundColor: '#eff6ff',
-                textAlign: 'center',
+                padding: '8px 10px',
+                borderTop: '1px solid #f1f5f9',
+                display: 'flex',
+                justifyContent: 'flex-end',
                 flexShrink: 0,
+                backgroundColor: '#ffffff',
               }}
             >
-              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a', letterSpacing: '-0.5px' }}>
-                {hour}
-              </span>
-              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a', margin: '0 4px' }}>:</span>
-              <span style={{ fontSize: '24px', fontWeight: 700, color: '#1e3a8a' }}>
-                {minute}
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-              {/* Hours column: 00–23 */}
-              <div style={{ ...colStyle, borderRight: '1px solid #f1f5f9' }}>
-                <div style={{ paddingTop: '4px' }}>
-                  {hours.map((h) => (
-                    <div
-                      key={h}
-                      style={itemStyle(hour, h)}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        pickHour(h);
-                      }}
-                    >
-                      {h}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Minutes column: 00–59 */}
-              <div style={colStyle}>
-                <div style={{ paddingTop: '4px' }}>
-                  {minutes.map((m) => (
-                    <div
-                      key={m}
-                      style={itemStyle(minute, m)}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        pickMinute(m);
-                      }}
-                    >
-                      {m}
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={!isReady}
+                style={{
+                  fontSize: '11.5px',
+                  fontWeight: 600,
+                  color: '#ffffff',
+                  backgroundColor: '#2563eb',
+                  border: 'none',
+                  borderRadius: '4px',
+                  padding: '3px 10px',
+                  cursor: isReady ? 'pointer' : 'not-allowed',
+                  opacity: isReady ? 1 : 0.5,
+                }}
+              >
+                Confirm
+              </button>
             </div>
           </div>,
           document.body
@@ -1283,74 +1402,6 @@ const TimePickerDropdown: React.FC<{
   );
 };
 
-/** 24-hour time cell input. Click opens a dropdown with hours 00–23 and
- *  minutes 00–59 (no AM/PM). The displayed value is always "HH:mm". */
-const CellTimePicker: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const time24 = useMemo(() => to24Hour(value), [value]);
-
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = to24Hour(e.target.value);
-    onChange(v);
-  };
-
-  return (
-    <div
-      ref={triggerRef}
-      style={{
-        position: 'relative',
-        display: 'inline-flex',
-        alignItems: 'center',
-        width: '100%',
-      }}
-    >
-      <input
-        type="text"
-        value={time24}
-        onChange={handleInputChange}
-        onFocus={(e) => focusCellBorder(e, true)}
-        onBlur={(e) => focusCellBorder(e, false)}
-        onClick={(e) => {
-          e.stopPropagation();
-          setIsOpen(true);
-        }}
-        readOnly
-        style={{
-          ...CELL_INPUT_STYLE,
-          color: value ? C.textMain : '#94a3b8',
-          textAlign: 'center',
-          cursor: 'pointer',
-          ...(style ?? {}),
-        }}
-      />
-      <span
-        style={{
-          marginLeft: 'auto',
-          color: '#94a3b8',
-          fontSize: '10px',
-          paddingRight: '4px',
-          flexShrink: 0,
-        }}
-      >
-        ▾
-      </span>
-
-      {isOpen && (
-        <TimePickerDropdown
-          isOpen={isOpen}
-          onToggle={setIsOpen}
-          selected={time24}
-          onChange={(v) => {
-            onChange(v);
-            setIsOpen(false);
-          }}
-          triggerRef={triggerRef}
-        />
-      )}
-    </div>
-  );
-};
 
 /**
  * Small (+) row-add button placed right after the Job Name input, matching the
@@ -1650,6 +1701,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   // Single open dropdown tracker: ensures only one Defects popover is open at a time
   const [openDefectCellKey, setOpenDefectCellKey] = useState<string | null>(null);
 
+  // Single open time-picker cell tracker (works alongside the defects tracker
+  // above so only one cell dropdown is open at a time).
+  const [openTimeCellKey, setOpenTimeCellKey] = useState<string | null>(null);
+
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -1710,7 +1765,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           jobName: entry.bottle_name || entry.job_id || '',
           packType: entry.pack_type || '',
           shift: String(entry.shift || 1),
-          time: to24Hour(entry.entry_time || '') || '',
+          time: entry.entry_time || '',
           pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
           cartons: entry.cartons != null ? String(entry.cartons) : '',
           noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
@@ -1745,7 +1800,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           packType: entry.pack_type || '',
           lotNo: entry.lot_no || '',
           shift: String(entry.shift || 1),
-          time: to24Hour(entry.entry_time || '') || '',
+          time: entry.entry_time || '',
           pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
           cartons: entry.cartons != null ? String(entry.cartons) : '',
           noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
@@ -1895,24 +1950,34 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   /**
    * Pack Type (packing_category) and Pack Size / Pcs-Per-Pack (packing_size)
    * read from the loaded production report (hourly_production), keyed per
-   * machine and Job ID. Used to prefill the Pack Type and Pcs/Pack columns of
-   * both tables from the corresponding production record.
+   * machine and Job ID. Maps each job to all of its available pack types and
+   * the corresponding pcs/pack value for each type.
+   *
+   * Structure: machineNo → jobId → packType → pcsPack
    */
-  const machineJobPacking = useMemo<Record<number, Record<string, { packType: string; pcsPack: string }>>>(
+  const machineJobPackDetails = useMemo<Record<number, Record<string, Record<string, string>>>>(
     () => {
-      const out: Record<number, Record<string, { packType: string; pcsPack: string }>> = {};
+      const out: Record<number, Record<string, Record<string, string>>> = {};
       for (const machineNo of MACHINE_NOS) {
         const byTime = dayHourly[String(machineNo)] ?? {};
-        const map: Record<string, { packType: string; pcsPack: string }> = {};
+        const map: Record<string, Record<string, string>> = {};
         for (const entry of Object.values(byTime)) {
           const jobId = String(entry.job_id ?? '').trim();
-          if (!jobId || map[jobId]) continue;
-          map[jobId] = {
-            packType: Array.isArray(entry.packing_category)
-              ? entry.packing_category.filter(Boolean).join(', ')
-              : String(entry.packing_category ?? ''),
-            pcsPack: entry.packing_size != null ? String(entry.packing_size) : '',
-          };
+          if (!jobId) continue;
+          if (!map[jobId]) map[jobId] = {};
+          const pcsPack = entry.packing_size != null ? String(entry.packing_size) : '';
+          if (Array.isArray(entry.packing_category)) {
+            entry.packing_category.forEach((cat) => {
+              if (cat && map[jobId][cat] === undefined) {
+                map[jobId][cat] = pcsPack;
+              }
+            });
+          } else if (entry.packing_category) {
+            const cat = String(entry.packing_category);
+            if (map[jobId][cat] === undefined) {
+              map[jobId][cat] = pcsPack;
+            }
+          }
         }
         out[machineNo] = map;
       }
@@ -1952,14 +2017,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const extraRowKey = (machineNo: number, extraId: number): string =>
     `${dateKey}|${machineNo}|x|${extraId}`;
 
-  /** Default the minutes of a stored time ("HH:mm") to 00, preserving
-   *  the hour. Returns '' when the value is not a valid time. */
-  const defaultMinutesToZero = (timeValue: string): string => {
-    const match = TIME_VALUE_RE.exec(timeValue);
-    if (!match) return '';
-    return `${match[1]}:00`;
-  };
-
   const addExtraRow = (
     target: 'numbering' | 'sqc',
     machineNo: number,
@@ -1994,7 +2051,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         shift,
         packType,
         pcsPack,
-        time: time || DEFAULT_TIME,
+        time: time,
         // Other fields will fall back to their defaults/baselines when rendered.
       },
     }));
@@ -2130,7 +2187,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           const effectiveShift = parseInt(currentVals.shift ?? shiftFallback, 10) || 1;
           const effectiveTime = (currentVals.time ?? '').trim();
           const effectivePackType = (currentVals.packType ?? '').trim() || null;
-          const effectivePcsPack = currentVals.pcsPack != null && currentVals.pcsPack !== '' ? parseInt(currentVals.pcsPack, 10) : null;
+          const effectivePcsPackRaw = currentVals.pcsPack != null && currentVals.pcsPack !== '' ? parseInt(currentVals.pcsPack, 10) : null;
+          const effectivePcsPack = Number.isNaN(effectivePcsPackRaw) ? null : effectivePcsPackRaw;
           const effectiveCartons = currentVals.cartons ? parseInt(currentVals.cartons, 10) || null : null;
           const effectiveDefectiveBottles = currentVals.noOfBottle ? parseInt(currentVals.noOfBottle, 10) || null : null;
           const effectiveMould = (currentVals.mould ?? '').trim() || null;
@@ -2356,19 +2414,23 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
-        gap: '12px',
+        gap: '32px',
         paddingBottom: '8px',
       }}
     >
-      {/* Save Button — Upper-right corner above the table */}
+      {/* Save Button — Fixed/sticky at top-right so it stays visible while scrolling */}
       <div
         style={{
           display: 'flex',
           justifyContent: 'flex-end',
           alignItems: 'center',
           width: '100%',
-          padding: '0 2px',
+          padding: '0 2px 8px 2px',
           boxSizing: 'border-box',
+          position: 'sticky',
+          top: 0,
+          zIndex: 50,
+          backgroundColor: '#ffffff',
         }}
       >
         <button
@@ -2519,9 +2581,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         // Pack Type and Pcs/Pack are prefilled from the matching
                         // production report record (machine + Job ID).
                         const prodJobId = productionJobIdFor(row);
-                        const prodPacking = machineJobPacking[machineNo]?.[prodJobId];
-                        const basePackType = prodPacking?.packType ?? '';
-                        const basePcsPack = prodPacking?.pcsPack ?? '';
+                        const packDetailsForJob = machineJobPackDetails[machineNo]?.[prodJobId] ?? {};
+                        const availablePackTypes = Object.keys(packDetailsForJob);
+                        const basePackType = availablePackTypes[0] ?? '';
+                        const basePcsPack = basePackType ? packDetailsForJob[basePackType] : '';
                         // Pack Type dropdown options are limited to the packing
                         // types reported for this job on this machine/date.
                         const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
@@ -2557,7 +2620,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(numberingValues, key, 'shift', shiftFallback),
                                       cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
-                                      defaultMinutesToZero(cellValue(numberingValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))
+                                      ''
                                     )
                                   }
                                 />
@@ -2578,7 +2641,16 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             <td style={numCellTd(1, NUMBERING_COLUMNS.length)}>
                               <PackTypeCell
                                 value={cellValue(numberingValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
-                                onChange={(v) => setNumberingCell(key, 'packType', v)}
+                                onChange={(v) => {
+                                  setNumberingCell(key, 'packType', v);
+                                  const pcsPack = packDetailsForJob[v];
+                                  // Only auto-populate PCS/Pack when the selected
+                                  // pack type exists in the Production Report, so
+                                  // existing values are not accidentally cleared.
+                                  if (pcsPack !== undefined) {
+                                    setNumberingCell(key, 'pcsPack', pcsPack);
+                                  }
+                                }}
                                 machineNo={machineNo}
                                 packingTypes={jobPackTypes}
                                 style={NUMBERING_INPUT_STYLE}
@@ -2593,9 +2665,11 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(numberingValues, key, 'time', row.kind === 'extra' ? (row.extra.time || DEFAULT_TIME) : (isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))}
-                                onChange={(v) => setNumberingCell(key, 'time', v)}
-                                style={NUMBERING_INPUT_STYLE}
+                                isOpen={openTimeCellKey === `time|num|${key}`}
+                                onToggle={(open) => setOpenTimeCellKey(open ? `time|num|${key}` : null)}
+                                value={cellValue(numberingValues, key, 'time', '')}
+                                shift={cellValue(numberingValues, key, 'shift', shiftFallback)}
+                                onConfirm={(t) => setNumberingCell(key, 'time', t)}
                               />
                             </td>
                             <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
@@ -2786,9 +2860,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         // Pack Type and Pcs/Pack are prefilled from the matching
                         // production report record (machine + Job ID).
                         const prodJobId = productionJobIdFor(row);
-                        const prodPacking = machineJobPacking[machineNo]?.[prodJobId];
-                        const basePackType = prodPacking?.packType ?? '';
-                        const basePcsPack = prodPacking?.pcsPack ?? '';
+                        const packDetailsForJob = machineJobPackDetails[machineNo]?.[prodJobId] ?? {};
+                        const availablePackTypes = Object.keys(packDetailsForJob);
+                        const basePackType = availablePackTypes[0] ?? '';
+                        const basePcsPack = basePackType ? packDetailsForJob[basePackType] : '';
                         // Pack Type dropdown options are limited to the packing
                         // types reported for this job on this machine/date.
                         const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
@@ -2824,7 +2899,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(sqcValues, key, 'shift', shiftFallback),
                                       cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
-                                      defaultMinutesToZero(cellValue(sqcValues, key, 'time', isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))
+                                      ''
                                     )
                                   }
                                 />
@@ -2851,15 +2926,26 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(2, SQC_COLUMNS.length)}>
                               <CellTimePicker
-                                value={cellValue(sqcValues, key, 'time', row.kind === 'extra' ? (row.extra.time || DEFAULT_TIME) : (isDbRow ? (row.dbEntry.entry_time || DEFAULT_TIME) : DEFAULT_TIME))}
-                                onChange={(v) => setSqcCell(key, 'time', v)}
-                                style={SQC_INPUT_STYLE}
+                                isOpen={openTimeCellKey === `time|sqc|${key}`}
+                                onToggle={(open) => setOpenTimeCellKey(open ? `time|sqc|${key}` : null)}
+                                value={cellValue(sqcValues, key, 'time', '')}
+                                shift={cellValue(sqcValues, key, 'shift', shiftFallback)}
+                                onConfirm={(t) => setSqcCell(key, 'time', t)}
                               />
                             </td>
                             <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
                               <PackTypeCell
                                 value={cellValue(sqcValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
-                                onChange={(v) => setSqcCell(key, 'packType', v)}
+                                onChange={(v) => {
+                                  setSqcCell(key, 'packType', v);
+                                  const pcsPack = packDetailsForJob[v];
+                                  // Only auto-populate PCS/Pack when the selected
+                                  // pack type exists in the Production Report, so
+                                  // existing values are not accidentally cleared.
+                                  if (pcsPack !== undefined) {
+                                    setSqcCell(key, 'pcsPack', pcsPack);
+                                  }
+                                }}
                                 machineNo={machineNo}
                                 packingTypes={jobPackTypes}
                                 style={SQC_INPUT_STYLE}
