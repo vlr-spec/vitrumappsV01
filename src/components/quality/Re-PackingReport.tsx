@@ -5,9 +5,9 @@
  * page background, white machine cards with subtle borders / rounded corners
  * / minimal shadows, and blue (#2563EB) as the primary accent.
  *   • NUMBERING (default): 4 machine tables with columns
- *     Job Name | Pack Type | Shift | Time | Pcs/Pack | Cartons | Defective Bottles | Lot No. | Defects | Mould | Section No. | Checker Name | Remarks
+ *     Job Name | Pack Type | Shift | Time | Pack Size | Cartons | Defective Bottles | Lot No. | Defects | Mould | Section No. | Checker Name | Remarks
  *   • SQC/QC HOLD: 4 machine tables with columns
- *     Job Name | Shift | Time | Pack Type | Lot No. | Pcs/Pack | Cartons | Defective Bottles | Defects | Mould | Section | Checker Name | Remarks
+ *     Job Name | Shift | Time | Pack Type | Lot No. | Pack Size | Cartons | Defective Bottles | Defects | Mould | Section | Checker Name | Remarks
  *
  * Every column of every data row is an editable ERP-styled input (text,
  * number, dropdown or 12-hour AM/PM time picker where applicable), and each row
@@ -95,7 +95,7 @@ const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
 
 const NUMBERING_COLUMNS = [
-  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pcs/Pack', 'Cartons', 'Bottle',
+  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pack Size', 'Cartons', 'Bottle',
   'Defects', 'Mould', 'SECTION', 'Checker Name',
   'Remarks',
 ];
@@ -106,7 +106,7 @@ const NUMBERING_COL_WIDTHS: Record<string, string> = {
   'Pack Type': '70px',
   'Shift': '60px',
   'Time': '70px',
-  'Pcs/Pack': '60px',
+  'Pack Size': '60px',
   'Cartons': '60px',
   'Bottle': '75px',
   'Defects': '200px',
@@ -123,7 +123,7 @@ const NUMBERING_COL_PERCENTS: Record<string, string> = {
   'Pack Type': '6.0%',
   'Shift': '5.0%',
   'Time': '8%',
-  'Pcs/Pack': '5.0%',
+  'Pack Size': '5.0%',
   'Cartons': '5.0%',
   'Defective Bottles': '7.5%',
   'Defects': '18.0%',
@@ -139,7 +139,7 @@ const NUMBERING_SECTION_ENDS = new Set([6, 9]);
 const NUMBERING_SECTION_DIVIDER = '2px solid #cbd5e1';
 
 const SQC_COLUMNS = [
-  'Job Name', 'Shift', 'Time', 'Pack Type', 'Lot No.', 'Pcs/Pack', 'Cartons',
+  'Job Name', 'Shift', 'Time', 'Pack Type', 'Lot No.', 'Pack Size', 'Cartons',
   'Bottle', 'Defects', 'Mould', 'Section', 'Checker Name',
   'Remarks',
 ];
@@ -152,7 +152,7 @@ const SQC_COL_PERCENTS: Record<string, string> = {
   'Job Name': '13.0%',
   'Pack Type': '5.5%',
   'Lot No.': '5.5%',
-  'Pcs/Pack': '5.0%',
+  'Pack Size': '5.0%',
   'Cartons': '5.0%',
   'Defective Bottles': '7.0%',
   'Defects': '16.0%',
@@ -169,7 +169,7 @@ const SQC_COL_WIDTHS: Record<string, string> = {
   'Job Name': '160px',
   'Pack Type': '70px',
   'Lot No.': '70px',
-  'Pcs/Pack': '60px',
+  'Pack Size': '60px',
   'Cartons': '60px',
   'Bottle': '75px',
   'Defects': '190px',
@@ -190,8 +190,8 @@ const TABLE_MIN_WIDTH = '1220px';
 // ─── Shift-based 12-hour time windows for the TIME column picker ────────────
 /** Valid (hour, AM/PM) pairs per shift. Within a shift each hour pairs with
  *  exactly one period, so the picker can never assemble an out-of-shift time:
- *  Shift 1: 7:00 AM - 3:00 PM · Shift 2: 4:00 PM - 11:00 PM · Shift 3:
- *  12:00 AM - 6:00 AM. */
+ *  Shift 1: 7:00 AM - 3:00 PM · Shift 2: 3:00 PM - 11:00 PM · Shift 3:
+ *  11:00 PM - 7:00 AM (crosses midnight). */
 const SHIFT_TIME_RANGES: Record<string, { hour: number; period: 'AM' | 'PM' }[]> = {
   '1': [
     { hour: 7, period: 'AM' }, { hour: 8, period: 'AM' }, { hour: 9, period: 'AM' },
@@ -199,14 +199,14 @@ const SHIFT_TIME_RANGES: Record<string, { hour: number; period: 'AM' | 'PM' }[]>
     { hour: 1, period: 'PM' }, { hour: 2, period: 'PM' }, { hour: 3, period: 'PM' },
   ],
   '2': [
-    { hour: 4, period: 'PM' }, { hour: 5, period: 'PM' }, { hour: 6, period: 'PM' },
-    { hour: 7, period: 'PM' }, { hour: 8, period: 'PM' }, { hour: 9, period: 'PM' },
-    { hour: 10, period: 'PM' }, { hour: 11, period: 'PM' },
+    { hour: 3, period: 'PM' }, { hour: 4, period: 'PM' }, { hour: 5, period: 'PM' },
+    { hour: 6, period: 'PM' }, { hour: 7, period: 'PM' }, { hour: 8, period: 'PM' },
+    { hour: 9, period: 'PM' }, { hour: 10, period: 'PM' }, { hour: 11, period: 'PM' },
   ],
   '3': [
-    { hour: 12, period: 'AM' }, { hour: 1, period: 'AM' }, { hour: 2, period: 'AM' },
-    { hour: 3, period: 'AM' }, { hour: 4, period: 'AM' }, { hour: 5, period: 'AM' },
-    { hour: 6, period: 'AM' },
+    { hour: 11, period: 'PM' }, { hour: 12, period: 'AM' }, { hour: 1, period: 'AM' },
+    { hour: 2, period: 'AM' }, { hour: 3, period: 'AM' }, { hour: 4, period: 'AM' },
+    { hour: 5, period: 'AM' }, { hour: 6, period: 'AM' }, { hour: 7, period: 'AM' },
   ],
 };
 
@@ -1908,31 +1908,35 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   }, [dayHourly]);
 
   /**
-   * All unique Pack Types (packing_category) reported in the Hourly Production
-   * Report for each machine + Job ID on the selected date. The Pack Type
-   * dropdown shows only these job-specific options — never the full master
-   * list or unrelated packing types.
+   * Pack Type (packing_category) and Pack Size (packing_size) read from the
+   * Hourly Production Report machine-wise. For each machine on the selected
+   * date, the available Pack Types come from `packing_category` and the Pack
+   * Size comes from `packing_size`. These values are reused in the Numbering
+   * and SQC/QC HOLD tables and saved exactly as selected to the database.
+   *
+   * Structure: machineNo → { packTypes: string[]; packSize: string }
    */
-  const machineJobPackTypes = useMemo<Record<number, Record<string, string[]>>>(
+  const machinePackInfo = useMemo<Record<number, { packTypes: string[]; packSize: string }>>(
     () => {
-      const out: Record<number, Record<string, string[]>> = {};
+      const out: Record<number, { packTypes: string[]; packSize: string }> = {};
       for (const machineNo of MACHINE_NOS) {
         const byTime = dayHourly[String(machineNo)] ?? {};
-        const map: Record<string, string[]> = {};
-        for (const entry of Object.values(byTime)) {
-          const jobId = String(entry.job_id ?? '').trim();
-          if (!jobId) continue;
-          if (!map[jobId]) map[jobId] = [];
+        const packTypesSet = new Set<string>();
+        let packSize = '';
+        for (const [time, entry] of Object.entries(byTime)) {
           if (Array.isArray(entry.packing_category)) {
-            entry.packing_category.forEach((cat) => {
-              if (cat && !map[jobId].includes(cat)) map[jobId].push(cat);
+            entry.packing_category.forEach((c) => {
+              if (c && c.trim()) packTypesSet.add(c.trim());
             });
           }
+          if (entry.packing_size != null && !packSize) {
+            packSize = String(entry.packing_size);
+          }
         }
-        for (const jobId of Object.keys(map)) {
-          map[jobId].sort();
-        }
-        out[machineNo] = map;
+        out[machineNo] = {
+          packTypes: Array.from(packTypesSet).sort(),
+          packSize,
+        };
       }
       return out;
     },
@@ -1946,45 +1950,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     }
     return out;
   }, [dayHourly]);
-
-  /**
-   * Pack Type (packing_category) and Pack Size / Pcs-Per-Pack (packing_size)
-   * read from the loaded production report (hourly_production), keyed per
-   * machine and Job ID. Maps each job to all of its available pack types and
-   * the corresponding pcs/pack value for each type.
-   *
-   * Structure: machineNo → jobId → packType → pcsPack
-   */
-  const machineJobPackDetails = useMemo<Record<number, Record<string, Record<string, string>>>>(
-    () => {
-      const out: Record<number, Record<string, Record<string, string>>> = {};
-      for (const machineNo of MACHINE_NOS) {
-        const byTime = dayHourly[String(machineNo)] ?? {};
-        const map: Record<string, Record<string, string>> = {};
-        for (const entry of Object.values(byTime)) {
-          const jobId = String(entry.job_id ?? '').trim();
-          if (!jobId) continue;
-          if (!map[jobId]) map[jobId] = {};
-          const pcsPack = entry.packing_size != null ? String(entry.packing_size) : '';
-          if (Array.isArray(entry.packing_category)) {
-            entry.packing_category.forEach((cat) => {
-              if (cat && map[jobId][cat] === undefined) {
-                map[jobId][cat] = pcsPack;
-              }
-            });
-          } else if (entry.packing_category) {
-            const cat = String(entry.packing_category);
-            if (map[jobId][cat] === undefined) {
-              map[jobId][cat] = pcsPack;
-            }
-          }
-        }
-        out[machineNo] = map;
-      }
-      return out;
-    },
-    [dayHourly]
-  );
 
   const runJobName = useCallback(
     (run: JobRun): string => bottleNameFor(run.bottleId, bottles),
@@ -2279,6 +2244,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 alert(`Please select a Time for ${effectiveJobName || 'entry'} on Machine ${machineNo} before saving.`);
                 return;
               }
+              if (!effectivePackType) {
+                alert(`Please select a Pack Type for ${effectiveJobName || 'entry'} on Machine ${machineNo} before saving.`);
+                return;
+              }
               const updateObj: any = {
                 entry_id: entryId,
                 entry_ids: row.kind === 'db' ? (row.dbEntry.entry_ids || [entryId]) : [entryId],
@@ -2286,10 +2255,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 machine_no: machineNo,
                 job_id: jobId,
                 bottle_id: bottleId,
-                pack_type: effectivePackType,
                 shift: effectiveShift,
                 entry_time: effectiveTime,
-                pcs_per_pack: effectivePcsPack,
                 cartons: effectiveCartons,
                 defective_bottles: effectiveDefectiveBottles,
                 defect_id: defectId,
@@ -2299,6 +2266,18 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 checker_id: checkerId,
                 remarks: effectiveRemarks,
               };
+              // Only persist Pack Type / PCS-Pack when the user actually changed
+              // them versus the persisted baseline. This keeps existing saved
+              // values unchanged on unrelated subsequent saves and avoids
+              // overwriting them with empty/default values. For brand-new rows
+              // (no baseline) the values are always sent.
+              const baselineForRow = baselineStore[key];
+              if (!baselineForRow || (currentVals.packType && currentVals.packType !== baselineForRow.packType)) {
+                updateObj.pack_type = effectivePackType;
+              }
+              if (!baselineForRow || (currentVals.pcsPack && currentVals.pcsPack !== baselineForRow.pcsPack)) {
+                updateObj.pcs_per_pack = effectivePcsPack;
+              }
               if (!isNum) updateObj.lot_no = effectiveLotNo;
               updates.push(updateObj);
             }
@@ -2320,6 +2299,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
             if (hasUserEnteredData) {
               if (!effectiveTime) {
                 alert(`Please select a Time for ${effectiveJobName || 'new entry'} on Machine ${machineNo} before saving.`);
+                return;
+              }
+              if (!effectivePackType) {
+                alert(`Please select a Pack Type for ${effectiveJobName || 'new entry'} on Machine ${machineNo} before saving.`);
                 return;
               }
               const insertObj: any = {
@@ -2578,16 +2561,18 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type and Pcs/Pack are prefilled from the matching
-                        // production report record (machine + Job ID).
-                        const prodJobId = productionJobIdFor(row);
-                        const packDetailsForJob = machineJobPackDetails[machineNo]?.[prodJobId] ?? {};
-                        const availablePackTypes = Object.keys(packDetailsForJob);
-                        const basePackType = availablePackTypes[0] ?? '';
-                        const basePcsPack = basePackType ? packDetailsForJob[basePackType] : '';
-                        // Pack Type dropdown options are limited to the packing
-                        // types reported for this job on this machine/date.
-                        const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
+                        // Pack Type and Pack Size come from the Hourly Production
+                        // Report machine-wise — the same values are reused in the
+                        // table and saved exactly as selected to the database.
+                        const packInfo = machinePackInfo[machineNo] ?? { packTypes: [], packSize: '' };
+                        const jobPackTypes = packInfo.packTypes;
+                        // For saved DB rows, display the persisted Pack Type.
+                        // New rows start blank — the user must select one.
+                        const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
+                        // Pack Size is only shown when a Pack Type is selected
+                        // (auto-filled from Production's pack_size). No auto-fill
+                        // for new rows.
+                        const basePackSize = '';
                         const anchor =
                           row.kind === 'extra'
                             ? `x:${row.extra.id}`
@@ -2619,7 +2604,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(numberingValues, key, 'jobName', jobNameFallback),
                                       cellValue(numberingValues, key, 'shift', shiftFallback),
                                       cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
-                                      cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
+                                      cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
                                       ''
                                     )
                                   }
@@ -2640,15 +2625,23 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(1, NUMBERING_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(numberingValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
+                                // For saved DB rows, fall back to the persisted
+                                // pack_type so a saved value is never replaced by
+                                // a production-report default. For extra rows use
+                                // the carried-forward value; for run rows use the
+                                // production-report default.
+                                value={cellValue(
+                                  numberingValues,
+                                  key,
+                                  'packType',
+                                  isDbRow ? (row.dbEntry.pack_type || '') : row.kind === 'extra' ? row.extra.packType : basePackType
+                                )}
                                 onChange={(v) => {
                                   setNumberingCell(key, 'packType', v);
-                                  const pcsPack = packDetailsForJob[v];
-                                  // Only auto-populate PCS/Pack when the selected
-                                  // pack type exists in the Production Report, so
-                                  // existing values are not accidentally cleared.
-                                  if (pcsPack !== undefined) {
-                                    setNumberingCell(key, 'pcsPack', pcsPack);
+                                  // Auto-fill Pack Size from Production's pack_size
+                                  // for the selected machine.
+                                  if (v && packInfo.packSize) {
+                                    setNumberingCell(key, 'pcsPack', packInfo.packSize);
                                   }
                                 }}
                                 machineNo={machineNo}
@@ -2674,7 +2667,21 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(numberingValues, key, 'pcsPack', row.kind === 'extra' ? row.extra.pcsPack : basePcsPack)}
+                                // For saved DB rows, fall back to the persisted
+                                // pcs_per_pack so a saved value is never replaced
+                                // by a production-report default.
+                                value={cellValue(
+                                  numberingValues,
+                                  key,
+                                  'pcsPack',
+                                  isDbRow
+                                    ? row.dbEntry.pcs_per_pack != null
+                                      ? String(row.dbEntry.pcs_per_pack)
+                                      : ''
+                                    : row.kind === 'extra'
+                                    ? row.extra.pcsPack
+                                    : basePackSize
+                                )}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
@@ -2857,16 +2864,18 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type and Pcs/Pack are prefilled from the matching
-                        // production report record (machine + Job ID).
-                        const prodJobId = productionJobIdFor(row);
-                        const packDetailsForJob = machineJobPackDetails[machineNo]?.[prodJobId] ?? {};
-                        const availablePackTypes = Object.keys(packDetailsForJob);
-                        const basePackType = availablePackTypes[0] ?? '';
-                        const basePcsPack = basePackType ? packDetailsForJob[basePackType] : '';
-                        // Pack Type dropdown options are limited to the packing
-                        // types reported for this job on this machine/date.
-                        const jobPackTypes = machineJobPackTypes[machineNo]?.[prodJobId] ?? [];
+                        // Pack Type and Pack Size come from the Hourly Production
+                        // Report machine-wise — the same values are reused in the
+                        // table and saved exactly as selected to the database.
+                        const packInfo = machinePackInfo[machineNo] ?? { packTypes: [], packSize: '' };
+                        const jobPackTypes = packInfo.packTypes;
+                        // For saved DB rows, display the persisted Pack Type.
+                        // New rows start blank — the user must select one.
+                        const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
+                        // Pack Size is only shown when a Pack Type is selected
+                        // (auto-filled from Production's pack_size). No auto-fill
+                        // for new rows.
+                        const basePackSize = '';
                         const anchor =
                           row.kind === 'extra'
                             ? `x:${row.extra.id}`
@@ -2898,7 +2907,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(sqcValues, key, 'jobName', jobNameFallback),
                                       cellValue(sqcValues, key, 'shift', shiftFallback),
                                       cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
-                                      cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePcsPack),
+                                      cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
                                       ''
                                     )
                                   }
@@ -2935,15 +2944,21 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
                               <PackTypeCell
-                                value={cellValue(sqcValues, key, 'packType', row.kind === 'extra' ? row.extra.packType : basePackType)}
+                                // For saved DB rows, fall back to the persisted
+                                // pack_type so a saved value is never replaced by
+                                // a production-report default.
+                                value={cellValue(
+                                  sqcValues,
+                                  key,
+                                  'packType',
+                                  isDbRow ? (row.dbEntry.pack_type || '') : row.kind === 'extra' ? row.extra.packType : basePackType
+                                )}
                                 onChange={(v) => {
                                   setSqcCell(key, 'packType', v);
-                                  const pcsPack = packDetailsForJob[v];
-                                  // Only auto-populate PCS/Pack when the selected
-                                  // pack type exists in the Production Report, so
-                                  // existing values are not accidentally cleared.
-                                  if (pcsPack !== undefined) {
-                                    setSqcCell(key, 'pcsPack', pcsPack);
+                                  // Auto-fill Pack Size from Production's pack_size
+                                  // for the selected machine.
+                                  if (v && packInfo.packSize) {
+                                    setSqcCell(key, 'pcsPack', packInfo.packSize);
                                   }
                                 }}
                                 machineNo={machineNo}
@@ -2960,7 +2975,21 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(5, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'pcsPack', row.kind === 'extra' ? row.extra.pcsPack : basePcsPack)}
+                                // For saved DB rows, fall back to the persisted
+                                // pcs_per_pack so a saved value is never replaced
+                                // by a production-report default.
+                                value={cellValue(
+                                  sqcValues,
+                                  key,
+                                  'pcsPack',
+                                  isDbRow
+                                    ? row.dbEntry.pcs_per_pack != null
+                                      ? String(row.dbEntry.pcs_per_pack)
+                                      : ''
+                                    : row.kind === 'extra'
+                                    ? row.extra.pcsPack
+                                    : basePackSize
+                                )}
                                 onChange={(v) => setSqcCell(key, 'pcsPack', v)}
                                 style={SQC_INPUT_STYLE}
                               />
