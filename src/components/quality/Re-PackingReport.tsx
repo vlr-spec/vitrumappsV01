@@ -95,7 +95,7 @@ const toIso = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.
 const toDisplay = (d: Date) => `${pad(d.getDate())}-${pad(d.getMonth() + 1)}-${d.getFullYear()}`;
 
 const NUMBERING_COLUMNS = [
-  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pack Size', 'Cartons', 'Bottle',
+  'Job Name', 'Pack Type', 'Shift', 'Time', 'Pack Size', 'Cartons',
   'Defects', 'Mould', 'SECTION', 'Checker Name',
   'Remarks',
 ];
@@ -108,7 +108,6 @@ const NUMBERING_COL_WIDTHS: Record<string, string> = {
   'Time': '70px',
   'Pack Size': '60px',
   'Cartons': '60px',
-  'Bottle': '75px',
   'Defects': '200px',
   'Mould': '70px',
   'SECTION': '70px',
@@ -527,9 +526,9 @@ const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void; 
       ...(style ?? {}),
     }}
   >
-    <option value="1">Shift 1</option>
-    <option value="2">Shift 2</option>
-    <option value="3">Shift 3</option>
+    <option value="1">1</option>
+    <option value="2">2</option>
+    <option value="3">3</option>
   </select>
 );
 
@@ -2693,14 +2692,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
+
                             <td style={numCellTd(6, NUMBERING_COLUMNS.length)}>
-                              <CellNumInput
-                                value={cellValue(numberingValues, key, 'noOfBottle', isDbRow && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
-                                onChange={(v) => setNumberingCell(key, 'noOfBottle', v)}
-                                style={NUMBERING_INPUT_STYLE}
-                              />
-                            </td>
-                            <td style={numCellTd(7, NUMBERING_COLUMNS.length)}>
                               <CellDefectsDropdown
                                 cellKey={`num|${key}`}
                                 activeOpenKey={openDefectCellKey}
@@ -2711,14 +2704,14 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 isLoading={loadingDefects}
                               />
                             </td>
-                            <td style={numCellTd(8, NUMBERING_COLUMNS.length)}>
+                            <td style={numCellTd(7, NUMBERING_COLUMNS.length)}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'mould', isDbRow ? (row.dbEntry.mould || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'mould', v)}
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(9, NUMBERING_COLUMNS.length)}>
+                            <td style={numCellTd(8, NUMBERING_COLUMNS.length)}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'sectionNo', isDbRow ? (row.dbEntry.section_no || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
@@ -2726,7 +2719,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(10, NUMBERING_COLUMNS.length, 'left')}>
+                            <td style={numCellTd(9, NUMBERING_COLUMNS.length, 'left')}>
                               <CellEmployeeSelect
                                 value={cellValue(numberingValues, key, 'checkerName', isDbRow ? (row.dbEntry.checker_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'checkerName', v)}
@@ -2736,7 +2729,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 style={NUMBERING_INPUT_STYLE}
                               />
                             </td>
-                            <td style={numCellTd(11, NUMBERING_COLUMNS.length, 'center')}>
+                            <td style={numCellTd(10, NUMBERING_COLUMNS.length, 'center')}>
                               <CellTextInput
                                 value={cellValue(numberingValues, key, 'qaShiftEx', isDbRow ? (row.dbEntry.remarks || row.dbEntry.qa_shift_ex_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'qaShiftEx', v)}
