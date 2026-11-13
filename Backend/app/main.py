@@ -108,6 +108,39 @@ def _ensure_hourly_production_is_locked_column() -> None:
         print(f"Warning: could not add {table_name}.is_locked column: {exc}")
 
 
+def _ensure_hourly_production_type2_packing_columns() -> None:
+    """Adds the independent TYPE 2 packing columns when the database predates them.
+
+    TYPE 1 keeps using packing_category / packing_size / cartons unchanged. The
+    TYPE 2 columns are nullable and are only read/written by the Hourly
+    Production Report, so pre-existing rows simply have no TYPE 2 entry.
+    """
+    schema = settings.hpr_schema
+    table_name = "hourly_production"
+    additions = {
+        "packing_category_2": "VARCHAR(100)",
+        "packing_size_2": "INTEGER",
+        "cartons_2": "INTEGER",
+    }
+    try:
+        columns = {c["name"] for c in inspect(engine).get_columns(table_name, schema=schema or None)}
+    except Exception as exc:
+        print(f"Warning: could not inspect {table_name} columns: {exc}")
+        return
+
+    missing = {name: ddl for name, ddl in additions.items() if name not in columns}
+    if not missing:
+        return
+
+    target = f'"{schema}"."{table_name}"' if schema else table_name
+    try:
+        with engine.begin() as connection:
+            for name, ddl in missing.items():
+                connection.execute(text(f"ALTER TABLE {target} ADD COLUMN {name} {ddl}"))
+    except Exception as exc:
+        print(f"Warning: could not add TYPE 2 packing columns to {table_name}: {exc}")
+
+
 def initialize_database() -> None:
     if settings.production_schema:
         with engine.begin() as connection:
@@ -122,6 +155,7 @@ def initialize_database() -> None:
     _ensure_hourly_production_weight_efficiency_column()
     _ensure_hourly_production_split_group_column()
     _ensure_hourly_production_is_locked_column()
+    _ensure_hourly_production_type2_packing_columns()
     # Safe no-op against the production Postgres (auth tables already exist);
     # creates a local sqlite fallback so local development still works.
     AuthBase.metadata.create_all(bind=engine)

@@ -970,6 +970,87 @@ const buildLayerOutTimelineForDateMachine = (
   return { orderedKeys, slots: buildLayerOutTimeline(orderedKeys, layerOut, carryIn) };
 };
 
+interface ProductionTimeSlot {
+  start: string;
+  end: string;
+  startMinutes: number;
+  endMinutes: number;
+  durationMinutes: number;
+}
+
+/**
+ * Continuous Production Time — independent of the Packing Timeline.
+ *
+ * Production Time advances in one-hour steps from the real first interval's
+ * start (which already includes any previous-day Lehr Out carry-in). It never
+ * restarts at a scheduled shift start: each row begins exactly where the
+ * previous row ended, so the sequence also crosses midnight naturally.
+ *
+ * At the final row of a shift, an explicitly entered Lehr Out value is used as
+ * that row's real end (the same Lehr Out end the Packing Timeline computes),
+ * and the next shift therefore starts from that exact minute. When no Lehr Out
+ * value is entered, Production Time simply continues its one-hour sequence
+ * across the shift boundary. Minute positions (not formatted labels) are used
+ * internally, so AM/PM and date rollover are handled without gaps or overlaps.
+ */
+const buildContinuousProductionTimeline = (
+  orderedKeys: string[],
+  timelineSlots: Record<string, LayerOutSlot>,
+  shiftIdxByKey: Record<string, number>,
+  layerOut: LayerOutValueMap,
+): Record<string, ProductionTimeSlot> => {
+  const out: Record<string, ProductionTimeSlot> = {};
+  if (orderedKeys.length === 0) return out;
+
+  let previousEnd: number | null = null;
+  orderedKeys.forEach((key, index) => {
+    const slot = timelineSlots[key];
+    const keyMinutes = toTimelineMinutes(key);
+    const actualStart = slot?.startMinutes
+      ?? (keyMinutes !== null ? keyMinutes - 60 : 0);
+    const startMinutes = index === 0 ? actualStart : (previousEnd ?? actualStart);
+    let endMinutes = startMinutes + 60;
+
+    // Only an explicitly entered Lehr Out adjusts a shift boundary. With no
+    // Lehr Out (0/empty), the continuous one-hour sequence runs straight
+    // through the scheduled shift change instead of snapping to it.
+    const shiftIdx = shiftIdxByKey[key] ?? 0;
+    const nextKey = orderedKeys[index + 1];
+    const isLastOfShift = !nextKey || (shiftIdxByKey[nextKey] ?? 0) !== shiftIdx;
+    const shiftLayerOut = layerOut[shiftIdx + 1] ?? 0;
+    if (isLastOfShift && shiftLayerOut > 0) {
+      const actualEnd = slot?.endMinutes;
+      if (actualEnd !== undefined && Number.isFinite(actualEnd) && actualEnd > startMinutes) {
+        endMinutes = actualEnd;
+      }
+    }
+
+    out[key] = {
+      start: formatTimelineMinutes(startMinutes),
+      end: formatTimelineMinutes(endMinutes),
+      startMinutes,
+      endMinutes,
+      durationMinutes: Math.max(0, endMinutes - startMinutes),
+    };
+    previousEnd = endMinutes;
+  });
+
+  return out;
+};
+
+/** Full production interval label, always keeping AM/PM on both ends when the
+ *  interval crosses noon/midnight; same-period intervals stay compact so the
+ *  existing Production Time column width is preserved. */
+const formatProductionIntervalLabel = (start: string, end: string): string => {
+  const sm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(start);
+  const em = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(end);
+  if (!sm || !em) return `${start} - ${end}`;
+  const startPeriod = sm[2].toUpperCase();
+  const endPeriod = em[2].toUpperCase();
+  if (startPeriod === endPeriod) return `${sm[1]} - ${em[1]} ${endPeriod}`;
+  return `${sm[1]} ${startPeriod} - ${em[1]} ${endPeriod}`;
+};
+
 /**
  * A saved row's real period duration (minutes) read back from the period
  * labels the backend re-emits for it (period_start / period_end — derived from
@@ -1047,31 +1128,61 @@ const layerOutInputsFromSavedPeriods = (
 
 type DefectGroup = { group: 'Critical' | 'Major' | 'Minor'; items: string[] };
 
-const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
-  const ps = parseInt(e?.packing_size ?? '');
-  const ct = parseInt(e?.cartons ?? '');
-  // Zero cartons is a real value: display 0 bottles instead of blank. Blank or
-  // invalid cartons still leave the cell empty.
-  return ps > 0 && ct >= 0 ? String(ps * ct) : '';
+const hasMonitorData = (e?: QualityHourlyEntry | null): boolean =>
+  hasMeaningfulData(e)
+  || (e?.packing_category_2?.length ?? 0) > 0
+  || !!e?.packing_size_2
+  || !!e?.cartons_2;
+
+/**
+ * Bottles produced by one packaging group. Returns null when that group has no
+ * usable Pack Size/Cartons entry, so an empty group contributes 0 without a
+ * blank input ever becoming NaN (or being mistaken for a real zero entry).
+ * Zero cartons is a real value: Pack Size 120 + Cartons 0 = 0 bottles.
+ */
+const packagingBottles = (packSizeRaw?: string, cartonsRaw?: string): number | null => {
+  const packSize = parseInt(packSizeRaw ?? '');
+  const cartons = parseInt(cartonsRaw ?? '');
+  if (Number.isFinite(packSize) && packSize > 0 && Number.isFinite(cartons) && cartons >= 0) {
+    return packSize * cartons;
+  }
+  return null;
 };
 
 /**
- * Efficiency % of an hourly row = actual bottles (packing size × cartons)
+ * Combined production for the row: TYPE 1 + TYPE 2. An empty group contributes
+ * zero; when neither group has a usable entry the row has no calculated total
+ * yet (null), preserving the previous blank-cell behaviour.
+ */
+const calcTotalBottlesInNos = (e?: QualityHourlyEntry): number | null => {
+  const type1 = packagingBottles(e?.packing_size, e?.cartons);
+  const type2 = packagingBottles(e?.packing_size_2, e?.cartons_2);
+  if (type1 === null && type2 === null) return null;
+  return (type1 ?? 0) + (type2 ?? 0);
+};
+
+const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
+  const total = calcTotalBottlesInNos(e);
+  return total === null ? '' : String(total);
+};
+
+/**
+ * Efficiency % of an hourly row = combined actual bottles (TYPE 1 + TYPE 2)
  * ÷ that row's theoretical "As Per Speed" bottles × 100, where the theoretical
  * quantity uses the machine's own Gob count (see calculateTheoreticalBottles)
  * scaled by the row's actual period duration. Hourly rows keep duration 1
  * (unchanged result); split-affected rows use (period_end − period_start).
  */
 const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1): string => {
-  if (!e?.bottle_id || !e.packing_size || !e.cartons) return '';
-  const packingSize = parseInt(e.packing_size);
-  const cartons = parseInt(e.cartons);
-  const bottlesN = packingSize * cartons;
+  if (!e?.bottle_id) return '';
+  const bottlesN = calcTotalBottlesInNos(e);
+  if (bottlesN === null) return '';
   const speed = parseFloat(e.speed_per_min);
-  // Zero cartons means zero actual bottles, so the row shows 0% instead of a
-  // blank cell. This also gives the row a real 0 to contribute to the summary
-  // average, matching the zero-carton rule used by the production reports.
-  if (cartons === 0 && packingSize > 0) return '0';
+  // A combined zero (e.g. one group explicitly has zero cartons) means zero
+  // actual bottles, so the row shows 0% instead of a blank cell. This also
+  // gives the row a real 0 to contribute to the summary average, matching the
+  // zero-carton rule used by the production reports.
+  if (bottlesN === 0) return '0';
   // Actual row duration drives the expected production. A zero/invalid
   // duration or a missing speed has no meaningful expected output, so the
   // efficiency is left blank instead of dividing by zero or showing NaN.
@@ -1575,8 +1686,10 @@ const RemarksField: React.FC<{
 // cached), so typing in one row only re-renders that row instead of all 24.
 const QualityTimeRow = React.memo<{
   time: string;
-  /** Text shown in the Time column (full interval, e.g. "9:00 - 10:00 AM" or "3:00 - 3:34 PM"). */
+  /** Text shown in the Packing Timeline column (full interval, e.g. "9:00 - 10:00 AM" or "3:00 - 3:34 PM"). */
   displayTime?: string;
+  /** Independent continuous Production Time interval for this row. */
+  productionTime?: string;
   /** True for a manually inserted split row (key not in PRODUCTION_TIMES). */
   isSplitRow?: boolean;
   /** False when the row's displayed period cannot host a split point. */
@@ -1633,6 +1746,7 @@ const QualityTimeRow = React.memo<{
 }>(({
   time,
   displayTime,
+  productionTime,
   isSplitRow = false,
   canSplit = false,
   rowSpan = 8,
@@ -1692,20 +1806,20 @@ const QualityTimeRow = React.memo<{
   const hasBottle = !!entry?.bottle_id;
   const isCurrentEntry = hasBottle && isActiveEntry;
 
+  // Production Time is intentionally independent from Packing Timeline: it
+  // advances continuously from the real production start and continues across
+  // shifts/midnight instead of repeating the Packing Timeline intervals.
+  const productionTimeLabel = productionTime ?? displayTime ?? time;
+
   // Row lock (Machine 1–4 tables only): when the row's checkbox is checked,
   // this row is read-only. Every editable field — the bottle dropdown, the
   // production fields, the defects and the "−" / split-delete buttons — is
   // disabled; only the lock checkbox itself stays usable so the row can be
   // unlocked again, and "+" is kept because it writes the NEXT row, not this
-  // one. Avg / Bottles in Nos. / QTY EFF% are display-only values with no
+  // one. Avg / Bottles in Pieces / Pieces EFF% are display-only values with no
   // editor, so they are inherently read-only. The backend enforces the same
   // lock independently, so a disabled field is a convenience, not the guard.
   const fieldsDisabled = !canEdit || locked;
-
-  const selectedDefectNames = defectGroups.length > 0
-
-    ? allDefectNames.filter((d) => (entry?.defect_ids ?? []).includes(d))
-    : (entry?.defect_ids ?? []);
 
   const td: React.CSSProperties = {
     padding: '6px 10px',
@@ -1858,7 +1972,7 @@ const QualityTimeRow = React.memo<{
       </td>
 
       <td
-        style={{ ...tdCenter, fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
+        style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
         onMouseEnter={() => setTimeHovered(true)}
         onMouseLeave={() => setTimeHovered(false)}
       >
@@ -1926,6 +2040,10 @@ const QualityTimeRow = React.memo<{
             ×
           </button>
         )}
+      </td>
+
+      <td style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
+        <span>{productionTimeLabel}</span>
       </td>
 
       <td style={{ ...td, padding: '4px 6px' }}>
@@ -2061,6 +2179,7 @@ const QualityTimeRow = React.memo<{
         <NumInput value={entry?.speed_per_min ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { speed_per_min: v })} />
       </td>
 
+      {/* TYPE 1 packaging entry (existing packing_category / packing_size / cartons). */}
       <td style={{ ...tdCenter, padding: '4px 2px' }}>
         <PackingMultiSelect
           selected={entry?.packing_category ?? []}
@@ -2077,34 +2196,29 @@ const QualityTimeRow = React.memo<{
         <NumInput value={entry?.cartons ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { cartons: v })} />
       </td>
 
+      {/* TYPE 2 packaging entry — independent fields, never shared with TYPE 1. */}
+      <td style={{ ...tdCenter, padding: '4px 2px', borderLeft: '2px solid #60a5fa' }}>
+        <PackingMultiSelect
+          selected={entry?.packing_category_2 ?? []}
+          disabled={fieldsDisabled}
+          onChange={(v) => patchEntry(time, { packing_category_2: v })}
+        />
+      </td>
+
+      <td style={{ ...tdCenter, padding: '4px 4px' }}>
+        <NumInput value={entry?.packing_size_2 ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { packing_size_2: v })} />
+      </td>
+
+      <td style={{ ...tdCenter, padding: '4px 4px' }}>
+        <NumInput value={entry?.cartons_2 ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { cartons_2: v })} />
+      </td>
+
       <td style={{ ...tdCenter, fontWeight: 500 }}>
         {calcBottlesInNos(entry)}
       </td>
 
       <td style={tdCenter}>
         <EffBadge val={calcEffForEntry(entry, gobCount, durationHours)} />
-      </td>
-
-      <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.sqc ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { sqc: v })} />
-      </td>
-
-      <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.qc_hold != null ? String(entry.qc_hold) : '0'} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { qc_hold: v === '' ? 0 : Number(v) })} />
-      </td>
-
-      <td style={{ ...tdCenter, padding: '4px 4px' }}>
-        <NumInput value={entry?.num ?? ''} disabled={fieldsDisabled} onChange={(v) => patchEntry(time, { num: v })} />
-      </td>
-
-      <td style={{ ...td, minWidth: '200px', padding: '4px 8px' }}>
-        <DefectDropdown
-          selected={selectedDefectNames}
-          disabled={fieldsDisabled}
-          onChange={(names) => patchEntry(time, { defect_ids: names })}
-          defectGroups={defectGroups}
-          isLoading={loadingDefects}
-        />
       </td>
 
       <td style={{ ...tdLast, padding: '4px 8px', minWidth: '120px', width: '120px' }}>
@@ -2384,7 +2498,7 @@ export const QualityControlModule: React.FC = () => {
               };
             } else if (serverEntry) {
               byTime[tKey] = serverEntry;
-            } else if (localEntry && hasMeaningfulData(localEntry)) {
+            } else if (localEntry && hasMonitorData(localEntry)) {
               byTime[tKey] = localEntry;
             }
           }
@@ -2462,6 +2576,9 @@ export const QualityControlModule: React.FC = () => {
     packing_category: [],
     packing_size: '',
     cartons: '',
+    packing_category_2: [],
+    packing_size_2: '',
+    cartons_2: '',
     bottles_in_nos: '',
     efficiency_percentage: '',
     weight_efficiency: '',
@@ -2749,6 +2866,22 @@ export const QualityControlModule: React.FC = () => {
     }
     return map;
   }, [displayKeys, activeRows]);
+  // Continuous Production Time is derived from the Packing Timeline only for
+  // its real starting point and explicit Lehr Out boundaries; it has its own
+  // one-hour advancement and never restarts at a shift or midnight boundary.
+  const productionTimeSlots = useMemo(() => {
+    const layerOut = layerOutValuesForDateMachine(
+      layerOutInputs,
+      dateKey,
+      String(activeMachine),
+    );
+    return buildContinuousProductionTimeline(
+      displayKeys,
+      timelineSlots,
+      shiftIdxByKey,
+      layerOut,
+    );
+  }, [displayKeys, timelineSlots, shiftIdxByKey, layerOutInputs, dateKey, activeMachine]);
   // Shift-block heights grow with the splits they contain (8 + splits).
   const shiftBlockCounts = useMemo(() => {
     const counts = [0, 0, 0];
@@ -2993,6 +3126,7 @@ export const QualityControlModule: React.FC = () => {
     const splitEntry: QualityHourlyEntry = {
       ...base,
       packing_category: [...(base.packing_category ?? [])],
+      packing_category_2: [...(base.packing_category_2 ?? [])],
       defect_ids: [...(base.defect_ids ?? [])],
       entry_id: '',
       report_id: dateKey,
@@ -3372,6 +3506,7 @@ export const QualityControlModule: React.FC = () => {
             [nextTime]: {
               ...source,
               packing_category: [...(source.packing_category ?? [])],
+              packing_category_2: [...(source.packing_category_2 ?? [])],
               defect_ids: [...(source.defect_ids ?? [])],
               production_time: nextTime,
               entry_id: target?.entry_id ?? '',
@@ -3415,6 +3550,7 @@ export const QualityControlModule: React.FC = () => {
           [firstTime]: {
             ...source,
             packing_category: [...(source.packing_category ?? [])],
+            packing_category_2: [...(source.packing_category_2 ?? [])],
             defect_ids: [...(source.defect_ids ?? [])],
             production_time: firstTime,
             report_id: nextDateKey,
@@ -3493,7 +3629,7 @@ export const QualityControlModule: React.FC = () => {
       // comes back as an EMPTY default entry: the row counts as gone only
       // when the response carries no persisted id and no data for it.
       const respEntry = result.hourly?.[mStr]?.[time];
-      const stillThere = !!respEntry?.entry_id || hasMeaningfulData(respEntry);
+      const stillThere = !!respEntry?.entry_id || hasMonitorData(respEntry);
       deletedSplitsRef.current[dateKey]?.[mStr]?.delete(time);
       if (result.ok && !stillThere) {
         toast.success(`Row ${rowLabel} deleted.`);
@@ -3586,6 +3722,7 @@ export const QualityControlModule: React.FC = () => {
 
   const stats = useMemo(() => {
     let totalCartons = 0;
+    let totalCartonsType2 = 0;
     let totalBottles = 0;
     const effVals: number[] = [];
     // SQC / QC HOLD / NUM day totals — a plain sum of the hourly values (not
@@ -3605,8 +3742,10 @@ export const QualityControlModule: React.FC = () => {
       const e = activeRows[k];
       const ct = parseInt(e?.cartons ?? '');
       if (!isNaN(ct)) totalCartons += ct;
-      const ps = parseInt(e?.packing_size ?? '');
-      if (!isNaN(ct) && ps > 0) totalBottles += ps * ct;
+      const ct2 = parseInt(e?.cartons_2 ?? '');
+      if (!isNaN(ct2)) totalCartonsType2 += ct2;
+      const pieces = calcTotalBottlesInNos(e);
+      if (pieces !== null) totalBottles += pieces;
       // A zero-carton row displays 0% and must contribute that 0 to the
       // summary average. Every other row keeps using its stored
       // (authoritative) efficiency, so their formula is unchanged.
@@ -3617,6 +3756,7 @@ export const QualityControlModule: React.FC = () => {
     }
     return {
       totalCartons,
+      totalCartonsType2,
       totalBottles,
       avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
       totalSqc: sumNumericField('sqc'),
@@ -3699,7 +3839,7 @@ export const QualityControlModule: React.FC = () => {
         const isSplit = isSplitKey(time);
         const isTouched = !!touched?.[mStr]?.[time];
         if (touchedOnly && !isTouched && !isSplit) continue;
-        const meaningful = hasMeaningfulData(entry);
+        const meaningful = hasMonitorData(entry);
         if (!isSplit) {
           if (!isTouched && !meaningful) continue;
           // A blank row the component invented (no entry_id from the database)
@@ -3961,9 +4101,11 @@ const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
 rows.push(dateAndDay);
 
     const header = [
-      'Shift', 'Time', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
-      'AVG', 'Speed/Min', 'Pack Type', 'Pack size', 'Cartons', 'Bottles in Nos.',
-      'QTY EFF%', 'SQC', 'QC Hold', 'NUM', 'Defects', 'Remarks',
+      'Shift', 'Time', 'Production Time', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
+      'AVG', 'Speed/Min',
+      'TYPE 1 - Pack Type', 'TYPE 1 - Pack Size', 'TYPE 1 - Cartons',
+      'TYPE 2 - Pack Type', 'TYPE 2 - Pack Size', 'TYPE 2 - Cartons',
+      'Bottles in Pieces', 'Pieces EFF%', 'Remarks',
     ];
     rows.push(header.join(','));
     // Every displayed row in timeline order — the 24 hourly rows plus any
@@ -3977,22 +4119,24 @@ rows.push(dateAndDay);
       const timeLabel = slot
         ? formatIntervalDisplayLabel(slot.start, slot.end)
         : getIntervalDisplayForKey(displayKeys, key, e);
+      const productionSlot = productionTimeSlots[key];
+      const productionTimeLabel = productionSlot
+        ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
+        : timeLabel;
       const shiftLabel = SHIFT_LABELS[(e?.shift_id ?? 0) - 1]
         ?? SHIFT_LABELS[shiftIdxByKey[key] ?? 0]
         ?? '';
       if (!e) {
-        rows.push([shiftLabel, timeLabel, `Machine ${activeMachine}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''].join(','));
+        rows.push([shiftLabel, timeLabel, productionTimeLabel, `Machine ${activeMachine}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''].join(','));
         continue;
       }
       const bottleName = bottles.find((b) => b.id === e.bottle_id)?.name ?? e.bottle_id;
-      const defectNames = defectGroups.length > 0
-        ? defectGroups.flatMap((g) => g.items).filter((d) => e.defect_ids.includes(d))
-        : (e.defect_ids ?? []);
       const eff = calcEffFor(e, activeMachine, durationByKey[key] ?? 1);
       rows.push(
         [
           shiftLabel,
           timeLabel,
+          productionTimeLabel,
           `Machine ${activeMachine}`,
           bottleName,
           e.weight_front,
@@ -4003,12 +4147,11 @@ rows.push(dateAndDay);
           (e.packing_category ?? []).join(' / '),
           e.packing_size,
           e.cartons,
+          (e.packing_category_2 ?? []).join(' / '),
+          e.packing_size_2,
+          e.cartons_2,
           calcBottlesInNosFor(e) || e.bottles_in_nos,
           eff,
-          e.sqc,
-          e.qc_hold,
-          e.num,
-          defectNames.join(' / '),
           e.remarks,
         ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')
       );
@@ -4046,11 +4189,6 @@ rows.push(dateAndDay);
 
       const bottleNameFor = (id: string) =>
         bottles.find((b) => b.id === id)?.name ?? id;
-
-      const defectNamesFor = (entry?: QualityHourlyEntry): string[] => {
-        if (defectGroups.length === 0) return entry?.defect_ids ?? [];
-        return allDefectNames.filter((d) => (entry?.defect_ids ?? []).includes(d));
-      };
 
       const doc = new jsPDF('landscape');
 
@@ -4099,24 +4237,23 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       const startY = y + 5;
       // ── Table header (two rows; Weight F/M/R depends on machine gob type) ─
       const headRowBase: any[] = [
-        { content: 'Time', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Shift', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'Time', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'Production Time', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Bottle Name', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Weight (gms)', colSpan: hasM ? 3 : 2, styles: { halign: 'center' } },
         { content: 'Average', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Speed/Min', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Pack Type', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Pack size', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Cartons', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'TYPE 1', colSpan: 3, styles: { halign: 'center', fillColor: [239, 246, 255], textColor: [30, 64, 175], fontStyle: 'bold' } },
+        { content: 'TYPE 2', colSpan: 3, styles: { halign: 'center', fillColor: [240, 249, 255], textColor: [3, 105, 161], fontStyle: 'bold' } },
         { content: 'Bottles', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'QTY EFF%', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'SQC', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'QC HOLD', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'NUM', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Defects', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
+        { content: 'Pieces EFF%', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
         { content: 'Remarks', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
       ];
-      const head = [headRowBase, ['F', ...(hasM ? ['M'] : []), 'R']];
+      const head = [
+        headRowBase,
+        ['F', ...(hasM ? ['M'] : []), 'R', 'Pack Type', 'Pack Size', 'Cartons', 'Pack Type', 'Pack Size', 'Cartons'],
+      ];
 
       // ── Body: every displayed row in timeline order (calculations identical
       // to on-screen) — the 24 hourly rows plus any split segments. Split rows
@@ -4126,16 +4263,20 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       const bodyMeta: { shiftIdx: number; grouped: boolean; summary?: boolean }[] = [];
       for (const key of displayKeys) {
         const e = byTime[key];
-        const defectNames = defectNamesFor(e);
         const slot = timelineSlots[key];
         const timeLabel = slot
           ? formatIntervalDisplayLabel(slot.start, slot.end)
           : getIntervalDisplayForKey(displayKeys, key, e);
+        const productionSlot = productionTimeSlots[key];
+        const productionTimeLabel = productionSlot
+          ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
+          : timeLabel;
         const shiftIdx = e?.shift_id ? Math.max(0, Math.min(2, e.shift_id - 1)) : (shiftIdxByKey[key] ?? 0);
         bodyMeta.push({ shiftIdx, grouped: !!(e?.split_group_id ?? '').trim() });
         body.push([
-          timeLabel,
           SHIFT_LABELS[shiftIdx] ?? '',
+          timeLabel,
+          productionTimeLabel,
           e?.bottle_id ? bottleNameFor(e.bottle_id) : '',
           e?.weight_front ?? '',
           ...(hasM ? [e?.weight_middle ?? ''] : []),
@@ -4145,12 +4286,11 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
           (e?.packing_category ?? []).join(' / '),
           e?.packing_size ?? '',
           e?.cartons ?? '',
+          (e?.packing_category_2 ?? []).join(' / '),
+          e?.packing_size_2 ?? '',
+          e?.cartons_2 ?? '',
           calcBottlesInNosFor(e) || e?.bottles_in_nos || '',
           calcEffFor(e, activeMachine, durationByKey[key] ?? 1),
-          e?.sqc ?? '',
-          e?.qc_hold != null ? String(e.qc_hold) : '0',
-          e?.num ?? '',
-          defectNames.join(' / '),
           e?.remarks ?? '',
         ]);
       }
@@ -4160,34 +4300,34 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       const summary: any[] = new Array(colCount).fill('');
       summary[0] = {
         content: 'Day Avg / Summary',
-        colSpan: 3,
+        colSpan: 4,
         styles: { halign: 'right', fontStyle: 'bold' },
       };
-      let wIdx = 3;
+      let wIdx = 4;
       summary[wIdx++] = dayAvgs.front;
       if (hasM) summary[wIdx++] = dayAvgs.middle;
       summary[wIdx++] = dayAvgs.rear;
       summary[wIdx++] = dayAvgs.avg;
       wIdx++; // Speed
-      wIdx++; // Packing Category
-      wIdx++; // Packing Size
+      wIdx++; // TYPE 1 Pack Type
+      wIdx++; // TYPE 1 Pack Size
       summary[wIdx++] = stats.totalCartons.toLocaleString();
+      wIdx++; // TYPE 2 Pack Type
+      wIdx++; // TYPE 2 Pack Size
+      summary[wIdx++] = stats.totalCartonsType2.toLocaleString();
       summary[wIdx++] = stats.totalBottles.toLocaleString();
       summary[wIdx++] = `${stats.avgEff}%`;
-      summary[wIdx++] = stats.totalSqc.toLocaleString();
-      summary[wIdx++] = stats.totalQcHold.toLocaleString();
-      summary[wIdx++] = stats.totalNum.toLocaleString();
       body.push(summary);
       bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
 
       // ── Column widths + alignment (landscape A4 with 10mm page margins) ──
       const colWidths = hasM
-        ? [13, 11, 34, 11, 11, 11, 13, 13, 16, 11, 11, 13, 11, 11, 11, 11, 24, 24]
-        : [13, 11, 34, 11, 11, 13, 13, 16, 11, 11, 13, 11, 11, 11, 11, 24, 24];
+        ? [11, 16, 16, 34, 11, 11, 11, 13, 13, 11, 11, 12, 11, 11, 12, 11, 11, 24]
+        : [11, 16, 16, 34, 11, 11, 13, 13, 11, 11, 12, 11, 11, 12, 11, 11, 24];
 
       const columnStyles: Record<number, any> = {};
       colWidths.forEach((w, i) => {
-        const leftAligned = i === 2 || i === colWidths.length - 1 || i === colWidths.length - 2;
+        const leftAligned = i === 3 || i === colWidths.length - 1;
         columnStyles[i] = { cellWidth: w, halign: leftAligned ? 'left' : 'center' };
       });
 
@@ -4715,7 +4855,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       <div className="qm-content-scroll" style={{ flex: 1, minHeight: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', overflow: 'auto', marginTop: showNavbar ? '12px' : '0', display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
 
         {activeMachine >= 1 && activeMachine <= 4 && (
-        <div className="qm-table-card" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1334px' : '1274px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
+        <div className="qm-table-card" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1278px' : '1218px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
         {/* Table — no scroll container in this chain: the sticky header must
             resolve against .qm-content-scroll (the module's single scrollport),
             so it stays pinned for the whole 24-hour table and only disappears
@@ -4729,31 +4869,33 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
     maxWidth: '100%',
     boxSizing: 'border-box'
   }}
->          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1332px' : '1272px' }}>
+>          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: hasM ? '1276px' : '1216px' }}>
             <thead className="qm-sticky-head">
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '60px', borderBottom: `2px solid ${C.border}`, padding: '9px 6px' }}>Packing Timeline</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '52px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Packing Timeline</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Production Time</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Pack\nsize'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
+                <th colSpan={3} style={{ ...stickyThStyle(0), backgroundColor: '#eff6ff', color: '#1e40af', borderLeft: '1px solid #dbeafe', borderBottom: `1px solid ${C.border}`, letterSpacing: '0.08em' }}>TYPE 1</th>
+                <th colSpan={3} style={{ ...stickyThStyle(0), backgroundColor: '#f0f9ff', color: '#0369a1', borderLeft: '2px solid #60a5fa', borderBottom: `1px solid ${C.border}`, letterSpacing: '0.08em' }}>TYPE 2</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>SQC</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'QC\nHOLD'}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>NUM</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '120px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>DEFECTS</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '160px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
               </tr>
               <tr style={{ backgroundColor: C.headerBg }}>
                 <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>F</th>
                 {hasM && <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>M</th>}
                 <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>R</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '34px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '34px', backgroundColor: '#f8fdff', borderLeft: '2px solid #60a5fa', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
+                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
               </tr>
             </thead>
             <tbody>
@@ -4780,6 +4922,10 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                   const displayTime = slot
                     ? formatIntervalDisplayLabel(slot.start, slot.end)
                     : getIntervalDisplayForKey(displayKeys, time, entry);
+                  const productionSlot = productionTimeSlots[time];
+                  const productionTime = productionSlot
+                    ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
+                    : undefined;
                   const shiftId = shiftIdx + 1;
                   const layerOutRaw = layerOutInputs[dateKey]?.[String(activeMachine)]?.[String(shiftId)] ?? '';
                   const layerOutError = parseLayerOutInput(layerOutRaw).error;
@@ -4795,6 +4941,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                       key={time}
                       time={time}
                       displayTime={displayTime}
+                      productionTime={productionTime}
                       isSplitRow={split}
                       canSplit={
                         !split &&
@@ -4837,7 +4984,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
 
               {/* Day Avg / Summary row */}
               <tr style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td colSpan={4} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
+                <td colSpan={5} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
                   Day Avg / Summary
                 </td>
                 <td style={{ padding: '8px 6px', textAlign: 'center', fontWeight: 700, fontSize: '12px', color: '#1e293b', borderRight: `1px solid ${C.border}` }}>
@@ -4864,6 +5011,11 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
                   {stats.totalCartons.toLocaleString()}
                 </td>
+                <td style={{ padding: '8px 6px', borderLeft: '2px solid #60a5fa', borderRight: `1px solid ${C.border}` }} />
+                <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
+                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
+                  {stats.totalCartonsType2.toLocaleString()}
+                </td>
                 <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
                   {stats.totalBottles.toLocaleString()}
                 </td>
@@ -4872,16 +5024,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                     {stats.avgEff}%
                   </span>
                 </td>
-                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
-                  {stats.totalSqc.toLocaleString()}
-                </td>
-                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
-                  {stats.totalQcHold.toLocaleString()}
-                </td>
-                <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
-                  {stats.totalNum.toLocaleString()}
-                </td>
-                <td colSpan={2} style={{ padding: '8px 10px' }} />
+                <td style={{ padding: '8px 10px' }} />
               </tr>
             </tbody>
             {/* Column-level Lock footer: the Lock checkbox lives underneath the

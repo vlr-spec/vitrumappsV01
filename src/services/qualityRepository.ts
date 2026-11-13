@@ -42,6 +42,10 @@ export interface QualityHourlyEntry {
   packing_category: string[];
   packing_size: string;
   cartons: string;
+  /** TYPE 2 packaging entry — independent from the TYPE 1 fields above. */
+  packing_category_2: string[];
+  packing_size_2: string;
+  cartons_2: string;
   bottles_in_nos: string;
   efficiency_percentage: string;
   weight_efficiency: string;
@@ -85,7 +89,8 @@ export interface DefectMasterItem {
  * hourly_production (entry_id, report_id, machine_no, shift_id,
  * production_time, bottle_id, weight_front, weight_middle,
  * weight_rear, weight_avg, speed_per_min, packing_category, packing_size,
- * cartons, bottles_in_nos, efficiency_percentage, sqc, qc_hold, num, remarks)
+ * cartons, packing_category_2, packing_size_2, cartons_2, bottles_in_nos,
+ * efficiency_percentage, sqc, qc_hold, num, remarks)
  * plus defect_ids (the per-entry defect names; hourly_production_defect is
  * the entry_id + defect_id join created by the backend).
  */
@@ -104,6 +109,10 @@ export interface QualityEntryPayload {
   packing_category: string | null;
   packing_size: number | null;
   cartons: number | null;
+  /** TYPE 2 packaging entry — persisted independently of the TYPE 1 fields. */
+  packing_category_2: string | null;
+  packing_size_2: number | null;
+  cartons_2: number | null;
   bottles_in_nos: number | null;
   efficiency_percentage: number | null;
   weight_efficiency: number | null;
@@ -306,6 +315,9 @@ const toDbEntry = (entry: QualityHourlyEntry): QualityEntryPayload => ({
   packing_category: toPackingString(entry.packing_category),
   packing_size: toIntOrNull(entry.packing_size),
   cartons: toIntOrNull(entry.cartons),
+  packing_category_2: toPackingString(entry.packing_category_2),
+  packing_size_2: toIntOrNull(entry.packing_size_2),
+  cartons_2: toIntOrNull(entry.cartons_2),
   bottles_in_nos: toIntOrNull(entry.bottles_in_nos),
   efficiency_percentage: toNumOrNull(entry.efficiency_percentage),
   weight_efficiency: toNumOrNull(entry.weight_efficiency),
@@ -337,6 +349,9 @@ const fromDbEntry = (raw: Record<string, unknown>): QualityHourlyEntry => ({
   packing_category: toPackingArray(raw.packing_category),
   packing_size: toStrOrEmpty(raw.packing_size),
   cartons: toStrOrEmpty(raw.cartons),
+  packing_category_2: toPackingArray(raw.packing_category_2),
+  packing_size_2: toStrOrEmpty(raw.packing_size_2),
+  cartons_2: toStrOrEmpty(raw.cartons_2),
   bottles_in_nos: toStrOrEmpty(raw.bottles_in_nos),
   efficiency_percentage: toStrOrEmpty(raw.efficiency_percentage),
   weight_efficiency: toStrOrEmpty(raw.weight_efficiency),

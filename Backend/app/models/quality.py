@@ -92,6 +92,12 @@ class HourlyProduction(Base):
     packing_category = Column(String(100), nullable=True)
     packing_size = Column(Integer, nullable=True)
     cartons = Column(Integer, nullable=True)
+    # TYPE 2 packaging entry. Independent from the TYPE 1 columns above; these
+    # are echoed/persisted only and never replace the existing TYPE 1 values
+    # used by production calculations and reports.
+    packing_category_2 = Column(String(100), nullable=True)
+    packing_size_2 = Column(Integer, nullable=True)
+    cartons_2 = Column(Integer, nullable=True)
     bottles_in_nos = Column(Integer, nullable=True)
     efficiency_percent = Column(Numeric(5, 2), nullable=True)
     weight_efficiency = Column(Numeric(10, 2), nullable=True)

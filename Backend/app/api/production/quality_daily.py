@@ -163,6 +163,8 @@ def _locked_payload_differs(entry: HourlyProduction, data: QualityHourlyEntrySch
         (entry.weight_efficiency, data.weight_efficiency, False),
         (entry.packing_size, data.packing_size, False),
         (entry.cartons, data.cartons, False),
+        (entry.packing_size_2, data.packing_size_2, False),
+        (entry.cartons_2, data.cartons_2, False),
         (entry.sqc, data.sqc, False),
         (entry.qc_hold, data.qc_hold, True),
         (entry.num, data.num, False),
@@ -173,6 +175,8 @@ def _locked_payload_differs(entry: HourlyProduction, data: QualityHourlyEntrySch
     if _norm_lock_value(entry.remarks) != _norm_lock_value(data.remarks):
         return True
     if _norm_lock_parts(entry.packing_category) != _norm_lock_parts(data.packing_category):
+        return True
+    if _norm_lock_parts(entry.packing_category_2) != _norm_lock_parts(data.packing_category_2):
         return True
     if _norm_lock_value(entry.job_id) != _norm_lock_value(data.job_id):
         return True
@@ -538,6 +542,9 @@ def get_default_shape(date_str: str) -> QualityDailyResponse:
                 packing_category=[],
                 packing_size=None,
                 cartons=None,
+                packing_category_2=[],
+                packing_size_2=None,
+                cartons_2=None,
                 bottles_in_nos=None,
                 efficiency_percentage=None,
                 weight_efficiency=None,
@@ -641,6 +648,9 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
         # packing_category is stored as comma separated string? Frontend expects array
         pc = entry.packing_category.split(",") if entry.packing_category else []
         pc = [x.strip() for x in pc if x.strip()]
+        pc2 = getattr(entry, "packing_category_2", None)
+        pc2 = pc2.split(",") if pc2 else []
+        pc2 = [x.strip() for x in pc2 if x.strip()]
 
         period_start, period_end = period_slots.get((entry.machine_no, slot), (None, None))
 
@@ -659,6 +669,9 @@ def get_daily_quality(date: str, db: Session = Depends(get_db), _user: AuthUser 
             packing_category=pc,
             packing_size=entry.packing_size,
             cartons=entry.cartons,
+            packing_category_2=pc2,
+            packing_size_2=getattr(entry, "packing_size_2", None),
+            cartons_2=getattr(entry, "cartons_2", None),
             bottles_in_nos=entry.bottles_in_nos,
             efficiency_percentage=float(entry.efficiency_percent) if entry.efficiency_percent is not None else None,
             weight_efficiency=float(entry.weight_efficiency) if getattr(entry, 'weight_efficiency', None) is not None else None,
@@ -695,6 +708,8 @@ def _has_meaningful_data(entry_data: QualityHourlyEntrySchema) -> bool:
         entry_data.speed_per_min,
         entry_data.packing_size,
         entry_data.cartons,
+        entry_data.packing_size_2,
+        entry_data.cartons_2,
         entry_data.bottles_in_nos,
         entry_data.efficiency_percentage,
         entry_data.sqc,
@@ -707,6 +722,8 @@ def _has_meaningful_data(entry_data: QualityHourlyEntrySchema) -> bool:
     if entry_data.qc_hold is not None and entry_data.qc_hold != 0:
         return True
     if entry_data.packing_category and any(str(x).strip() for x in entry_data.packing_category if x):
+        return True
+    if entry_data.packing_category_2 and any(str(x).strip() for x in entry_data.packing_category_2 if x):
         return True
     if entry_data.defect_ids and any(str(d).strip() for d in entry_data.defect_ids if d):
         return True
@@ -1344,6 +1361,9 @@ def save_daily_quality(
                 p_c = (", ".join(entry_data.packing_category) if entry_data.packing_category else None) if isinstance(entry_data.packing_category, list) else (entry_data.packing_category or None)
                 p_s = entry_data.packing_size
                 ctns = entry_data.cartons
+                p_c2 = (", ".join(entry_data.packing_category_2) if entry_data.packing_category_2 else None) if isinstance(entry_data.packing_category_2, list) else (entry_data.packing_category_2 or None)
+                p_s2 = entry_data.packing_size_2
+                ctns2 = entry_data.cartons_2
                 binos = entry_data.bottles_in_nos
                 eff = entry_data.efficiency_percentage
                 if eff is not None:
@@ -1371,7 +1391,8 @@ def save_daily_quality(
                         bottle_id=b_id,
                         weight_front=w_f, weight_middle=w_m, weight_rear=w_r, weight_avg=w_a,
                         speed_per_min=s_p_m, packing_category=p_c, packing_size=p_s,
-                        cartons=ctns, bottles_in_nos=binos, efficiency_percent=eff,
+                        cartons=ctns, packing_category_2=p_c2, packing_size_2=p_s2,
+                        cartons_2=ctns2, bottles_in_nos=binos, efficiency_percent=eff,
                         weight_efficiency=weff,
                         sqc=sq, qc_hold=qch, num=n_val, remarks=rmk,
                         # hourly_production.job_id is a NOT NULL column. A row that
@@ -1402,6 +1423,9 @@ def save_daily_quality(
                     entry.packing_category = p_c
                     entry.packing_size = p_s
                     entry.cartons = ctns
+                    entry.packing_category_2 = p_c2
+                    entry.packing_size_2 = p_s2
+                    entry.cartons_2 = ctns2
                     entry.bottles_in_nos = binos
                     entry.efficiency_percent = eff
                     if getattr(entry, 'weight_efficiency', None) is not None or weff is not None:
@@ -1744,6 +1768,9 @@ def save_daily_quality(
                         packing_category=entry_8am.packing_category,
                         packing_size=entry_8am.packing_size,
                         cartons=entry_8am.cartons,
+                        packing_category_2=getattr(entry_8am, "packing_category_2", None),
+                        packing_size_2=getattr(entry_8am, "packing_size_2", None),
+                        cartons_2=getattr(entry_8am, "cartons_2", None),
                         bottles_in_nos=entry_8am.bottles_in_nos,
                         efficiency_percent=entry_8am.efficiency_percent,
                         weight_efficiency=getattr(entry_8am, 'weight_efficiency', None),
@@ -1765,6 +1792,9 @@ def save_daily_quality(
                 pt_time = f"{slot.hour % 12 or 12}:{slot.minute:02d} {'AM' if slot.hour < 12 else 'PM'}"
                 pc = entry.packing_category.split(",") if entry.packing_category else []
                 pc = [x.strip() for x in pc if x.strip()]
+                pc2 = getattr(entry, "packing_category_2", None)
+                pc2 = pc2.split(",") if pc2 else []
+                pc2 = [x.strip() for x in pc2 if x.strip()]
                 continuation_data[m][pt_time] = QualityHourlyEntrySchema(
                     entry_id=str(entry.entry_id),
                     report_id=str(next_date),
@@ -1780,6 +1810,9 @@ def save_daily_quality(
                     packing_category=pc,
                     packing_size=entry.packing_size,
                     cartons=entry.cartons,
+                    packing_category_2=pc2,
+                    packing_size_2=getattr(entry, "packing_size_2", None),
+                    cartons_2=getattr(entry, "cartons_2", None),
                     bottles_in_nos=entry.bottles_in_nos,
                     efficiency_percentage=float(entry.efficiency_percent) if entry.efficiency_percent is not None else None,
                     weight_efficiency=float(getattr(entry, 'weight_efficiency', None)) if getattr(entry, 'weight_efficiency', None) is not None else None,

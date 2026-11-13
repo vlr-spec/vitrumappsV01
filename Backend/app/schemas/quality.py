@@ -48,6 +48,10 @@ class QualityHourlyEntrySchema(BaseModel):
     packing_category: Union[List[str], str, None] = None
     packing_size: Optional[int] = None
     cartons: Optional[int] = None
+    # TYPE 2 packaging entry — independent of the TYPE 1 fields above.
+    packing_category_2: Union[List[str], str, None] = None
+    packing_size_2: Optional[int] = None
+    cartons_2: Optional[int] = None
     bottles_in_nos: Optional[int] = None
     efficiency_percentage: Optional[float] = None
     weight_efficiency: Optional[float] = None
@@ -80,6 +84,8 @@ class QualityHourlyEntrySchema(BaseModel):
         "bottle_id",
         "packing_size",
         "cartons",
+        "packing_size_2",
+        "cartons_2",
         "bottles_in_nos",
         "sqc",
         "qc_hold",
