@@ -71,6 +71,11 @@ const SHIFT_CELL_BG = ['#eaf2ff', '#e8faf0', '#fffce8'];
 const SPLIT_GROUP_BG = '#ffffde';const SHIFT_CELL_COLOR = ['#3b72cc', '#2d8a58', '#b07c1a'];
 const SHIFT_BORDERS = ['#c7daff', '#b6efd1', '#f0dfa0'];
 
+/** Which timeline column the manual split control was opened from. The split
+ *  itself always creates the same single row structure; this only says which
+ *  timeline's interval the operator sees and types the split point in. */
+type SplitTimelineSource = 'packing' | 'production';
+
 // ─── Manual Split Row helpers ────────────────────────────────────────────
 // A split divides the interval the selected row DISPLAYS at a user-picked
 // minute: the row keyed "11:00 AM" shows "10:00 - 11:00 AM", and splitting it
@@ -986,7 +991,7 @@ const normaliseDayMinutes = (minutes: number): number =>
   ((minutes % (24 * 60)) + 24 * 60) % (24 * 60);
 
 /**
- * Production Time — the Packing Timeline shifted back by the Lehr Out minutes
+ * Production Timeline — the Packing Timeline shifted back by the Lehr Out minutes
  * that apply to each boundary:
  *
  *   Production Start = Packing Start − applicable Lehr Out
@@ -1074,17 +1079,14 @@ const buildProductionTimeline = (
   return out;
 };
 
-/** Full production interval label, always keeping AM/PM on both ends when the
- *  interval crosses noon/midnight; same-period intervals stay compact so the
- *  existing Production Time column width is preserved. */
+/** Full production interval label. The start time never carries AM/PM; the
+ *  end time always does, matching the Packing Timeline format. Period changes
+ *  across noon/midnight therefore read e.g. "11:12 - 12:12 PM". */
 const formatProductionIntervalLabel = (start: string, end: string): string => {
   const sm = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(start);
   const em = /^\s*(\d{1,2}:\d{2})\s*([AaPp][Mm])\s*$/.exec(end);
   if (!sm || !em) return `${start} - ${end}`;
-  const startPeriod = sm[2].toUpperCase();
-  const endPeriod = em[2].toUpperCase();
-  if (startPeriod === endPeriod) return `${sm[1]} - ${em[1]} ${endPeriod}`;
-  return `${sm[1]} ${startPeriod} - ${em[1]} ${endPeriod}`;
+  return `${sm[1]} - ${em[1]} ${em[2].toUpperCase()}`;
 };
 
 /**
@@ -1724,7 +1726,7 @@ const QualityTimeRow = React.memo<{
   time: string;
   /** Text shown in the Packing Timeline column (full interval, e.g. "9:00 - 10:00 AM" or "3:00 - 3:34 PM"). */
   displayTime?: string;
-  /** Independent continuous Production Time interval for this row. */
+  /** Independent continuous Production Timeline interval for this row. */
   productionTime?: string;
   /** True for a manually inserted split row (key not in PRODUCTION_TIMES). */
   isSplitRow?: boolean;
@@ -1738,8 +1740,8 @@ const QualityTimeRow = React.memo<{
   periodStart?: string;
   /** Actual period_end label (own time). */
   periodEnd?: string;
-  /** Opens the manual split-time selector for this hourly row. */
-  onSplit?: (time: string) => void;
+  /** Opens the manual split-time selector for this hourly row (either timeline). */
+  onSplit?: (time: string, source?: SplitTimelineSource) => void;
   /** Deletes this split row and restores the original period. */
   onDeleteSplit?: (time: string) => void;
   shiftIdx: number;
@@ -1832,6 +1834,7 @@ const QualityTimeRow = React.memo<{
   // button is rendered permanently and hovering other cells never shows one.
   const [hovered, setHovered] = React.useState(false);
   const [timeHovered, setTimeHovered] = React.useState(false);
+  const [productionTimeHovered, setProductionTimeHovered] = React.useState(false);
   void periodStart;
   void periodEnd;
 
@@ -1842,7 +1845,7 @@ const QualityTimeRow = React.memo<{
   const hasBottle = !!entry?.bottle_id;
   const isCurrentEntry = hasBottle && isActiveEntry;
 
-  // Production Time is the Packing Timeline shifted back by the applicable
+  // Production Timeline is the Packing Timeline shifted back by the applicable
   // Lehr Out minutes, staying continuous across shifts and midnight.
   const productionTimeLabel = productionTime ?? displayTime ?? time;
 
@@ -2006,12 +2009,66 @@ const QualityTimeRow = React.memo<{
         />
       </td>
 
-      <td style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
+      <td
+        style={{ ...tdCenter, padding: '6px 2px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
+        onMouseEnter={() => setProductionTimeHovered(true)}
+        onMouseLeave={() => setProductionTimeHovered(false)}
+      >
         <span>{productionTimeLabel}</span>
+        {/* Production Timeline split control: the exact same split operation as the
+            Packing Timeline column. The resulting row is shared by both
+            timelines, so splitting here also splits Packing Timeline (and vice
+            versa) at the corresponding boundary. */}
+        {!isSplitRow && canSplit && canEdit && productionTimeHovered && onSplit && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onSplit(time, 'production'); }}
+            title={`Split ${productionTimeLabel}`}
+            style={{
+              marginLeft: '6px',
+              padding: '1px 7px',
+              fontSize: '10.5px',
+              fontWeight: 600,
+              color: '#2563eb',
+              backgroundColor: '#eff6ff',
+              border: '1px solid #bfdbfe',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              verticalAlign: 'middle',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#dbeafe'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
+          >
+            Split
+          </button>
+        )}
+        {isSplitRow && canEdit && !locked && productionTimeHovered && onDeleteSplit && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDeleteSplit(time); }}
+            title={`Delete split ${productionTimeLabel} and restore the original period`}
+            style={{
+              marginLeft: '6px',
+              padding: '0px 6px',
+              fontSize: '11px',
+              fontWeight: 700,
+              color: '#be123c',
+              backgroundColor: '#fff1f2',
+              border: '1px solid #fecdd3',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              verticalAlign: 'middle',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
+          >
+            ×
+          </button>
+        )}
       </td>
 
       <td
-        style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
+        style={{ ...tdCenter, padding: '6px 2px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
         onMouseEnter={() => setTimeHovered(true)}
         onMouseLeave={() => setTimeHovered(false)}
       >
@@ -2036,7 +2093,7 @@ const QualityTimeRow = React.memo<{
         {!isSplitRow && canSplit && canEdit && timeHovered && onSplit && (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); onSplit(time); }}
+            onClick={(e) => { e.stopPropagation(); onSplit(time, 'packing'); }}
             title={`Split ${displayTime ?? time}`}
             style={{
               marginLeft: '6px',
@@ -2826,6 +2883,9 @@ export const QualityControlModule: React.FC = () => {
   const [splitTarget, setSplitTarget] = useState<string | null>(null);
   const [splitValue, setSplitValue] = useState<string>('');
   const [splitError, setSplitError] = useState<string>('');
+  // Which timeline column opened the dialog. Both write the same split row;
+  // this only chooses the interval the user sees and types the split point in.
+  const [splitSource, setSplitSource] = useState<SplitTimelineSource>('packing');
 
   const setLayerOutInput = useCallback((shiftId: number, value: string) => {
     if (!canEdit) return;
@@ -2901,7 +2961,7 @@ export const QualityControlModule: React.FC = () => {
     }
     return map;
   }, [displayKeys, activeRows]);
-  // Production Time is the Packing Timeline shifted back by the Lehr Out
+  // Production Timeline is the Packing Timeline shifted back by the Lehr Out
   // minutes applicable to each boundary (previous shift for a start boundary,
   // own shift for a shift-ending end boundary).
   const productionTimeSlots = useMemo(() => {
@@ -2917,6 +2977,24 @@ export const QualityControlModule: React.FC = () => {
       layerOut,
     );
   }, [displayKeys, timelineSlots, shiftIdxByKey, layerOutInputs, dateKey, activeMachine]);
+  // Stable read-only view for the split opener so its callback identity (passed
+  // to every memoized row) does not change when a production field is typed.
+  const productionTimeSlotsRef = useRef<Record<string, ProductionTimeSlot>>({});
+  useEffect(() => {
+    productionTimeSlotsRef.current = productionTimeSlots;
+  }, [productionTimeSlots]);
+  // Constant offset between the row's Packing Timeline start and its Production
+  // Time start. A split inside a row keeps the delay that was in effect at the
+  // row's start (the new split segment is never a shift-ending row), so adding
+  // this offset translates a Production Timeline split point into the exact same
+  // Packing Timeline boundary — no separate splitting algorithm.
+  const splitSourceOffset = useMemo(() => {
+    if (!splitTarget || splitSource !== 'production') return null;
+    const packingSlot = timelineSlots[splitTarget];
+    const productionSlot = productionTimeSlots[splitTarget];
+    if (!packingSlot || !productionSlot) return null;
+    return packingSlot.startMinutes - productionSlot.startMinutes;
+  }, [splitTarget, splitSource, timelineSlots, productionTimeSlots]);
   // Shift-block heights grow with the splits they contain (8 + splits).
   const shiftBlockCounts = useMemo(() => {
     const counts = [0, 0, 0];
@@ -2941,20 +3019,47 @@ export const QualityControlModule: React.FC = () => {
     return { ordered, slots: buildLayerOutTimeline(ordered, layerOut, carryIn) };
   }, [dateKey, activeMachine]);
 
-  // Split dialog labels: the interval the selected row displays and its start
-  // bound — the exact range the split point must fall inside.
+  // Split dialog labels: the interval the selected row displays and the exact
+  // range the split point must fall inside. Production Timeline uses its own
+  // displayed interval; its split point is translated to the matching Packing
+  // Timeline boundary by splitSourceOffset before the shared split logic runs.
   const splitDialogTitle = splitTarget
-    ? (timelineSlots[splitTarget]
-        ? formatIntervalDisplayLabel(timelineSlots[splitTarget].start, timelineSlots[splitTarget].end)
-        : getIntervalDisplayForKey(displayKeys, splitTarget, activeRows[splitTarget]))
+    ? (splitSource === 'production'
+        ? (productionTimeSlots[splitTarget]
+            ? formatProductionIntervalLabel(
+                productionTimeSlots[splitTarget].start,
+                productionTimeSlots[splitTarget].end,
+              )
+            : getIntervalDisplayForKey(displayKeys, splitTarget, activeRows[splitTarget]))
+        : (timelineSlots[splitTarget]
+            ? formatIntervalDisplayLabel(timelineSlots[splitTarget].start, timelineSlots[splitTarget].end)
+            : getIntervalDisplayForKey(displayKeys, splitTarget, activeRows[splitTarget])))
     : '';
   const splitDialogStart = splitTarget
-    ? (timelineSlots[splitTarget]?.start
-        ?? getPeriodStartForKey(displayKeys, splitTarget, activeRows[splitTarget])
-        ?? splitTarget)
+    ? (splitSource === 'production'
+        ? (productionTimeSlots[splitTarget]?.start
+            ?? timelineSlots[splitTarget]?.start
+            ?? getPeriodStartForKey(displayKeys, splitTarget, activeRows[splitTarget])
+            ?? splitTarget)
+        : (timelineSlots[splitTarget]?.start
+            ?? getPeriodStartForKey(displayKeys, splitTarget, activeRows[splitTarget])
+            ?? splitTarget))
+    : '';
+  const splitDialogEnd = splitTarget
+    ? (splitSource === 'production'
+        ? (() => {
+            const tNext = toTimelineMinutes(splitTarget);
+            if (tNext === null || splitSourceOffset === null) {
+              return productionTimeSlots[splitTarget]?.end ?? splitTarget;
+            }
+            // The last production boundary that still lands inside this row's
+            // Packing Timeline period (shift-ending rows compress differently).
+            return formatTimelineMinutes(tNext - splitSourceOffset);
+          })()
+        : splitTarget)
     : '';
 
-  const openSplitDialog = useCallback((time: string) => {
+  const openSplitDialog = useCallback((time: string, source: SplitTimelineSource = 'packing') => {
     if (!canEdit) return;
     if (isSplitKey(time)) return;
     // Split the interval the row DISPLAYS — [period start, own time) — not
@@ -2967,10 +3072,14 @@ export const QualityControlModule: React.FC = () => {
     const tEnd = toTimelineMinutes(time);
     if (!startTime || tStart === null || tEnd === null || tStart >= tEnd) return;
     setSplitTarget(time);
-    // Pre-fill with the start time of the period being split ([start, time)),
-    // so the user only needs to change the minutes (e.g. 10:00 → 10:15).
-    // Split validation, job/entry IDs and calculations are untouched.
-    const tStartClock = parseTimeLabelToMinutes(startTime);
+    setSplitSource(source);
+    // Pre-fill with the start time of the period being split, so the user only
+    // needs to change the minutes (e.g. 10:00 → 10:15). Production Timeline starts
+    // at its own displayed boundary; Packing Timeline keeps its existing one.
+    const displayStart = source === 'production'
+      ? (productionTimeSlotsRef.current[time]?.start ?? startTime)
+      : startTime;
+    const tStartClock = parseTimeLabelToMinutes(displayStart);
     if (tStartClock !== null) {
       const hh = Math.floor(tStartClock / 60);
       const mm = tStartClock % 60;
@@ -2985,6 +3094,7 @@ export const QualityControlModule: React.FC = () => {
     setSplitTarget(null);
     setSplitValue('');
     setSplitError('');
+    setSplitSource('packing');
   }, []);
 
   const deleteSplitRow = useCallback((time: string) => {
@@ -3111,15 +3221,35 @@ export const QualityControlModule: React.FC = () => {
       candidate = `${h12}:${String(mm).padStart(2, '0')} ${ap}`;
     }
     const tSplit = toTimelineMinutes(candidate);
+    const splitFromProduction = splitSource === 'production';
     if (tSplit === null) {
-      setSplitError(`Enter a time between ${startTime} and ${splitTarget} (e.g. 10:25 AM).`);
+      setSplitError(splitFromProduction
+        ? `Enter a time between ${splitDialogStart} and ${splitDialogEnd} (e.g. 10:25 AM).`
+        : `Enter a time between ${startTime} and ${splitTarget} (e.g. 10:25 AM).`);
       return;
     }
-    if (!(tSplit > tParent && tSplit < tNext)) {
+    // Both timelines share ONE split row. A Production Timeline split point is
+    // translated to the matching Packing Timeline boundary with the row's
+    // constant start offset; Packing Timeline keeps its existing direct split.
+    // The row creation, inheritance, grouping and period stamping below are
+    // exactly the same code path for both columns.
+    let packingCandidate = candidate;
+    if (splitFromProduction) {
+      if (splitSourceOffset === null) {
+        setSplitError('This hour cannot be split.');
+        return;
+      }
+      const tPackingSplit = tSplit + splitSourceOffset;
+      if (!(tPackingSplit > tParent && tPackingSplit < tNext)) {
+        setSplitError(`Pick a time strictly between ${splitDialogStart} and ${splitDialogEnd}.`);
+        return;
+      }
+      packingCandidate = formatTimelineMinutes(tPackingSplit);
+    } else if (!(tSplit > tParent && tSplit < tNext)) {
       setSplitError(`Pick a time strictly between ${startTime} and ${splitTarget}.`);
       return;
     }
-    const splitKey = formatMinutesToLabel(parseTimeLabelToMinutes(candidate) ?? 0);
+    const splitKey = formatMinutesToLabel(parseTimeLabelToMinutes(packingCandidate) ?? 0);
     const existsLocal = rowsNow[splitKey];
     if (existsLocal || PRODUCTION_TIME_SET.has(splitKey)) {
       setSplitError(`${splitKey} already exists — pick a different minute.`);
@@ -3204,8 +3334,10 @@ export const QualityControlModule: React.FC = () => {
       };
     });
     closeSplitDialog();
-    toast.success(`Split ${formatIntervalDisplayLabel(startTime, splitTarget)} at ${splitKey} (${newGroup})`);
-  }, [splitTarget, splitValue, canEdit, dateKey, activeMachine, markTouched, closeSplitDialog, timelineForRows]);
+    toast.success(splitFromProduction
+      ? `Split ${splitDialogTitle} at ${formatTimelineMinutes(tSplit)} (${newGroup})`
+      : `Split ${formatIntervalDisplayLabel(startTime, splitTarget)} at ${splitKey} (${newGroup})`);
+  }, [splitTarget, splitValue, canEdit, dateKey, activeMachine, markTouched, closeSplitDialog, timelineForRows, splitSource, splitSourceOffset, splitDialogStart, splitDialogEnd, splitDialogTitle]);
 
   // ── Row lock (Machine 1–4 tables only) ─────────────────────────────────
   // The lock lives in the DATABASE (hourly_production.is_locked), never in
@@ -4136,7 +4268,7 @@ const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
 rows.push(dateAndDay);
 
     const header = [
-      'Shift', 'Time', 'Production Time', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
+      'Shift', 'Time', 'Production Timeline', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
       'AVG', 'Speed/Min',
       'TYPE 1 - Pack Type', 'TYPE 1 - Pack Size', 'TYPE 1 - Cartons',
       'TYPE 2 - Pack Type', 'TYPE 2 - Pack Size', 'TYPE 2 - Cartons',
@@ -4241,7 +4373,7 @@ rows.push(dateAndDay);
       const head = [[
         'Shift',
         'Time',
-        'Production Time',
+        'Production Timeline',
         'Bottle Name',
         ...(hasM ? ['Weight F', 'Weight M', 'Weight R'] : ['Weight F', 'Weight R']),
         'Average',
@@ -4942,8 +5074,8 @@ rows.push(dateAndDay);
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Production Time</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '52px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Packing Timeline</th>
+                <th rowSpan={2} title="Production Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Production<br />Timeline</th>
+                <th rowSpan={2} title="Packing Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Packing<br />Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
@@ -5218,8 +5350,9 @@ rows.push(dateAndDay);
               Split {splitDialogTitle}
             </div>
             <div style={{ fontSize: '13px', color: '#475569', marginBottom: '12px' }}>
-              Pick a time strictly between {splitDialogStart} and {splitTarget}.
-              A continuation row is inserted for the selected period, inheriting {splitTarget}'s bottle and Job ID — no new job is created.
+              Pick a time strictly between {splitDialogStart} and {splitDialogEnd}.
+              A continuation row is inserted for the selected period, inheriting {splitDialogTitle}'s bottle and Job ID — no new job is created.
+              Both Production Timeline and Packing Timeline are split together.
               The next hour stays blank unless you extend the job into it with +.
             </div>
             <input

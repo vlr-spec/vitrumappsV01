@@ -1907,34 +1907,97 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   }, [dayHourly]);
 
   /**
-   * Pack Type (packing_category) and Pack Size (packing_size) read from the
-   * Hourly Production Report machine-wise. For each machine on the selected
-   * date, the available Pack Types come from `packing_category` and the Pack
-   * Size comes from `packing_size`. These values are reused in the Numbering
-   * and SQC/QC HOLD tables and saved exactly as selected to the database.
+   * Pack Type (packing_category / packing_category_2) and Pack Size
+   * (packing_size) read from the Hourly Production Report for the selected
+   * date. Every hourly entry of a machine is scanned, so all unique pack types
+   * used across the whole day are available — never only the first entry/hour
+   * and never capped at a fixed number of types.
    *
-   * Structure: machineNo → { packTypes: string[]; packSize: string }
+   * `byJob` groups those same pack types per production Job ID (and Bottle ID
+   * as a fallback key) so each Numbering / SQC-QC HOLD row can show exactly
+   * the pack types reported for its own job, across all of that job's hours.
+   *
+   * Structure:
+   *   machineNo → { packTypes, packSize, byJob: { "job:<id>" | "bottle:<id>" → info } }
    */
-  const machinePackInfo = useMemo<Record<number, { packTypes: string[]; packSize: string }>>(
+  const machinePackInfo = useMemo<
+    Record<
+      number,
+      {
+        packTypes: string[];
+        packSize: string;
+        byJob: Record<string, { packTypes: string[]; packSize: string }>;
+      }
+    >
+  >(
     () => {
-      const out: Record<number, { packTypes: string[]; packSize: string }> = {};
+      // Pack types may arrive as an array (current schema) or, for legacy
+      // records, as a single string. Both forms are normalised here.
+      const addPackingTypes = (value: unknown, target: Set<string>): void => {
+        const values = Array.isArray(value) ? value : value != null ? [value] : [];
+        values.forEach((c) => {
+          const type = String(c ?? '').trim();
+          if (type) target.add(type);
+        });
+      };
+
+      const out: Record<
+        number,
+        {
+          packTypes: string[];
+          packSize: string;
+          byJob: Record<string, { packTypes: string[]; packSize: string }>;
+        }
+      > = {};
+
       for (const machineNo of MACHINE_NOS) {
         const byTime = dayHourly[String(machineNo)] ?? {};
         const packTypesSet = new Set<string>();
+        const jobSets: Record<string, { packTypes: Set<string>; packSize: string }> = {};
         let packSize = '';
-        for (const [time, entry] of Object.entries(byTime)) {
-          if (Array.isArray(entry.packing_category)) {
-            entry.packing_category.forEach((c) => {
-              if (c && c.trim()) packTypesSet.add(c.trim());
-            });
-          }
-          if (entry.packing_size != null && !packSize) {
-            packSize = String(entry.packing_size);
+
+        for (const entry of Object.values(byTime)) {
+          // TYPE 1 + TYPE 2 packaging fields both count as pack types used in
+          // the Hourly Production Report for this hour.
+          const entryTypes = new Set<string>();
+          addPackingTypes(entry.packing_category, entryTypes);
+          addPackingTypes(entry.packing_category_2, entryTypes);
+          entryTypes.forEach((type) => packTypesSet.add(type));
+
+          const entryPackSize =
+            entry.packing_size != null && String(entry.packing_size).trim() !== ''
+              ? String(entry.packing_size)
+              : '';
+          if (entryPackSize && !packSize) packSize = entryPackSize;
+
+          const jobId = String(entry.job_id ?? '').trim();
+          const bottleId = String(entry.bottle_id ?? '').trim();
+          const jobKeys = [
+            jobId ? `job:${jobId}` : '',
+            bottleId ? `bottle:${bottleId}` : '',
+          ].filter(Boolean);
+
+          for (const jobKey of jobKeys) {
+            if (!jobSets[jobKey]) jobSets[jobKey] = { packTypes: new Set<string>(), packSize: '' };
+            entryTypes.forEach((type) => jobSets[jobKey].packTypes.add(type));
+            if (entryPackSize && !jobSets[jobKey].packSize) {
+              jobSets[jobKey].packSize = entryPackSize;
+            }
           }
         }
+
+        const byJob: Record<string, { packTypes: string[]; packSize: string }> = {};
+        for (const [jobKey, info] of Object.entries(jobSets)) {
+          byJob[jobKey] = {
+            packTypes: Array.from(info.packTypes).sort(),
+            packSize: info.packSize,
+          };
+        }
+
         out[machineNo] = {
           packTypes: Array.from(packTypesSet).sort(),
           packSize,
+          byJob,
         };
       }
       return out;
@@ -1968,6 +2031,30 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     if (row.kind === 'db') return String((row.dbEntry as { job_id: string }).job_id ?? '');
     if (row.kind === 'run') return row.run.jobId;
     return row.extra.jobName;
+  };
+
+  /**
+   * All unique Pack Types reported in the Hourly Production Report for the
+   * row's production job on the selected date. The job is matched by Job ID
+   * first, then by Bottle ID; when neither can be resolved (e.g. a manually
+   * added row) the machine-wide list for the day is used so the dropdown is
+   * never missing options that production actually reported.
+   */
+  const packTypesForRow = (machineNo: number, row: OrderedRow): string[] => {
+    const info = machinePackInfo[machineNo];
+    if (!info) return [];
+    const jobId = productionJobIdFor(row).trim();
+    const bottleId =
+      row.kind === 'run'
+        ? String(row.run.bottleId ?? '').trim()
+        : row.kind === 'db'
+        ? String((row.dbEntry as { bottle_id?: number | string | null }).bottle_id ?? '').trim()
+        : '';
+    const jobInfo = jobId ? info.byJob[`job:${jobId}`] : undefined;
+    if (jobInfo) return jobInfo.packTypes;
+    const bottleInfo = bottleId ? info.byJob[`bottle:${bottleId}`] : undefined;
+    if (bottleInfo) return bottleInfo.packTypes;
+    return info.packTypes;
   };
 
   const setNumberingCell = useCallback((key: string, field: string, value: string) => {
@@ -2560,11 +2647,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type and Pack Size come from the Hourly Production
-                        // Report machine-wise — the same values are reused in the
-                        // table and saved exactly as selected to the database.
-                        const packInfo = machinePackInfo[machineNo] ?? { packTypes: [], packSize: '' };
-                        const jobPackTypes = packInfo.packTypes;
+                        // Pack Type options are every unique pack type this job
+                        // reported in the Hourly Production Report for the selected
+                        // date; Pack Size is reused and saved as selected.
+                        const packInfo =
+                          machinePackInfo[machineNo] ?? { packTypes: [], packSize: '', byJob: {} };
+                        const jobPackTypes = packTypesForRow(machineNo, row);
                         // For saved DB rows, display the persisted Pack Type.
                         // New rows start blank — the user must select one.
                         const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
@@ -2857,11 +2945,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type and Pack Size come from the Hourly Production
-                        // Report machine-wise — the same values are reused in the
-                        // table and saved exactly as selected to the database.
-                        const packInfo = machinePackInfo[machineNo] ?? { packTypes: [], packSize: '' };
-                        const jobPackTypes = packInfo.packTypes;
+                        // Pack Type options are every unique pack type this job
+                        // reported in the Hourly Production Report for the selected
+                        // date; Pack Size is reused and saved as selected.
+                        const packInfo =
+                          machinePackInfo[machineNo] ?? { packTypes: [], packSize: '', byJob: {} };
+                        const jobPackTypes = packTypesForRow(machineNo, row);
                         // For saved DB rows, display the persisted Pack Type.
                         // New rows start blank — the user must select one.
                         const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
