@@ -4225,70 +4225,37 @@ rows.push(dateAndDay);
       const bottleNameFor = (id: string) =>
         bottles.find((b) => b.id === id)?.name ?? id;
 
-      const doc = new jsPDF('landscape');
-
-      // ── Header: report title block, date, machine + shift assignments ───
       // Report header — company name + selected date and day, centred.
-const centerX = doc.internal.pageSize.getWidth() / 2;
+      // Everything else (report title, machine line and shift assignments)
+      // is intentionally omitted from the printed report.
+      const [day, month, year] = dateLabel.split('-');
+      const reportDate = new Date(`${year}-${month}-${day}T00:00:00`);
 
-doc.setFont('helvetica', 'bold');
-doc.setFontSize(10);
-doc.text(reportHeader.company, centerX, 10, { align: 'center' });
+      const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
+        weekday: 'long',
+      })}`;
 
-const [day, month, year] = dateLabel.split('-');
-const reportDate = new Date(`${year}-${month}-${day}T00:00:00`);
-
-const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
-  weekday: 'long',
-})}`;
-
-doc.setFontSize(8);
-doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
-
-      doc.setFontSize(10);
-      doc.text('Hourly Production Report', 10, 22);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      doc.text(`Date: ${dateLabel}    Machine: No. ${activeMachine}`, 10, 27.5);
-      let y = 32;
-
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.text('Shift Assignments (Supervisor / Executive):', 10, y);
-
-      y += 4;
-
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-
-      const shiftAssignments = DB_SHIFT_MASTER.map((sh) => {
-        const a = getShiftAssignment(sh.shift_id);
-
-        return `${sh.shift_name}: Sup. ${a.supervisor || '—'} | Exec. ${a.executive || '—'}`;
-      });
-
-      doc.text(shiftAssignments.join('     |     '), 10, y);
-
-      const startY = y + 5;
-      // ── Table header (two rows; Weight F/M/R depends on machine gob type) ─
-      const headRowBase: any[] = [
-        { content: 'Shift', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Time', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Production Time', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Bottle Name', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Weight (gms)', colSpan: hasM ? 3 : 2, styles: { halign: 'center' } },
-        { content: 'Average', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Speed/Min', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'TYPE 1', colSpan: 3, styles: { halign: 'center', fillColor: [239, 246, 255], textColor: [30, 64, 175], fontStyle: 'bold' } },
-        { content: 'TYPE 2', colSpan: 3, styles: { halign: 'center', fillColor: [240, 249, 255], textColor: [3, 105, 161], fontStyle: 'bold' } },
-        { content: 'Bottles', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Pieces EFF%', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-        { content: 'Remarks', rowSpan: 2, styles: { halign: 'center', valign: 'middle' } },
-      ];
-      const head = [
-        headRowBase,
-        ['F', ...(hasM ? ['M'] : []), 'R', 'Pack Type', 'Pack Size', 'Cartons', 'Pack Type', 'Pack Size', 'Cartons'],
-      ];
+      // ── Table header (single compact row): Pack Type / Pack Size / Cartons
+      // are kept for both groups but the TYPE 1 / TYPE 2 group headings are
+      // no longer printed. Weight F/M/R depends on machine gob type.
+      const head = [[
+        'Shift',
+        'Time',
+        'Production Time',
+        'Bottle Name',
+        ...(hasM ? ['Weight F', 'Weight M', 'Weight R'] : ['Weight F', 'Weight R']),
+        'Average',
+        'Speed/Min',
+        'Pack Type',
+        'Pack Size',
+        'Cartons',
+        'Pack Type',
+        'Pack Size',
+        'Cartons',
+        'Bottles',
+        'Pieces EFF%',
+        'Remarks',
+      ]];
 
       // ── Body: every displayed row in timeline order (calculations identical
       // to on-screen) — the 24 hourly rows plus any split segments. Split rows
@@ -4355,10 +4322,13 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
       body.push(summary);
       bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
 
-      // ── Column widths + alignment (landscape A4 with 10mm page margins) ──
+      // ── Column widths + alignment ────────────────────────────────────────
+      // A4 landscape is 297mm wide; with 7.5mm side margins the available
+      // width is 282mm. Both width lists sum to exactly 282mm so the header
+      // and every data column stay aligned across the full page width.
       const colWidths = hasM
-        ? [11, 16, 16, 34, 11, 11, 11, 13, 13, 11, 11, 12, 11, 11, 12, 11, 11, 24]
-        : [11, 16, 16, 34, 11, 11, 13, 13, 11, 11, 12, 11, 11, 12, 11, 11, 24];
+        ? [12, 17, 17, 37, 12, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 26]
+        : [12, 17, 17, 43, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 32];
 
       const columnStyles: Record<number, any> = {};
       colWidths.forEach((w, i) => {
@@ -4366,48 +4336,117 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         columnStyles[i] = { cellWidth: w, halign: leftAligned ? 'left' : 'center' };
       });
 
-      // Rows flow onto additional pages automatically when the 24-hour table
-      // and summary exceed a single physical page — nothing is truncated.
-      autoTable(doc, {
-        head,
-        body,
-        startY,
-        margin: { top: startY, left: 10, right: 10, bottom: 12 },
-        theme: 'grid',
-        includeEmptyRows: true,
-        columnStyles,
-        styles: {
-          fontSize: 6,
-          cellPadding: 1.4,
-          textColor: [30, 41, 59],
-          lineColor: [203, 213, 225],
-          lineWidth: 0.1,
-          valign: 'middle',
-        },
-        headStyles: {
-          fillColor: [30, 41, 59],
-          textColor: [255, 255, 255],
-          fontStyle: 'bold',
-          fontSize: 6.5,
-          halign: 'center',
-        },
-        alternateRowStyles: false,
-        didParseCell: (data: any) => {
-          if (data.section !== 'body') return;
-          const meta = bodyMeta[data.row.index];
-          if (meta?.summary) {
-            data.cell.styles.fillColor = [240, 244, 250];
-            data.cell.styles.fontStyle = 'bold';
-          } else if (meta?.grouped) {
-            // Split-group highlight, mirroring the on-screen table.
-            data.cell.styles.fillColor = '#fff7e1';
-          } else {
-            data.cell.styles.fillColor = SHIFT_ROW_BG[meta?.shiftIdx ?? 0];
-          }
-        },
-      });
+      const PAGE_MARGIN_X = 7.5;
+      const PAGE_MARGIN_BOTTOM = 8;
+      const TABLE_START_Y = 17;
+      const FOOTER_Y_FROM_BOTTOM = 4.5;
 
-      // ── Footer with page numbers on every page ──────────────────────────
+      // Compact print profiles, tried from most readable to most compact.
+      // The first profile that keeps the complete table on a single A4
+      // landscape page wins, so the normal 24-hour report uses the largest
+      // font while split rows are still accommodated without truncation.
+      const printProfiles = [
+        { fontSize: 7, cellPadding: 1.2, fill: 0.96 },
+        { fontSize: 6.5, cellPadding: 1.0, fill: 0.94 },
+        { fontSize: 6, cellPadding: 0.8, fill: 0.92 },
+        { fontSize: 5.5, cellPadding: 0.6, fill: 0.90 },
+        { fontSize: 5, cellPadding: 0.45, fill: 0.88 },
+        { fontSize: 4.5, cellPadding: 0.3, fill: 0.86 },
+        { fontSize: 4, cellPadding: 0.2, fill: 0.84 },
+        { fontSize: 3.5, cellPadding: 0.1, fill: 0.82 },
+        { fontSize: 3, cellPadding: 0, fill: 0.80 },
+      ];
+
+      let doc: any = null;
+      for (const profile of printProfiles) {
+        const candidate = new jsPDF('landscape');
+        const pageW = candidate.internal.pageSize.getWidth();
+        const pageH = candidate.internal.pageSize.getHeight();
+        const centerX = pageW / 2;
+
+        // Header — only the company name and report date remain.
+        candidate.setFont('helvetica', 'bold');
+        candidate.setFontSize(10);
+        candidate.setTextColor(30, 41, 59);
+        candidate.text(reportHeader.company, centerX, 9, { align: 'center' });
+
+        candidate.setFont('helvetica', 'normal');
+        candidate.setFontSize(8);
+        candidate.text(
+          `${dateAndDay}    Machine: No. ${activeMachine}`,
+          centerX,
+          13.5,
+          { align: 'center' },
+        );
+
+        // Distribute the body rows across the full usable page height so the
+        // report fills the page without leaving a large blank area at the
+        // bottom. The profile's fill factor leaves a small safety margin for
+        // wrapped cell text and printer/PDF rounding.
+        const availableHeight = pageH - PAGE_MARGIN_BOTTOM - TABLE_START_Y;
+        const minCellHeight = Math.max(
+          1.6,
+          (availableHeight / (body.length + 1)) * profile.fill,
+        );
+
+        autoTable(candidate, {
+          head,
+          body,
+          startY: TABLE_START_Y,
+          margin: {
+            top: TABLE_START_Y,
+            left: PAGE_MARGIN_X,
+            right: PAGE_MARGIN_X,
+            bottom: PAGE_MARGIN_BOTTOM,
+          },
+          theme: 'grid',
+          includeEmptyRows: true,
+          // Never split a production row across pages.
+          rowPageBreak: 'avoid',
+          columnStyles,
+          styles: {
+            fontSize: profile.fontSize,
+            cellPadding: profile.cellPadding,
+            minCellHeight,
+            textColor: [30, 41, 59],
+            lineColor: [203, 213, 225],
+            lineWidth: 0.1,
+            valign: 'middle',
+            overflow: 'linebreak',
+          },
+          headStyles: {
+            fillColor: [30, 41, 59],
+            textColor: [255, 255, 255],
+            fontStyle: 'bold',
+            fontSize: profile.fontSize + 0.5,
+            halign: 'center',
+            minCellHeight,
+          },
+          alternateRowStyles: false,
+          didParseCell: (data: any) => {
+            if (data.section !== 'body') return;
+            const meta = bodyMeta[data.row.index];
+            if (meta?.summary) {
+              data.cell.styles.fillColor = [240, 244, 250];
+              data.cell.styles.fontStyle = 'bold';
+            } else if (meta?.grouped) {
+              // Split-group highlight, mirroring the on-screen table.
+              data.cell.styles.fillColor = '#fff7e1';
+            } else {
+              data.cell.styles.fillColor = SHIFT_ROW_BG[meta?.shiftIdx ?? 0];
+            }
+          },
+        });
+
+        doc = candidate;
+        if (candidate.getNumberOfPages() === 1) break;
+      }
+
+      if (!doc) {
+        throw new Error('Could not create the report document.');
+      }
+
+      // ── Footer with page numbers ────────────────────────────────────────
       const pageCount = doc.getNumberOfPages();
       const pageW = doc.internal.pageSize.getWidth();
       const pageH = doc.internal.pageSize.getHeight();
@@ -4415,8 +4454,8 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         doc.setPage(i);
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
-        doc.text(`Hourly Production Monitor — Machine ${activeMachine} — ${dateLabel}`, 10, pageH - 5);
-        doc.text(`Page ${i} of ${pageCount}`, pageW - 10, pageH - 5, { align: 'right' });
+        doc.text(`Hourly Production Monitor — Machine ${activeMachine} — ${dateLabel}`, 10, pageH - FOOTER_Y_FROM_BOTTOM);
+        doc.text(`Page ${i} of ${pageCount}`, pageW - 10, pageH - FOOTER_Y_FROM_BOTTOM, { align: 'right' });
       }
 
       doc.save(`Production_Quality_Monitor_${dateKey}.pdf`);
@@ -4511,42 +4550,36 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
         .qm-content-scroll { scrollbar-gutter: stable; }
         .qm-table-scroll { scrollbar-gutter: stable; }
         @media print {
-          @page { size: landscape; margin: 0.15in; }
+          @page { size: A4 landscape; margin: 6mm 7.5mm; }
           body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
           .print-container { padding: 0 !important; max-width: none !important; animation: none !important; display: block !important; height: auto !important; min-height: 0 !important; }
           .no-print { display: none !important; }
           .qm-navbar-stable { position: static !important; }
           .qm-content-scroll { overflow: visible !important; flex: none !important; min-height: 0 !important; max-height: none !important; }
-          .qm-table-card { min-width: 0 !important; }
+          .qm-table-card { min-width: 0 !important; page-break-inside: avoid; break-inside: avoid; }
           .qm-table-scroll { max-height: none !important; overflow: visible !important; }
           thead.qm-sticky-head th { position: static !important; }
-          .print-header { display: block !important; }
-          .print-header { margin-bottom: 3px !important; padding-bottom: 3px !important; }
+          .print-header { display: block !important; margin-bottom: 3px !important; padding-bottom: 3px !important; }
           .print-header h2 { font-size: 11px !important; margin: 0 !important; }
           .print-header p { font-size: 9px !important; margin: 0 !important; }
-          table { font-size: 7px !important; width: 100% !important; min-width: 0 !important; table-layout: fixed !important; border-collapse: collapse !important; }
+          table { font-size: 7px !important; width: 100% !important; min-width: 0 !important; table-layout: fixed !important; border-collapse: collapse !important; page-break-inside: avoid !important; break-inside: avoid !important; }
           th, td { padding: 1px 2px !important; font-size: 7px !important; line-height: 1.1 !important; }
           thead tr th { font-size: 6.5px !important; }
           input, select, textarea { border: none !important; background: transparent !important; padding: 0 !important; font-size: 7px !important; color: #1e293b !important; -webkit-appearance: none !important; appearance: none !important; }
           tbody button { display: none !important; }
-          tr { page-break-inside: avoid; page-break-after: auto; }
+          tr { page-break-inside: avoid !important; break-inside: avoid !important; page-break-after: auto; }
           thead { display: table-header-group; }
+          table, tbody { page-break-inside: avoid !important; break-inside: avoid !important; }
         }
       `}</style>
 
-      {/* Print-only header */}
+      {/* Print-only header — company name and report date only */}
       <div className="print-header" style={{ display: 'none', marginBottom: '6px', textAlign: 'center', borderBottom: '2px solid #1e293b', paddingBottom: '6px' }}>
         <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1e293b' }}>
           {COMPANY_NAME}
         </h2>
-        <p style={{ margin: '1px 0 3px', fontSize: '11px', fontWeight: 600, color: '#1e293b' }}>
-          {reportHeader.title}
-        </p>
-        <h2 style={{ margin: 0, fontSize: '14px', fontWeight: 700, color: '#1e293b' }}>
-          Machine {activeMachine} — Production Quality Report
-        </h2>
         <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#64748b' }}>
-          Date: {dateLabel}
+          Date: {dateLabel} — Machine: No. {activeMachine}
         </p>
       </div>
       {/* Page title row — stable Quality Module header (never scrolls away) */}
