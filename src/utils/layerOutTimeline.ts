@@ -232,3 +232,121 @@ export const layerOutInputsFromSavedPeriods = (
   }
   return { perShift, carryMinutes };
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Production Time — the Packing Timeline shifted back by the Lehr Out minutes
+// that apply to each boundary. This is the shared builder used by the Hourly
+// Production Monitor and as the MIN time source of the Machine Wise Production
+// and Efficiency report.
+//
+//   Production Start = Packing Start − applicable Lehr Out
+//   Production End   = Packing End   − applicable Lehr Out
+//
+// Within a shift the applicable Lehr Out is the one in effect when the shift
+// began (the previous shift's value, or the previous production day's
+// third-shift carry-in for the first shift), so the offset stays constant. It
+// changes only at a shift-ending row: that row's START still uses the previous
+// value, while its END uses its own shift's Lehr Out. The next shift then
+// continues with the new value.
+//
+// The first row inherits the previous day's third-shift Lehr Out (or the normal
+// 60-minute interval when none was recorded), which makes Production Time begin
+// at 7:00 AM. Every row starts where the previous row ended, so the timeline
+// stays continuous across shifts and midnight, and the complete production day
+// is exactly 1,440 minutes (7:00 AM → 7:00 AM next day).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Last hourly entry (its key is the period END) of every shift. */
+const SHIFT_LAST_HOURLY_KEY: Record<number, string> = {
+  1: '4:00 PM',
+  2: '12:00 AM',
+  3: '8:00 AM',
+};
+
+export interface ProductionTimeSlot {
+  start: string;
+  end: string;
+  startMinutes: number;
+  endMinutes: number;
+  durationMinutes: number;
+}
+
+// 7:00 AM represented in the 9 AM-based timeline (see toTimelineMinutes).
+const PRODUCTION_DAY_START_MINUTES = toTimelineMinutes('7:00 AM') ?? 0;
+
+/** Wraps a timeline minute value into one 24-hour day (0…1439). */
+const normaliseDayMinutes = (minutes: number): number =>
+  ((minutes % (24 * 60)) + 24 * 60) % (24 * 60);
+
+/**
+ * Builds the Production Time slots from the Packing Timeline slots. ``layerOut``
+ * carries each shift's Lehr Out minutes and ``shiftIdxByKey`` the 0-based shift
+ * index of every key (splits inherit their parent hour's shift).
+ */
+export const buildProductionTimeline = (
+  orderedKeys: string[],
+  timelineSlots: Record<string, LayerOutSlot>,
+  shiftIdxByKey: Record<string, number>,
+  layerOut: LayerOutValueMap,
+): Record<string, ProductionTimeSlot> => {
+  const out: Record<string, ProductionTimeSlot> = {};
+  if (orderedKeys.length === 0) return out;
+
+  // Offset in effect at the very first boundary: how far the first packing
+  // start sits after 7:00 AM (the previous day's third-shift Lehr Out).
+  let delayMinutes = 60;
+  const firstSlot = timelineSlots[orderedKeys[0]];
+  if (firstSlot) {
+    const carryIn = normaliseDayMinutes(
+      firstSlot.startMinutes - PRODUCTION_DAY_START_MINUTES,
+    );
+    if (carryIn >= LAYER_OUT_MIN_MINUTES && carryIn <= LAYER_OUT_MAX_MINUTES) {
+      delayMinutes = carryIn;
+    }
+  }
+
+  let previousEnd: number | null = null;
+  orderedKeys.forEach((key) => {
+    const slot = timelineSlots[key];
+    if (!slot) {
+      const fallback = previousEnd ?? PRODUCTION_DAY_START_MINUTES;
+      out[key] = {
+        start: formatTimelineMinutes(fallback),
+        end: formatTimelineMinutes(fallback),
+        startMinutes: fallback,
+        endMinutes: fallback,
+        durationMinutes: 0,
+      };
+      previousEnd = fallback;
+      return;
+    }
+
+    const startMinutes = previousEnd !== null
+      ? previousEnd
+      : slot.startMinutes - delayMinutes;
+
+    // At a shift transition the START boundary keeps the previous shift's
+    // Lehr Out (delayMinutes); the END boundary switches to this shift's own
+    // Lehr Out. A blank/zero Lehr Out means the normal one-hour final row.
+    // The shift-ending row is identified by its own canonical key, so split
+    // rows and missing neighbour keys can never shift the transition point.
+    const shiftIdx = shiftIdxByKey[key] ?? 0;
+    const isLastOfShift = key === SHIFT_LAST_HOURLY_KEY[shiftIdx + 1];
+    if (isLastOfShift) {
+      const shiftLayerOut = layerOut[shiftIdx + 1] ?? 0;
+      delayMinutes = shiftLayerOut > 0 ? shiftLayerOut : 60;
+    }
+
+    const endMinutes = slot.endMinutes - delayMinutes;
+    out[key] = {
+      start: formatTimelineMinutes(startMinutes),
+      end: formatTimelineMinutes(endMinutes),
+      startMinutes,
+      endMinutes,
+      durationMinutes: Math.max(0, endMinutes - startMinutes),
+    };
+    previousEnd = endMinutes;
+  });
+
+  return out;
+};

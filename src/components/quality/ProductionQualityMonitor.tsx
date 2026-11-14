@@ -978,22 +978,35 @@ interface ProductionTimeSlot {
   durationMinutes: number;
 }
 
+// 7:00 AM represented in the 9 AM-based timeline (see toTimelineMinutes).
+const PRODUCTION_DAY_START_MINUTES = toTimelineMinutes('7:00 AM') ?? 0;
+
+/** Wraps a timeline minute value into one 24-hour day (0…1439). */
+const normaliseDayMinutes = (minutes: number): number =>
+  ((minutes % (24 * 60)) + 24 * 60) % (24 * 60);
+
 /**
- * Continuous Production Time — independent of the Packing Timeline.
+ * Production Time — the Packing Timeline shifted back by the Lehr Out minutes
+ * that apply to each boundary:
  *
- * Production Time advances in one-hour steps from the real first interval's
- * start (which already includes any previous-day Lehr Out carry-in). It never
- * restarts at a scheduled shift start: each row begins exactly where the
- * previous row ended, so the sequence also crosses midnight naturally.
+ *   Production Start = Packing Start − applicable Lehr Out
+ *   Production End   = Packing End   − applicable Lehr Out
  *
- * At the final row of a shift, an explicitly entered Lehr Out value is used as
- * that row's real end (the same Lehr Out end the Packing Timeline computes),
- * and the next shift therefore starts from that exact minute. When no Lehr Out
- * value is entered, Production Time simply continues its one-hour sequence
- * across the shift boundary. Minute positions (not formatted labels) are used
- * internally, so AM/PM and date rollover are handled without gaps or overlaps.
+ * Within a shift the applicable Lehr Out is the one that was in effect when
+ * the shift began (the previous shift's value, or the previous production
+ * day's third-shift carry-in for the first shift), so the offset stays
+ * constant. It changes only at a shift-ending row: that row's START still uses
+ * the previous value, while its END uses its own shift's Lehr Out — exactly
+ * the transition rule from the reference report. The next shift then continues
+ * with the new value.
+ *
+ * The first row inherits the previous day's third-shift Lehr Out (or the
+ * normal 60-minute interval when none was recorded), which makes Production
+ * Time begin at 7:00 AM. Every row starts where the previous row ended, so the
+ * timeline stays continuous across shifts and midnight, and the complete
+ * production day is exactly 1,440 minutes (7:00 AM → 7:00 AM next day).
  */
-const buildContinuousProductionTimeline = (
+const buildProductionTimeline = (
   orderedKeys: string[],
   timelineSlots: Record<string, LayerOutSlot>,
   shiftIdxByKey: Record<string, number>,
@@ -1002,29 +1015,52 @@ const buildContinuousProductionTimeline = (
   const out: Record<string, ProductionTimeSlot> = {};
   if (orderedKeys.length === 0) return out;
 
-  let previousEnd: number | null = null;
-  orderedKeys.forEach((key, index) => {
-    const slot = timelineSlots[key];
-    const keyMinutes = toTimelineMinutes(key);
-    const actualStart = slot?.startMinutes
-      ?? (keyMinutes !== null ? keyMinutes - 60 : 0);
-    const startMinutes = index === 0 ? actualStart : (previousEnd ?? actualStart);
-    let endMinutes = startMinutes + 60;
+  // Offset in effect at the very first boundary: how far the first packing
+  // start sits after 7:00 AM (the previous day's third-shift Lehr Out).
+  let delayMinutes = 60;
+  const firstSlot = timelineSlots[orderedKeys[0]];
+  if (firstSlot) {
+    const carryIn = normaliseDayMinutes(
+      firstSlot.startMinutes - PRODUCTION_DAY_START_MINUTES,
+    );
+    if (carryIn >= LAYER_OUT_MIN_MINUTES && carryIn <= LAYER_OUT_MAX_MINUTES) {
+      delayMinutes = carryIn;
+    }
+  }
 
-    // Only an explicitly entered Lehr Out adjusts a shift boundary. With no
-    // Lehr Out (0/empty), the continuous one-hour sequence runs straight
-    // through the scheduled shift change instead of snapping to it.
-    const shiftIdx = shiftIdxByKey[key] ?? 0;
-    const nextKey = orderedKeys[index + 1];
-    const isLastOfShift = !nextKey || (shiftIdxByKey[nextKey] ?? 0) !== shiftIdx;
-    const shiftLayerOut = layerOut[shiftIdx + 1] ?? 0;
-    if (isLastOfShift && shiftLayerOut > 0) {
-      const actualEnd = slot?.endMinutes;
-      if (actualEnd !== undefined && Number.isFinite(actualEnd) && actualEnd > startMinutes) {
-        endMinutes = actualEnd;
-      }
+  let previousEnd: number | null = null;
+  orderedKeys.forEach((key) => {
+    const slot = timelineSlots[key];
+    if (!slot) {
+      const fallback = previousEnd ?? PRODUCTION_DAY_START_MINUTES;
+      out[key] = {
+        start: formatTimelineMinutes(fallback),
+        end: formatTimelineMinutes(fallback),
+        startMinutes: fallback,
+        endMinutes: fallback,
+        durationMinutes: 0,
+      };
+      previousEnd = fallback;
+      return;
     }
 
+    const startMinutes = previousEnd !== null
+      ? previousEnd
+      : slot.startMinutes - delayMinutes;
+
+    // At a shift transition the START boundary keeps the previous shift's
+    // Lehr Out (delayMinutes); the END boundary switches to this shift's own
+    // Lehr Out. A blank/zero Lehr Out means the normal one-hour final row.
+    // The shift-ending row is identified by its own canonical key, so split
+    // rows and missing neighbour keys can never shift the transition point.
+    const shiftIdx = shiftIdxByKey[key] ?? 0;
+    const isLastOfShift = key === SHIFT_LAST_HOURLY_KEY[shiftIdx + 1];
+    if (isLastOfShift) {
+      const shiftLayerOut = layerOut[shiftIdx + 1] ?? 0;
+      delayMinutes = shiftLayerOut > 0 ? shiftLayerOut : 60;
+    }
+
+    const endMinutes = slot.endMinutes - delayMinutes;
     out[key] = {
       start: formatTimelineMinutes(startMinutes),
       end: formatTimelineMinutes(endMinutes),
@@ -1806,9 +1842,8 @@ const QualityTimeRow = React.memo<{
   const hasBottle = !!entry?.bottle_id;
   const isCurrentEntry = hasBottle && isActiveEntry;
 
-  // Production Time is intentionally independent from Packing Timeline: it
-  // advances continuously from the real production start and continues across
-  // shifts/midnight instead of repeating the Packing Timeline intervals.
+  // Production Time is the Packing Timeline shifted back by the applicable
+  // Lehr Out minutes, staying continuous across shifts and midnight.
   const productionTimeLabel = productionTime ?? displayTime ?? time;
 
   // Row lock (Machine 1–4 tables only): when the row's checkbox is checked,
@@ -1971,6 +2006,10 @@ const QualityTimeRow = React.memo<{
         />
       </td>
 
+      <td style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
+        <span>{productionTimeLabel}</span>
+      </td>
+
       <td
         style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
         onMouseEnter={() => setTimeHovered(true)}
@@ -2040,10 +2079,6 @@ const QualityTimeRow = React.memo<{
             ×
           </button>
         )}
-      </td>
-
-      <td style={{ ...tdCenter, padding: '6px 4px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}>
-        <span>{productionTimeLabel}</span>
       </td>
 
       <td style={{ ...td, padding: '4px 6px' }}>
@@ -2197,7 +2232,7 @@ const QualityTimeRow = React.memo<{
       </td>
 
       {/* TYPE 2 packaging entry — independent fields, never shared with TYPE 1. */}
-      <td style={{ ...tdCenter, padding: '4px 2px', borderLeft: '2px solid #60a5fa' }}>
+      <td style={{ ...tdCenter, padding: '4px 2px' }}>
         <PackingMultiSelect
           selected={entry?.packing_category_2 ?? []}
           disabled={fieldsDisabled}
@@ -2866,16 +2901,16 @@ export const QualityControlModule: React.FC = () => {
     }
     return map;
   }, [displayKeys, activeRows]);
-  // Continuous Production Time is derived from the Packing Timeline only for
-  // its real starting point and explicit Lehr Out boundaries; it has its own
-  // one-hour advancement and never restarts at a shift or midnight boundary.
+  // Production Time is the Packing Timeline shifted back by the Lehr Out
+  // minutes applicable to each boundary (previous shift for a start boundary,
+  // own shift for a shift-ending end boundary).
   const productionTimeSlots = useMemo(() => {
     const layerOut = layerOutValuesForDateMachine(
       layerOutInputs,
       dateKey,
       String(activeMachine),
     );
-    return buildContinuousProductionTimeline(
+    return buildProductionTimeline(
       displayKeys,
       timelineSlots,
       shiftIdxByKey,
@@ -4874,14 +4909,18 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
-                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '52px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Packing Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '76px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Production Time</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '52px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Packing Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>Avg</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Speed\n/Min'}</th>
-                <th colSpan={3} style={{ ...stickyThStyle(0), backgroundColor: '#eff6ff', color: '#1e40af', borderLeft: '1px solid #dbeafe', borderBottom: `1px solid ${C.border}`, letterSpacing: '0.08em' }}>TYPE 1</th>
-                <th colSpan={3} style={{ ...stickyThStyle(0), backgroundColor: '#f0f9ff', color: '#0369a1', borderLeft: '2px solid #60a5fa', borderBottom: `1px solid ${C.border}`, letterSpacing: '0.08em' }}>TYPE 2</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '34px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '34px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
+                <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>{'Bottles\nin Pieces'}</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '40px', borderBottom: `2px solid ${C.border}` }}>Pieces EFF%</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '160px', textAlign: 'left', borderBottom: `2px solid ${C.border}` }}>Remarks</th>
@@ -4890,12 +4929,6 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>F</th>
                 {hasM && <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>M</th>}
                 <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '50px', fontSize: '10px', borderBottom: `2px solid ${C.border}`, color: '#475569' }}>R</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '34px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fbff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '34px', backgroundColor: '#f8fdff', borderLeft: '2px solid #60a5fa', borderBottom: `2px solid ${C.border}` }}>{'Pack\nType'}</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>{'Pack\nSize'}</th>
-                <th style={{ ...stickyThStyle(QM_HEAD_ROW2_TOP), width: '40px', backgroundColor: '#f8fdff', borderBottom: `2px solid ${C.border}` }}>Cartons</th>
               </tr>
             </thead>
             <tbody>
@@ -5011,7 +5044,7 @@ doc.text(dateAndDay, centerX, 15.5, { align: 'center' });
                 <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
                   {stats.totalCartons.toLocaleString()}
                 </td>
-                <td style={{ padding: '8px 6px', borderLeft: '2px solid #60a5fa', borderRight: `1px solid ${C.border}` }} />
+                <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
                 <td style={{ padding: '8px 6px', borderRight: `1px solid ${C.border}` }} />
                 <td style={{ padding: '8px 10px', textAlign: 'center', fontWeight: 700, color: '#1e293b', fontSize: '13px', borderRight: `1px solid ${C.border}` }}>
                   {stats.totalCartonsType2.toLocaleString()}

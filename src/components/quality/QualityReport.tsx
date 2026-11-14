@@ -43,6 +43,7 @@ import {
 import { getGobCountFromDB, calculateTheoreticalBottles } from '../../utils/calculations';
 import {
   buildLayerOutTimeline,
+  buildProductionTimeline,
   layerOutInputsFromSavedPeriods,
   LayerOutSlot,
 } from '../../utils/layerOutTimeline';
@@ -1192,6 +1193,21 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         };
       }
 
+      // Production Time — the Packing Timeline shifted back by the applicable
+      // Lehr Out minutes (the same builder the Hourly Production Monitor uses).
+      // Used ONLY as the MIN time source below: duration, efficiency and every
+      // production quantity keep reading the Packing Timeline slots above.
+      const shiftIdxByKey: Record<string, number> = {};
+      for (const key of orderedKeys) {
+        shiftIdxByKey[key] = Math.max(0, shiftIdForReportKey(key) - 1);
+      }
+      const productionTimeSlotsByKey = buildProductionTimeline(
+        orderedKeys,
+        timelineSlots,
+        shiftIdxByKey,
+        perShift,
+      );
+
       for (const run of splitMachineRuns(machineNo, byTime, timelineSlotsByKey)) {
         const shiftUnits = [0, 0, 0];
         const shiftEffValues: number[][] = [[], [], []];
@@ -1300,7 +1316,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         const overallEff = averageEfficiency(overallEffValues);
 
         // MIN — actual production runtime in minutes within the production day,
-        // calculated from the run's actual start to end time using timeline positions.
+        // calculated from the run's actual start to end time using the
+        // PRODUCTION TIME positions (Packing Timeline shifted back by Lehr Out).
         // Each key label is the END of its own period, so the run's window is
         // [first label − first duration, last label]: the first point's duration
         // locates the run's start, and the last label is the run's end. Every
@@ -1313,8 +1330,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         const first = run.points[0];
         const last = run.points[run.points.length - 1];
         if (run.points.length > 0 && first && last) {
-          const firstSlot = timelineSlotsByKey ? timelineSlotsByKey[first.slot.time] : undefined;
-          const lastSlot = timelineSlotsByKey ? timelineSlotsByKey[last.slot.time] : undefined;
+          const firstSlot = productionTimeSlotsByKey ? productionTimeSlotsByKey[first.slot.time] : undefined;
+          const lastSlot = productionTimeSlotsByKey ? productionTimeSlotsByKey[last.slot.time] : undefined;
           if (firstSlot && lastSlot) {
             const startMin = firstSlot.startMinutes;
             const endMin = lastSlot.endMinutes;
