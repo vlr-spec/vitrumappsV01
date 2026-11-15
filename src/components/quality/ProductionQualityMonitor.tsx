@@ -135,6 +135,20 @@ const formatSplitDisplayLabel = (parent: string, split: string): string => {
   return formatIntervalDisplayLabel(parent, split);
 };
 
+/** Aligns a split point to the row interval's timeline coordinate. The first
+ *  row crosses the 9 AM production-day boundary (its slot is e.g. −60 → 0),
+ *  while a clock value such as 8:30 AM normally maps to 1410. One day step in
+ *  the needed direction puts both on the same scale. */
+const alignSplitMinuteToInterval = (
+  value: number,
+  startMinutes: number,
+  endMinutes: number,
+): number => {
+  if (value < startMinutes) return value + 24 * 60;
+  if (value > endMinutes) return value - 24 * 60;
+  return value;
+};
+
 /** Full production interval for one display row: previous displayed time → own time (first row = own − 1h). Prefers the entry's actual stored period when present. */
 const getIntervalDisplayForKey = (
   orderedKeys: string[],
@@ -160,6 +174,31 @@ const getIntervalDisplayForKey = (
 };
 
 const isSplitKey = (key: string): boolean => !PRODUCTION_TIME_SET.has(key);
+
+/** A split row that belongs to the carry-in hour before the 9 AM production
+ *  day start (e.g. 8:30 AM carved out of the first 9:00 AM row). These rows
+ *  sit at the TOP of the table, before 9:00 AM — not after the final 8:00 AM
+ *  row — so their chronological position needs one 24-hour step back. */
+const isPreDayStartSplitKey = (key: string): boolean => {
+  if (!isSplitKey(key)) return false;
+  const mins = parseTimeLabelToMinutes(key);
+  return mins !== null && mins < 9 * 60;
+};
+
+/** Timeline position used for ordering/timeline math. Manual split rows before
+ *  9 AM are shifted one day back so they precede the first hourly 9 AM row. */
+const toOrderedTimelineMinutes = (label: string): number | null => {
+  const t = toTimelineMinutes(label);
+  if (t === null) return null;
+  return isPreDayStartSplitKey(label) ? t - 24 * 60 : t;
+};
+
+/** Timeline minute value for a pre-9 AM clock label (8:00 AM → −60). Used only
+ *  for the first row when it is a split row from the carry-in hour. */
+const toPreNineTimelineMinutes = (label: string): number | null => {
+  const mins = parseTimeLabelToMinutes(label);
+  return mins === null ? null : mins - 9 * 60;
+};
 
 /** Start of a row's displayed period (previous displayed key; the first row
  *  spans the hour ending at its own time), preferring the entry's stored
@@ -195,8 +234,8 @@ const getOrderedDisplayKeys = (rows: Record<string, QualityHourlyEntry | undefin
   for (const k of Object.keys(rows ?? {})) keys.add(k);
   const list = [...keys];
   list.sort((a, b) => {
-    const ta = toTimelineMinutes(a);
-    const tb = toTimelineMinutes(b);
+    const ta = toOrderedTimelineMinutes(a);
+    const tb = toOrderedTimelineMinutes(b);
     if (ta === null && tb === null) return a.localeCompare(b);
     if (ta === null) return 1;
     if (tb === null) return -1;
@@ -253,8 +292,16 @@ const stampSplitPeriods = (
     if (!e) return;
     let start: string;
     if (i <= 0) {
-      const tOwn = parseTimeLabelToMinutes(k);
-      start = tOwn !== null ? formatMinutesToLabel(tOwn - 60) : k;
+      // A split row from the pre-9 AM carry-in hour keeps the parent period
+      // start it was created with (e.g. 8:00 AM). Without this, the first-row
+      // fallback (own time − 1h) would give the split a one-hour span and
+      // overlap the 9 AM row.
+      if (isPreDayStartSplitKey(k) && e.period_start) {
+        start = e.period_start;
+      } else {
+        const tOwn = parseTimeLabelToMinutes(k);
+        start = tOwn !== null ? formatMinutesToLabel(tOwn - 60) : k;
+      }
     } else {
       start = keys[i - 1];
     }
@@ -858,15 +905,19 @@ const buildLayerOutTimeline = (
   orderedKeys: string[],
   layerOut: LayerOutValueMap,
   carryInStartMinutes: number | null,
+  rows?: Record<string, QualityHourlyEntry | undefined>,
 ): Record<string, LayerOutSlot> => {
   const out: Record<string, LayerOutSlot> = {};
   if (orderedKeys.length === 0) return out;
 
-  const firstKeyMinutes = toTimelineMinutes(orderedKeys[0]);
-  // A carry-in from the previous day's final row sits in the morning part of
-  // the timeline (e.g. 7:50 AM), i.e. numerically after this day's 9 AM key.
-  // Shift this day's keys by one production day so the intervals stay ordered.
+  const firstKey = orderedKeys[0];
+  const firstIsPreDaySplit = isPreDayStartSplitKey(firstKey);
+  const firstKeyMinutes = toOrderedTimelineMinutes(firstKey);
+  // A pre-9 AM split row is already ordered before 9 AM, so the whole timeline
+  // stays in that (optionally negative) coordinate space. Otherwise keep the
+  // existing carry-in day shift.
   const dayOffset =
+    !firstIsPreDaySplit &&
     carryInStartMinutes !== null &&
     firstKeyMinutes !== null &&
     carryInStartMinutes > firstKeyMinutes
@@ -875,7 +926,7 @@ const buildLayerOutTimeline = (
 
   let previousEnd: number | null = carryInStartMinutes;
   orderedKeys.forEach((key, index) => {
-    const keyMinutes = toTimelineMinutes(key);
+    const keyMinutes = toOrderedTimelineMinutes(key);
     if (keyMinutes === null) {
       const fallback = previousEnd ?? 0;
       out[key] = {
@@ -890,10 +941,22 @@ const buildLayerOutTimeline = (
     }
 
     const endPosition = keyMinutes + dayOffset;
-    const startPosition =
-      index === 0
-        ? (previousEnd !== null ? previousEnd : endPosition - 60)
-        : (previousEnd as number);
+    let startPosition: number;
+    if (index === 0) {
+      if (firstIsPreDaySplit) {
+        // The split row's stored period_start is the parent row's original
+        // start (e.g. 8:00 AM), not one hour before the split point.
+        const firstRow = rows?.[key];
+        const explicitStart = firstRow?.period_start
+          ? toPreNineTimelineMinutes(firstRow.period_start)
+          : null;
+        startPosition = explicitStart ?? endPosition - 60;
+      } else {
+        startPosition = previousEnd !== null ? previousEnd : endPosition - 60;
+      }
+    } else {
+      startPosition = previousEnd as number;
+    }
 
     let end = endPosition;
     const shiftId = SHIFT_BY_LAST_HOURLY_KEY[key];
@@ -953,7 +1016,7 @@ const layerOutCarryInStartMinutes = (
 
   const previousRows = store[previousDate]?.[machineKey] ?? {};
   const previousKeys = getOrderedDisplayKeys(previousRows);
-  const previousSlots = buildLayerOutTimeline(previousKeys, previousLayerOut, null);
+  const previousSlots = buildLayerOutTimeline(previousKeys, previousLayerOut, null, previousRows);
   const lastKey = previousKeys[previousKeys.length - 1];
   const lastSlot = lastKey ? previousSlots[lastKey] : undefined;
   if (lastSlot) return lastSlot.endMinutes;
@@ -972,7 +1035,7 @@ const buildLayerOutTimelineForDateMachine = (
   const orderedKeys = getOrderedDisplayKeys(rows);
   const layerOut = layerOutValuesForDateMachine(inputs, date, machineKey);
   const carryIn = layerOutCarryInStartMinutes(date, machineKey, store, inputs);
-  return { orderedKeys, slots: buildLayerOutTimeline(orderedKeys, layerOut, carryIn) };
+  return { orderedKeys, slots: buildLayerOutTimeline(orderedKeys, layerOut, carryIn, rows) };
 };
 
 interface ProductionTimeSlot {
@@ -1137,7 +1200,7 @@ const layerOutInputsFromSavedPeriods = (
 ): { perShift: Record<number, number>; carryMinutes: number | null } => {
   const perShift: Record<number, number> = {};
   const orderedKeys = getOrderedDisplayKeys(rows);
-  const zeroSlots = buildLayerOutTimeline(orderedKeys, { 1: 0, 2: 0, 3: 0 }, null);
+  const zeroSlots = buildLayerOutTimeline(orderedKeys, { 1: 0, 2: 0, 3: 0 }, null, rows);
 
   for (const [lastKey, shiftId] of Object.entries(SHIFT_BY_LAST_HOURLY_KEY)) {
     if (!rows[lastKey]) continue;
@@ -2019,7 +2082,7 @@ const QualityTimeRow = React.memo<{
             Packing Timeline column. The resulting row is shared by both
             timelines, so splitting here also splits Packing Timeline (and vice
             versa) at the corresponding boundary. */}
-        {!isSplitRow && canSplit && canEdit && productionTimeHovered && onSplit && (
+        {canSplit && canEdit && productionTimeHovered && onSplit && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onSplit(time, 'production'); }}
@@ -2090,7 +2153,7 @@ const QualityTimeRow = React.memo<{
             never permanently on every row and never when hovering other cells.
             Split rows show a delete control instead so the original period can
             be restored. */}
-        {!isSplitRow && canSplit && canEdit && timeHovered && onSplit && (
+        {canSplit && canEdit && timeHovered && onSplit && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onSplit(time, 'packing'); }}
@@ -2927,7 +2990,7 @@ export const QualityControlModule: React.FC = () => {
       productionStore,
       layerOutInputs,
     );
-    return buildLayerOutTimeline(displayKeys, layerOut, carryIn);
+    return buildLayerOutTimeline(displayKeys, layerOut, carryIn, activeRows);
   }, [displayKeys, layerOutInputs, dateKey, activeMachine, productionStore]);
   const durationByKey = useMemo(() => {
     const map: Record<string, number> = {};
@@ -3016,7 +3079,7 @@ export const QualityControlModule: React.FC = () => {
       productionStoreRef.current,
       layerOutInputsRef.current,
     );
-    return { ordered, slots: buildLayerOutTimeline(ordered, layerOut, carryIn) };
+    return { ordered, slots: buildLayerOutTimeline(ordered, layerOut, carryIn, rows) };
   }, [dateKey, activeMachine]);
 
   // Split dialog labels: the interval the selected row displays and the exact
@@ -3047,29 +3110,33 @@ export const QualityControlModule: React.FC = () => {
     : '';
   const splitDialogEnd = splitTarget
     ? (splitSource === 'production'
-        ? (() => {
-            const tNext = toTimelineMinutes(splitTarget);
-            if (tNext === null || splitSourceOffset === null) {
-              return productionTimeSlots[splitTarget]?.end ?? splitTarget;
-            }
-            // The last production boundary that still lands inside this row's
-            // Packing Timeline period (shift-ending rows compress differently).
-            return formatTimelineMinutes(tNext - splitSourceOffset);
-          })()
+        ? (productionTimeSlots[splitTarget]?.end
+            ?? (() => {
+              const tNext = toTimelineMinutes(splitTarget);
+              if (tNext === null || splitSourceOffset === null) {
+                return splitTarget;
+              }
+              // The last production boundary that still lands inside this row's
+              // Packing Timeline period (shift-ending rows compress differently).
+              return formatTimelineMinutes(tNext - splitSourceOffset);
+            })())
         : splitTarget)
     : '';
 
   const openSplitDialog = useCallback((time: string, source: SplitTimelineSource = 'packing') => {
     if (!canEdit) return;
-    if (isSplitKey(time)) return;
     // Split the interval the row DISPLAYS — [period start, own time) — not
     // the following hour: the row keyed "11:00 AM" shows "10:00 - 11:00 AM",
     // so the split point must lie strictly inside that range.
     const byMachine = productionStoreRef.current?.[dateKey]?.[String(activeMachine)] ?? {};
     const { ordered, slots } = timelineForRows(byMachine);
-    const startTime = slots[time]?.start ?? getPeriodStartForKey(ordered, time, byMachine[time]);
-    const tStart = startTime ? toTimelineMinutes(startTime) : null;
-    const tEnd = toTimelineMinutes(time);
+    const slot = slots[time];
+    const startTime = slot?.start ?? getPeriodStartForKey(ordered, time, byMachine[time]);
+    // Use the slot's actual minute values so the first row's carry-in interval
+    // (e.g. 8:00 AM → 9:00 AM, i.e. −60 → 0 on the timeline) is compared
+    // correctly instead of wrapping 8:00 AM to 1380 and rejecting the split.
+    const tStart = slot?.startMinutes ?? (startTime ? toTimelineMinutes(startTime) : null);
+    const tEnd = slot?.endMinutes ?? toTimelineMinutes(time);
     if (!startTime || tStart === null || tEnd === null || tStart >= tEnd) return;
     setSplitTarget(time);
     setSplitSource(source);
@@ -3145,6 +3212,19 @@ export const QualityControlModule: React.FC = () => {
       const ordered = getOrderedDisplayKeys(nextByMachine);
       const followerKey = ordered[withDeleted.indexOf(time)];
       const follower = followerKey ? nextByMachine[followerKey] : undefined;
+      // Deleting the FIRST displayed row makes the follower the new first row.
+      // When that follower is a pre-9 AM split, stampSplitPeriods preserves its
+      // stored period_start — which still points at the deleted row's split
+      // point (e.g. 8:10 instead of 8:00). The deleted row's start is the true
+      // start of the merged period, so carry it over before re-stamping.
+      if (withDeleted[0] === time && followerKey && followerKey !== time
+        && isPreDayStartSplitKey(followerKey) && savedEntry?.period_start
+        && nextByMachine[followerKey]) {
+        nextByMachine[followerKey] = {
+          ...nextByMachine[followerKey],
+          period_start: savedEntry.period_start,
+        };
+      }
       // A locked follower keeps its stored group untouched — clearing it would
       // be an edit the backend rejects. The group is grouping/history only, so
       // leaving it in place costs nothing except that one cosmetic label.
@@ -3204,10 +3284,16 @@ export const QualityControlModule: React.FC = () => {
     // ([period start, own time)) — the same interval the Time column shows,
     // including a Layer Out Time adjustment.
     const { ordered, slots } = timelineForRows(rowsNow);
-    const startTime = slots[splitTarget]?.start
+    const slot = slots[splitTarget];
+    const startTime = slot?.start
       ?? getPeriodStartForKey(ordered, splitTarget, rowsNow[splitTarget]);
-    const tParent = startTime ? toTimelineMinutes(startTime) : null;
-    const tNext = toTimelineMinutes(splitTarget);
+    // The slot's startMinutes is already in timeline coordinates, which keeps
+    // the first row's carry-in span (8:00 AM → 9:00 AM = −60 → 0) comparable.
+    const tParent = slot?.startMinutes ?? (startTime ? toTimelineMinutes(startTime) : null);
+    // Use the slot's actual end: a pre-9 AM split row sits at negative
+    // timeline minutes, so its clock key (e.g. 8:35 AM → 1435) must not be
+    // compared directly with the negative start.
+    const tNext = slot?.endMinutes ?? toTimelineMinutes(splitTarget);
     if (!startTime || tParent === null || tNext === null || tParent >= tNext) {
       setSplitError('This hour cannot be split.');
       return;
@@ -3239,15 +3325,23 @@ export const QualityControlModule: React.FC = () => {
         setSplitError('This hour cannot be split.');
         return;
       }
-      const tPackingSplit = tSplit + splitSourceOffset;
+      const tPackingSplit = alignSplitMinuteToInterval(
+        tSplit + splitSourceOffset,
+        tParent,
+        tNext,
+      );
       if (!(tPackingSplit > tParent && tPackingSplit < tNext)) {
         setSplitError(`Pick a time strictly between ${splitDialogStart} and ${splitDialogEnd}.`);
         return;
       }
       packingCandidate = formatTimelineMinutes(tPackingSplit);
-    } else if (!(tSplit > tParent && tSplit < tNext)) {
-      setSplitError(`Pick a time strictly between ${startTime} and ${splitTarget}.`);
-      return;
+    } else {
+      const tPackingSplit = alignSplitMinuteToInterval(tSplit, tParent, tNext);
+      if (!(tPackingSplit > tParent && tPackingSplit < tNext)) {
+        setSplitError(`Pick a time strictly between ${startTime} and ${splitTarget}.`);
+        return;
+      }
+      packingCandidate = formatTimelineMinutes(tPackingSplit);
     }
     const splitKey = formatMinutesToLabel(parseTimeLabelToMinutes(packingCandidate) ?? 0);
     const existsLocal = rowsNow[splitKey];
@@ -3272,14 +3366,17 @@ export const QualityControlModule: React.FC = () => {
     // and never influences jobs, calculations or reports. Ids are sequential
     // per day + machine (SG001, SG002, …), reusing neither an id already in
     // use nor one pending deletion.
+    const parentGroup = (parentEntry?.split_group_id ?? '').trim();
     const usedGroups = new Set<string>();
     for (const e of Object.values(rowsNow)) {
       const g = (e?.split_group_id ?? '').trim();
       if (g) usedGroups.add(g);
     }
+    // A split row already belongs to a group; carving another segment out of
+    // it stays inside that same logical group instead of starting a second one.
     let seq = 1;
-    let newGroup = '';
-    while (seq < 1000) {
+    let newGroup = parentGroup;
+    while (!newGroup && seq < 1000) {
       const candidate = `SG${String(seq).padStart(3, '0')}`;
       if (!usedGroups.has(candidate)) {
         newGroup = candidate;
@@ -3637,11 +3734,9 @@ export const QualityControlModule: React.FC = () => {
     // Target the continuation row from the ACTUAL display timeline, never from
     // an array position. Every row's own key is the END of its interval (hourly
     // rows and split segments alike), so the next row strictly after the
-    // source's own time is the one the job continues into — including a split
-    // segment carved out of the next hour. Skipping a blank split row would
-    // jump the job over that segment and wrongly extend it in the later one.
-    const tSrc = toTimelineMinutes(time);
-    if (tSrc === null) return;
+    // source in display order is the one the job continues into — including a
+    // split segment carved out of the next hour and the pre-9 AM carry-in split
+    // rows displayed above 9 AM.
     // Checkbox save only: the extended row stays in memory until its checkbox is checked.
     setProductionStore((prev) => {
       const machineKey = String(activeMachine);
@@ -3651,11 +3746,10 @@ export const QualityControlModule: React.FC = () => {
         markTouched(date, mKey, tKey);
       };
       const byMachine = prev[dateKey]?.[machineKey] ?? {};
+      const orderedKeys = getOrderedDisplayKeys(byMachine);
+      const sourceIndex = orderedKeys.indexOf(time);
       const rowsAfter = (): string[] =>
-        getOrderedDisplayKeys(byMachine).filter((key) => {
-          const tKey = toTimelineMinutes(key);
-          return tKey !== null && tKey > tSrc;
-        });
+        sourceIndex >= 0 ? orderedKeys.slice(sourceIndex + 1) : [];
       for (const nextTime of rowsAfter()) {
         const target = byMachine[nextTime];
         // A locked slot is never written into — it would be an edit the
@@ -3695,11 +3789,8 @@ export const QualityControlModule: React.FC = () => {
       }
       // No row starts after the source: it is the final interval of the
       // production day, so the continuation belongs to the next day's first
-      // slot. Derived from the timeline, not from the source's array index.
-      const lastHourlyMinutes = toTimelineMinutes(
-        PRODUCTION_TIMES[PRODUCTION_TIMES.length - 1].time,
-      );
-      const isLastTimeline = lastHourlyMinutes !== null && tSrc >= lastHourlyMinutes;
+      // slot. Derived from display order, not from the source's array index.
+      const isLastTimeline = sourceIndex === orderedKeys.length - 1;
       if (isLastTimeline) {
         const nextDate = new Date(`${dateKey}T00:00:00`);
         nextDate.setDate(nextDate.getDate() + 1);
@@ -5101,6 +5192,8 @@ rows.push(dateAndDay);
                 const seen = new Set<number>();
                 return displayKeys.map((time) => {
                   const shiftIdx = shiftIdxByKey[time] ?? 0;
+                  // The shift cell belongs to the first displayed row of the
+                  // block, including a pre-9 AM split row placed above 9 AM.
                   const isFirstInShift = !seen.has(shiftIdx);
                   seen.add(shiftIdx);
                   const entry = activeRows[time];
@@ -5141,11 +5234,10 @@ rows.push(dateAndDay);
                       displayTime={displayTime}
                       productionTime={productionTime}
                       isSplitRow={split}
-                      canSplit={
-                        !split &&
-                        time !== PRODUCTION_TIMES[0].time &&
-                        (slot?.durationMinutes ?? 0) > 0
-                      }
+                      // Same dynamic check for EVERY row — including the first
+                      // row. The interval comes from the Lehr-Out-adjusted
+                      // timeline slot, so no time/key/index is special-cased.
+                      canSplit={(slot?.durationMinutes ?? 0) > 0}
                       rowSpan={shiftBlockCounts[shiftIdx] ?? 8}
                       durationHours={durationByKey[time] ?? 1}
                       periodStart={slot?.start ?? entry?.period_start ?? prevKey}
