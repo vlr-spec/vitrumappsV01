@@ -404,11 +404,13 @@ const NumInput: React.FC<{ value: string; onChange: (v: string) => void; disable
 
 // ─── EffBadge ──────────────────────────────────────────────────────────────
 const EffBadge: React.FC<{ val: string }> = ({ val }) => {
-  if (!val) return null;
+  if (val === '' || val === null || val === undefined) return null;
   const n = parseFloat(val);
+  if (Number.isNaN(n)) return null;
   const color = n >= 90 ? '#15803d' : n >= 80 ? '#b45309' : '#dc2626';
   const bg = n >= 90 ? '#f0fdf4' : n >= 80 ? '#fffbeb' : '#fff1f2';
   const border = n >= 90 ? '#bbf7d0' : n >= 80 ? '#fde68a' : '#fecaca';
+  const text = n === 0 ? '0%' : `${val}%`;
   return (
     <span
       style={{
@@ -422,7 +424,7 @@ const EffBadge: React.FC<{ val: string }> = ({ val }) => {
         fontWeight: 600,
       }}
     >
-      {val}%
+      {text}
     </span>
   );
 };
@@ -1257,8 +1259,10 @@ const hasMonitorData = (e?: QualityHourlyEntry | null): boolean =>
  * Zero cartons is a real value: Pack Size 120 + Cartons 0 = 0 bottles.
  */
 const packagingBottles = (packSizeRaw?: string, cartonsRaw?: string): number | null => {
-  const packSize = parseInt(packSizeRaw ?? '');
+  if (packSizeRaw === undefined && cartonsRaw === undefined) return null;
   const cartons = parseInt(cartonsRaw ?? '');
+  if (Number.isFinite(cartons) && cartons === 0) return 0;
+  const packSize = parseInt(packSizeRaw ?? '');
   if (Number.isFinite(packSize) && packSize > 0 && Number.isFinite(cartons) && cartons >= 0) {
     return packSize * cartons;
   }
@@ -1273,7 +1277,13 @@ const packagingBottles = (packSizeRaw?: string, cartonsRaw?: string): number | n
 const calcTotalBottlesInNos = (e?: QualityHourlyEntry): number | null => {
   const type1 = packagingBottles(e?.packing_size, e?.cartons);
   const type2 = packagingBottles(e?.packing_size_2, e?.cartons_2);
-  if (type1 === null && type2 === null) return null;
+  if (type1 === null && type2 === null) {
+    if (e?.bottles_in_nos !== undefined && e?.bottles_in_nos !== '') {
+      const bn = parseInt(e.bottles_in_nos, 10);
+      if (Number.isFinite(bn)) return bn;
+    }
+    return null;
+  }
   return (type1 ?? 0) + (type2 ?? 0);
 };
 
@@ -1292,7 +1302,15 @@ const calcBottlesInNos = (e?: QualityHourlyEntry): string => {
 const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1): string => {
   if (!e?.bottle_id) return '';
   const bottlesN = calcTotalBottlesInNos(e);
-  if (bottlesN === null) return '';
+  if (bottlesN === null) {
+    if (e.efficiency_percentage !== undefined && e.efficiency_percentage !== '') {
+      const stored = parseFloat(e.efficiency_percentage);
+      if (!Number.isNaN(stored)) {
+        return stored === 0 ? '0' : stored.toFixed(1);
+      }
+    }
+    return '';
+  }
   const speed = parseFloat(e.speed_per_min);
   // A combined zero (e.g. one group explicitly has zero cartons) means zero
   // actual bottles, so the row shows 0% instead of a blank cell. This also
@@ -1307,6 +1325,7 @@ const calcEffForEntry = (e?: QualityHourlyEntry, gobCount = 0, durationHours = 1
   if (!Number.isFinite(bottlesN) || bottlesN <= 0 || !Number.isFinite(theoretical) || theoretical <= 0) return '';
   const efficiency = (bottlesN / theoretical) * 100;
   if (!Number.isFinite(efficiency)) return '';
+  if (efficiency === 0) return '0';
   // Efficiency is displayed exactly as calculated, including values above
   // 100% — actual output may exceed the rated speed. Display rounding only:
   // the final percentage is formatted to two decimal places; the underlying

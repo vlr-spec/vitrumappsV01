@@ -172,6 +172,67 @@ const piecesEffForEntry = (
 };
 
 /**
+ * Efficiency value contributed by one row to the Hourly Production Monitor's
+ * Day Avg / Summary. Non-zero-carton rows use their stored efficiency; a
+ * zero-carton row uses the same combined TYPE 1 + TYPE 2 value displayed by
+ * the monitor's row efficiency cell.
+ */
+const daySummaryEfficiencyForEntry = (
+  e: QualityHourlyEntry,
+  gobCount: number,
+  durationHours: number
+): number | null => {
+  if (!e.bottle_id) return null;
+
+  const cartons = parseInt(e.cartons ?? '', 10);
+  if (cartons !== 0) {
+    const stored = parseFloat(String(e.efficiency_percentage ?? ''));
+    return Number.isNaN(stored) ? null : stored;
+  }
+
+  const packagingBottles = (packSizeRaw?: string, cartonsRaw?: string): number | null => {
+    if (packSizeRaw === undefined && cartonsRaw === undefined) return null;
+    const count = parseInt(cartonsRaw ?? '', 10);
+    if (Number.isFinite(count) && count === 0) return 0;
+    const packSize = parseInt(packSizeRaw ?? '', 10);
+    return Number.isFinite(packSize) && packSize > 0 && Number.isFinite(count) && count >= 0
+      ? packSize * count
+      : null;
+  };
+
+  const type1 = packagingBottles(e.packing_size, e.cartons);
+  const type2 = packagingBottles(e.packing_size_2, e.cartons_2);
+  let actualBottles: number | null = type1 === null && type2 === null
+    ? null
+    : (type1 ?? 0) + (type2 ?? 0);
+
+  if (actualBottles === null && e.bottles_in_nos !== '') {
+    const storedBottles = parseInt(e.bottles_in_nos, 10);
+    if (Number.isFinite(storedBottles)) actualBottles = storedBottles;
+  }
+  if (actualBottles === null) {
+    const stored = parseFloat(String(e.efficiency_percentage ?? ''));
+    if (Number.isNaN(stored)) return null;
+    return stored === 0 ? 0 : parseFloat(stored.toFixed(1));
+  }
+  if (actualBottles === 0) return 0;
+  if (!Number.isFinite(durationHours) || durationHours <= 0) return null;
+
+  const theoretical = calculateTheoreticalBottles(
+    parseFloat(e.speed_per_min),
+    gobCount,
+    durationHours
+  );
+  if (
+    !Number.isFinite(actualBottles) || actualBottles <= 0 ||
+    !Number.isFinite(theoretical) || theoretical <= 0
+  ) return null;
+
+  const efficiency = (actualBottles / theoretical) * 100;
+  return Number.isFinite(efficiency) ? parseFloat(efficiency.toFixed(1)) : null;
+};
+
+/**
  * Weight Efficiency % — draw based only.
  *
  *   Weight Efficiency % = (Actual Total Draw / Total Draw as per Speed) × 100
@@ -805,13 +866,9 @@ const fmtPctWhole = (n: number | null): string =>
  *     entries are averaged, so a daily figure is never reused across shifts.
  *     Values above 100% stay uncapped, like the grid.
  *
- *   • Overall EFF% — the machine's "Day Avg / Summary" value taken on the
- *     SAME rule the Hourly Production Monitor's summary row uses: rows with
- *     zero cartons contribute their computed Pieces EFF% (a real 0% when a
- *     bottle and packing size are assigned), every other row contributes its
- *     STORED efficiency_percentage, and blank/invalid values are omitted; the
- *     overall figure is the plain average of those applicable entries. It is
- *     never recalculated from production output or bottle counts.
+ *   • Overall EFF% — the machine's "Day Avg / Summary" value, using the same
+ *     row values and rules as the Hourly Production Monitor summary. It is
+ *     never recalculated from the shift-wise averages.
  *
  * Row durations come from the shared Lehr Out timeline
  * (buildLayerOutTimeline over the rows' saved period_start/period_end —
@@ -883,16 +940,10 @@ const buildShiftWiseRows = (
       const piecesEff = piecesEffForEntry(entry, gob, durationHours);
       if (piecesEff !== null) effValues[idx].push(piecesEff);
 
-      // Day Avg / Summary entry — the SAME rule the HPM summary row uses:
-      // zero-carton rows contribute their computed Pieces EFF% (a real 0%
-      // when a bottle and packing size are assigned), every other row
-      // contributes its stored efficiency_percentage; blank/invalid values
-      // are omitted. Never derived from production output or bottle counts.
-      const ct = parseInt(entry.cartons ?? '', 10);
-      const summaryEff: number | null = ct === 0
-        ? piecesEff
-        : parseFloat(String(entry.efficiency_percentage ?? ''));
-      if (summaryEff !== null && !Number.isNaN(summaryEff)) dayAvgValues.push(summaryEff);
+      // Use the same row contribution as the HPM Day Avg / Summary row;
+      // this overall value is not derived from shift averages.
+      const summaryEff = daySummaryEfficiencyForEntry(entry, gob, durationHours);
+      if (summaryEff !== null) dayAvgValues.push(summaryEff);
     }
 
     const shiftEff = effValues.map(averageEfficiency);
