@@ -3755,7 +3755,7 @@ export const QualityControlModule: React.FC = () => {
   // next day's first row — crossing the day boundary never starts a new job.
   const copyRowDown = useCallback((time: string) => {
     if (!canEdit) return;
-    if (!canExtendFromTime(time)) return;
+    if (!(canExtendFromTime(time) || isActiveEntryTime(time))) return;
     // Target the continuation row from the ACTUAL display timeline, never from
     // an array position. Every row's own key is the END of its interval (hourly
     // rows and split segments alike), so the next row strictly after the
@@ -3854,7 +3854,7 @@ export const QualityControlModule: React.FC = () => {
       }
       return prev;
     });
-  }, [dateKey, activeMachine, canEdit, markTouched, canExtendFromTime]);
+  }, [dateKey, activeMachine, canEdit, markTouched, canExtendFromTime, isActiveEntryTime]);
 
   // Applies a confirmed "−" removal as a PERMANENT row delete: the row's
   // database record is dropped through the backend API and auto-saved right
@@ -3938,9 +3938,9 @@ export const QualityControlModule: React.FC = () => {
   // after the user clicks Yes. Allowed when "+" is available for the entry.
   const removeBottle = useCallback((time: string) => {
     if (!canEdit) return;
-    if (!canExtendFromTime(time)) return;
+    if (!(canExtendFromTime(time) || isActiveEntryTime(time))) return;
     setPendingJobChange({ kind: 'remove', time });
-  }, [canEdit, canExtendFromTime]);
+  }, [canEdit, canExtendFromTime, isActiveEntryTime]);
 
   /** User clicked Yes: apply the staged bottle/job change. */
   const confirmJobChange = useCallback(() => {
@@ -5221,10 +5221,10 @@ rows.push(dateAndDay);
                   const isFirstInShift = !seen.has(shiftIdx);
                   seen.add(shiftIdx);
                   const entry = activeRows[time];
-                  // "−" stays on the current/latest entry only. "+" is shown when the
-                  // immediately upcoming hourly slot has no entry.
+                  // Show actions on entries where the upcoming hourly slot is empty,
+                  // and always on the last/latest production entry.
                   const isActiveEntry = time === activeEntryTime;
-                  const canShowPlus = canExtendFromTime(time, activeRows);
+                  const canShowPlus = canExtendFromTime(time, activeRows) || isActiveEntry;
                   const bottleName = entry?.bottle_id
                     ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
                     : '';
