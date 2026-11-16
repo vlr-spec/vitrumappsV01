@@ -14,6 +14,283 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-11-15 — Timeline Adjustments for Pre-9 AM Split Rows, First-Row Splitting & Display-Order Job Continuations
+- **Problem:**
+  - Carving out a manual split row before the 9:00 AM production-day start (e.g. 8:30 AM carved out of the initial 9:00 AM carry-in hour) caused the split segment to be sorted after 8:00 AM at the bottom of the table rather than at the top before 9:00 AM.
+  - The first row (9:00 AM) was hard-coded with `canSplit={time !== PRODUCTION_TIMES[0].time}`, preventing operators from logging split runs during the first operational hour.
+  - Extending a job with `(+)` evaluated next targets using raw clock minute comparisons, which jumped over split segments or failed when crossing midnight.
+- **Root Cause:**
+  - Timeline sort helpers (`toTimelineMinutes`) mapped morning hours (8:30 AM) to the tail of the production day timeline (~1410 min) rather than recognizing pre-9 AM carry-in intervals.
+  - Continuation logic indexed by array position rather than actual displayed order.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Added `alignSplitMinuteToInterval`, `isPreDayStartSplitKey`, `toOrderedTimelineMinutes`, and `toPreNineTimelineMinutes`. Pre-9 AM split rows are shifted back by 24 hours so they sort strictly at the top of the table before 9:00 AM.
+    - Updated `stampSplitPeriods` so pre-9 AM split rows retain their parent `period_start` (e.g. 8:00 AM) instead of generating overlapping intervals.
+    - Enabled splitting on all rows with positive duration (`canSplit={(slot?.durationMinutes ?? 0) > 0}`), including the 9:00 AM slot.
+    - Replaced clock comparison with display index navigation (`orderedKeys.indexOf(time)`), allowing job continuations to cascade sequentially into the immediate next displayed row regardless of splits or midnight boundaries.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - Zero schema changes. Microsecond duration encoding seamlessly stores pre-9 AM split durations in `production_time.microsecond`.
+
+---
+
+### 2026-11-14 — Re-Packing Report TYPE 2 Packaging Support & Job-Scoped Pack Type Resolution
+- **Problem:**
+  - In `Re-PackingReport.tsx`, pack type options were extracted solely from TYPE 1 packaging (`packing_category`), ignoring secondary packaging configurations (`packing_category_2`) logged in the Hourly Production Monitor.
+  - Pack types were pooled machine-wide, causing packaging types from one bottle run to leak into the dropdowns of different bottle runs on the same machine.
+- **Root Cause:**
+  - Pack info caching did not parse `packing_category_2` and did not partition pack types by Job ID or Bottle ID.
+- **Fix:**
+  - `src/components/quality/Re-PackingReport.tsx`:
+    - Updated `machinePackInfo` to aggregate both `packing_category` and `packing_category_2`.
+    - Grouped available pack types and pack sizes per Job ID and Bottle ID (`byJob: Record<string, { packTypes, packSize }>`).
+    - Implemented `packTypesForRow(machineNo, row)` which resolves the exact pack types reported during that job's operational hours, falling back to machine-wide options only for unanchored manual rows.
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Updated table header and cell formatting to maintain visual alignment with dual packaging columns.
+- **Files Changed:**
+  - `src/components/quality/Re-PackingReport.tsx`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - Zero schema or API changes. Display and dropdown resolution enhancement.
+
+---
+
+### 2026-11-14 — Streamlined PDF & Print Report Generation in Production Quality Monitor
+- **Problem:**
+  - PDF export in `ProductionQualityMonitor.tsx` duplicated repetitive report titles, machine numbers, and shift assignment metadata blocks across multi-page printouts, consuming vertical space and cluttering printed sheets.
+  - Print tables were vulnerable to awkward pagination breaks across rows.
+- **Root Cause:**
+  - The PDF generation routine rendered multiple redundant header text lines and used a complex two-row table header with pastel fills.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Streamlined PDF header to a centered company name and report date block.
+    - Consolidated table columns into a clean, compact single-row header (`Shift`, `Time`, `Production Time`, `Bottle Name`, `Weight F/M/R`, `Average`, `Speed/Min`, `Pack Type`, `Pack Size`, `Cartons`, `Pack Type`, `Pack Size`, `Cartons`, `Bottles`, `Pieces EFF%`, `Remarks`).
+    - Enhanced `@media print` CSS with explicit page break prevention (`page-break-inside: avoid !important; break-inside: avoid !important;`) on tables and cards, and targeted A4 landscape layout (`@page { size: A4 landscape; margin: 6mm 7.5mm; }`).
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - Zero API or database impact. Client-side PDF formatting optimization.
+
+---
+
+### 2026-11-14 — Shared Production Timeline Builder (`buildProductionTimeline`) & Quality Report Integration
+- **Problem:**
+  - Production timeline calculation (the continuous 24-hour cycle from 7:00 AM to 7:00 AM next day, offset by annealing lehr transit times) was coupled directly to `ProductionQualityMonitor.tsx`.
+  - In `QualityReport.tsx`, machine runtime minutes and start times reverted to packing clock times rather than using true Lehr-Out-adjusted production boundaries.
+- **Root Cause:**
+  - The timeline math was not factored into a reusable shared module.
+- **Fix:**
+  - `src/utils/layerOutTimeline.ts`:
+    - Created `buildProductionTimeline` pure function and `ProductionTimeSlot` interface.
+    - Shifts packing timeline boundaries backwards by applicable per-shift Lehr Out minutes, correctly handling boundary transition rules and wrapping across midnight.
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Replaced local timeline math with `buildProductionTimeline` and labeled the column "Production Timeline".
+  - `src/components/quality/QualityReport.tsx`:
+    - Integrated `buildProductionTimeline` into machine runtime calculations and subtotal aggregations.
+- **Files Changed:**
+  - `src/utils/layerOutTimeline.ts`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - None. Shared utility refactoring.
+
+---
+
+### 2026-11-13 — TYPE 2 Packaging Fields Across Backend Models, Schemas & Quality Control Module
+- **Problem:**
+  - Modern container manufacturing lines frequently pack ware under dual packaging formats (e.g. cartons and bulk pallets/trays) during the same operating hour.
+  - `hourly_production` only supported single packaging entries (`packing_category`, `packing_size`, `cartons`), preventing plant operators from accurately recording dual-pack runs.
+- **Root Cause:**
+  - Database schema and ORM models lacked secondary packaging columns.
+- **Fix:**
+  - `Backend/app/models/quality.py`:
+    - Added `packing_category_2` (`String(100)`), `packing_size_2` (`Integer`), and `cartons_2` (`Integer`) to `HourlyProduction`.
+  - `Backend/app/schemas/quality.py`:
+    - Extended `QualityHourlyEntrySchema` with `packing_category_2`, `packing_size_2`, and `cartons_2`.
+  - `Backend/app/api/production/quality_daily.py`:
+    - Updated `toDbEntry` and `fromDbEntry` to serialize and deserialize TYPE 2 packaging attributes.
+  - `Backend/app/main.py`:
+    - Added `_ensure_hourly_production_type2_packing_columns()` startup check to auto-add missing TYPE 2 columns via DDL against PostgreSQL if needed.
+  - `src/services/qualityRepository.ts`:
+    - Updated `QualityHourlyEntry`, `QualityEntryPayload`, and `DefectMasterItem` interfaces.
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Added dedicated TYPE 1 and TYPE 2 column groups in the table header and body.
+    - Updated total bottle calculation: `(TYPE 1 Pack Size * TYPE 1 Cartons) + (TYPE 2 Pack Size * TYPE 2 Cartons)`.
+- **Files Changed:**
+  - `Backend/app/models/quality.py`
+  - `Backend/app/schemas/quality.py`
+  - `Backend/app/api/production/quality_daily.py`
+  - `Backend/app/main.py`
+  - `src/services/qualityRepository.ts`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - Columns `packing_category_2`, `packing_size_2`, and `cartons_2` added to `hpr.hourly_production`.
+  - `GET` and `POST /api/production/quality/daily/` support TYPE 2 packaging fields.
+
+---
+
+### 2026-11-09 — Re-Packing Report Table Layout Refactoring & Column Rationalization
+- **Problem:**
+  - The Re-Packing Report displayed separate "Bottle" and "Job Name" columns, which caused redundant text display and squeezed table width on standard displays.
+- **Root Cause:**
+  - Initial ERP wireframe included separate columns for bottle name and job code before realizing job names convey both specifications.
+- **Fix:**
+  - `src/components/quality/Re-PackingReport.tsx`:
+    - Removed redundant "Bottle" column across NUMBERING and SQC/QC HOLD tables.
+    - Adjusted table colspans, widths, and horizontal scroll boundaries.
+- **Files Changed:**
+  - `src/components/quality/Re-PackingReport.tsx`
+- **API or DB Impact:**
+  - Zero API or database impact.
+
+---
+
+### 2026-11-06 — Pack Size Standardization & Shift-Restricted Custom 12-Hour Time Picker in Re-Packing Report
+- **Problem:**
+  - Re-Packing tables used "Pcs/Pack", which diverged from the plant-wide terminology "Pack Size".
+  - Operators could manually select inspection times outside the active shift hours, causing scheduling inconsistencies.
+  - In `TimePickerDropdown`, passing null `triggerRef` on component mount triggered TypeScript warnings.
+- **Root Cause:**
+  - Lack of shift boundary validation in the custom time picker component.
+  - Strict ref typing in `TimePickerDropdown`.
+- **Fix:**
+  - `src/components/quality/Re-PackingReport.tsx`:
+    - Renamed all UI headers and field mappings from "Pcs/Pack" to "Pack Size".
+    - Updated `CellTimePicker` to enforce shift-specific selectable hours (Shift 1: 9:00 AM – 5:00 PM, Shift 2: 5:00 PM – 1:00 AM, Shift 3: 1:00 AM – 9:00 AM) while maintaining 24-hour parsing fallback.
+    - Updated `triggerRef` typing to allow null references safely.
+- **Files Changed:**
+  - `src/components/quality/Re-PackingReport.tsx`
+- **API or DB Impact:**
+  - Zero database impact.
+
+---
+
+### 2026-11-05 — Combined Repacking Data Fetch API & Client-Side Date Caching
+- **Problem:**
+  - Switching between Numbering and SQC/QC HOLD views triggered duplicate HTTP network requests for the same date.
+- **Root Cause:**
+  - Numbering and SQC/QC Hold views lacked a unified fetch endpoint and local cache.
+- **Fix:**
+  - `Backend/app/api/production/repacking.py`:
+    - Added `GET /api/production/repacking/` returning `{ numbering: [...], sqc_qc_hold: [...] }` for a given production date.
+  - `Backend/app/schemas/repacking.py`:
+    - Added `RepackingDataResponse` composite schema.
+  - `src/services/repackingRepository.ts`:
+    - Implemented `repackingDataCache` keyed by `YYYY-MM-DD`, eliminating duplicate network queries on layout toggles.
+- **Files Changed:**
+  - `Backend/app/api/production/repacking.py`
+  - `Backend/app/schemas/repacking.py`
+  - `src/services/repackingRepository.ts`
+  - `src/components/quality/Re-PackingReport.tsx`
+  - `src/services/planningRepository.ts`
+- **API or DB Impact:**
+  - Added `GET /api/production/repacking/` endpoint.
+
+---
+
+### 2026-11-05 — Employee Master SQLAlchemy Registration & Test Coverage
+- **Problem:**
+  - Automated tests and local development using SQLite failed due to unresolvable foreign key references on `repacking_numbering.checker_id` $\rightarrow$ `hpr.employee_master.employee_id`.
+- **Root Cause:**
+  - `EmployeeMaster` was not mapped as a Declarative model in SQLAlchemy `Base.metadata`.
+- **Fix:**
+  - `Backend/app/models/employee.py`:
+    - Created `EmployeeMaster` model mapping `hpr.employee_master` (`employee_id`, `employee_name`, `is_active`).
+  - `Backend/app/db/base.py`:
+    - Imported and registered `EmployeeMaster` in `Base.metadata`.
+  - `Backend/tests/test_employee_master_metadata.py`:
+    - Added unit test asserting `employee_master` table is registered in `Base.metadata.tables`.
+- **Files Changed:**
+  - `Backend/app/models/employee.py`
+  - `Backend/app/models/repacking.py`
+  - `Backend/tests/test_employee_master_metadata.py`
+- **API or DB Impact:**
+  - None on production PostgreSQL. Enables clean foreign key resolution in SQLite test environments.
+
+---
+
+### 2026-11-04 — Executive Analytics Dashboard Activation & Real-Time Performance Cockpit
+- **Problem:**
+  - Management required a bird's-eye view of manufacturing operations, tonnage draw, and line efficiencies without manually collating individual machine reports.
+- **Root Cause:**
+  - The dashboard module was inactive in the top-level application layout.
+- **Fix:**
+  - `src/App.tsx`:
+    - Activated `DashboardModule` component in the main application layout and URL hash `#dashboard`.
+  - `src/components/dashboard/DashboardModule.tsx`:
+    - Added 6 KPI overview cards: Actual Production, Planned / As Per Speed, Variance, Weight Efficiency (% WT EFF), Unit Efficiency (Pieces EFF%), and Total Furnace Draw (tonnage).
+    - Integrated Recharts bar charts for output targets vs actuals and machine efficiency comparisons.
+    - Added machine draw distribution breakdown, hourly timeline visualizers, and isolated print stylesheet (`isolateReportForPrint`).
+- **Files Changed:**
+  - `src/App.tsx`
+  - `src/components/dashboard/DashboardModule.tsx`
+- **API or DB Impact:**
+  - Zero backend or database changes. Reuses existing planning and quality APIs.
+
+---
+
+### 2026-11-03 — Dedicated Repacking Database Persistence (Numbering & SQC/QC HOLD), Schemas, API & Repository
+- **Problem:**
+  - Re-packing and re-sorting inspections, defect records, and sign-offs were previously stored in temporary browser memory and lost upon page reload.
+- **Root Cause:**
+  - Lack of database tables, backend API endpoints, and repository services for repacking workflows.
+- **Fix:**
+  - `Backend/app/models/repacking.py`:
+    - Created `RepackingNumbering` and `RepackingSqcQcHold` models in schema `sqc`.
+  - `Backend/app/schemas/repacking.py`:
+    - Created Pydantic request/response schemas for Numbering and SQC/QC Hold entries.
+  - `Backend/app/api/production/repacking.py`:
+    - Built comprehensive CRUD endpoints: `GET`, `POST`, `PUT`, `DELETE`, and atomic bulk-save `POST /numbering/save` and `POST /sqc-qc-hold/save`.
+  - `src/services/repackingRepository.ts`:
+    - Built frontend API service connecting the UI to backend repacking endpoints.
+  - `Backend/app/api/auth.py`:
+    - Added `GET /api/auth/employees` for employee lookup dropdowns.
+- **Files Changed:**
+  - `Backend/app/models/repacking.py`
+  - `Backend/app/schemas/repacking.py`
+  - `Backend/app/api/production/repacking.py`
+  - `Backend/app/main.py`
+  - `Backend/app/api/auth.py`
+  - `src/services/repackingRepository.ts`
+  - `src/components/quality/Re-PackingReport.tsx`
+- **API or DB Impact:**
+  - New schema `sqc` and tables `sqc.repacking_numbering` and `sqc.repacking_sqc_qc_hold`.
+  - New router `/api/production/repacking/*`.
+
+---
+
+### 2026-11-02 — Packaging Master Management (`hpr.packaging_master`), CRUD Endpoints & Navigation Integration
+- **Problem:**
+  - Plant operators lacked a centralized UI to manage packaging codes and specifications, leading to inconsistent manual text entry.
+- **Root Cause:**
+  - `hpr.packaging_master` table existed in the database but lacked ORM mapping, API endpoints, and a frontend management screen.
+- **Fix:**
+  - `Backend/app/models/packaging.py`:
+    - Mapped `PackagingMaster` against `hpr.packaging_master`.
+  - `Backend/app/schemas/packaging.py`:
+    - Created `PackagingBase`, `PackagingCreate`, `PackagingUpdate`, `PackagingResponse` schemas.
+  - `Backend/app/api/production/packaging.py`:
+    - Created FastAPI router with GET, POST, PUT, DELETE endpoints protected by Master Management permissions, with audit logging (`CREATED_PACKAGING`, `UPDATED_PACKAGING`, `DELETED_PACKAGING`).
+  - `src/components/master-management/PackagingMasterPanel.tsx`:
+    - Created CRUD management panel with add/edit forms and delete confirmation modals.
+  - `src/components/master-management/MachinesModule.tsx`:
+    - Mounted "Packaging Master" tab.
+  - `src/services/planningRepository.ts`:
+    - Added packaging master client API functions.
+- **Files Changed:**
+  - `Backend/app/models/packaging.py`
+  - `Backend/app/schemas/packaging.py`
+  - `Backend/app/api/production/packaging.py`
+  - `Backend/app/main.py`
+  - `src/components/master-management/PackagingMasterPanel.tsx`
+  - `src/components/master-management/MachinesModule.tsx`
+  - `src/services/planningRepository.ts`
+- **API or DB Impact:**
+  - Added `/api/production/packaging/` CRUD endpoints. Mapped existing `hpr.packaging_master` table.
+
+---
+
 ### 2026-10-31 — Re-Packing Report Dashboard (Numbering & SQC/QC Hold Layouts), Direct Main Navbar Access, Dynamic Job-Grouped Row Insertion/Removal, Manual 12-Hour Time Picker & GOB Field Integration
 - **Problem:**
   - Glass manufacturing operations lacked a dedicated re-sorting and re-packing tracking module in the Quality Control suite. Plant teams needed to log re-packing inspection metrics, carton counts, defect totals, mould/section assignments, and sign-offs under two standard operational formats: "NUMBERING" and "SQC/QC HOLD".

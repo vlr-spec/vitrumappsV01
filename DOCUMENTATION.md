@@ -20,16 +20,18 @@
 The Vitrum Glass application is an enterprise production-planning ERP specialized for glass container manufacturing plants. The platform coordinates manufacturing runs across multi-section production lines, manages bottle and machine technical specifications, tracks hourly quality and defect inspections, and provides dynamic role-based access control (RBAC).
 
 ### Core Capabilities
+- **Executive Performance Dashboard**: Real-time KPI summaries (actual vs planned production, gross tonnage draw, weight efficiency % WT EFF, pieces efficiency %, variance), interactive multi-machine bar charts, machine draw breakdown, hourly timelines, and print-isolated reporting views.
 - **Production Schedule Planning**: Multi-machine calendar scheduling, forward-cascading schedule adjustments, automatic changeover calculation, cumulative good bottle projections, and batch persistence with optimistic concurrency.
-- **Master Data Management**: Machine master configurations (Machines 1–4, Double/Triple Gob, maximum sections), bottle master specifications (catalog names, shared bottle weights), machine-specific section speed calibrations, and factory holiday management.
-- **Quality Control (HPR)**: Hourly inspection registers, three-tier defect categorization (Critical, Major, Minor), weight distribution tracking (Front, Middle, Rear, Average), Weight Efficiency (% WT EFF), carton counts, and shift assignment logging. Supports per-shift Lehr Out Time tracking (0–119 minutes) with shift-lock protection, cross-shift/cross-midnight timeline carry-in, zero-schema timestamp duration encoding, uncapped actual efficiency reporting with one-decimal precision (`0.0%`), day totals for Statistical Quality Control (SQC), QC Hold quantities, and defect counts (NUM) across grid footers and PDF exports, and dedicated Re-Packing Reports (`Re-PackingReport`) providing 13-column NUMBERING and SQC/QC HOLD dashboards with GOB tracking, manual 12-hour AM/PM time pickers, and job-anchored row insertion/removal.
+- **Master Data Management**: Machine master configurations (Machines 1–4, Double/Triple Gob, maximum sections), bottle master specifications (catalog names, shared bottle weights), machine-specific section speed calibrations, packaging master specifications (`packaging_master` codes and descriptions), and factory holiday management.
+- **Quality Control (HPR)**: Hourly inspection registers, three-tier defect categorization (Critical, Major, Minor), weight distribution tracking (Front, Middle, Rear, Average), Weight Efficiency (% WT EFF), dual packaging configuration (TYPE 1 and TYPE 2: Pack Type, Pack Size, Cartons) with automated combined bottle math, and shift assignment logging. Supports per-shift Lehr Out Time tracking (0–119 minutes) with shift-lock protection, cross-shift/cross-midnight timeline carry-in, pre-9 AM carry-in split row insertion, continuous dual timelines (Production Timeline vs Packing Timeline), zero-schema timestamp duration encoding, uncapped actual efficiency reporting with one-decimal precision (`0.0%`), day totals for Statistical Quality Control (SQC), QC Hold quantities, and defect counts (NUM) across grid footers and streamlined print/PDF exports.
+- **Re-Packing ERP Module (`Re-PackingReport`)**: Dedicated re-sorting and re-packing registers with database-backed persistence in schema `sqc` for both NUMBERING and SQC/QC HOLD workflows. Features 13-column grids, standardized Pack Size, dynamic job-anchored row insertion/removal (`+`/`-`), custom 12-hour floating time picker with shift-enforced hour constraints and 24-hour parsing fallback, GOB/mould/section tracking, employee master dropdowns for Checker Name and QA-Shift Executive, job-scoped pack type resolution, and fast date-keyed caching.
 - **Reporting & Exporting**: Branded executive export generation for daily schedules, bottle catalogs, and inspection records to Excel and PDF formats. Includes Machine Wise Production and Efficiency reports (`QualityReport`) and Multi-Machine Performance Reports (`AllMachineReport`) with timeline-accurate runtime and efficiency calculations, job-scoped remark isolation (preventing remarks from leaking across jobs on the same machine), minute-granular period start tracking, authoritative stored piece efficiency prioritization, centered Shift-Wise efficiency reporting with machine averages, machine-level subtotals with total runtime minutes, bottle row-wise overall efficiency calculation, and interactive total row visibility toggling.
 - **Dynamic Access Control**: Database-backed permissions governing read and edit capabilities per employee across functional modules.
 
 ### Tech Stack
-- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Lucide icons, ExcelJS, jsPDF.
+- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Recharts, Lucide icons, ExcelJS, jsPDF.
 - **Backend**: FastAPI, SQLAlchemy 2.0, Pydantic v2, Uvicorn.
-- **Database**: PostgreSQL (production on AWS RDS / Render) with multi-schema partitioning (`production`, `auth`, `hpr`); SQLite fallback for local development and CI unit tests.
+- **Database**: PostgreSQL (production on AWS RDS / Render) with multi-schema partitioning (`production`, `auth`, `hpr`, `sqc`); SQLite fallback for local development and CI unit tests.
 
 ### Project History
 For the complete dated log of all historical changes, architectural decisions, and bug fixes, refer to [CHANGELOG.md](file:///d:/V10/production-planningV05/CHANGELOG.md).
@@ -67,10 +69,11 @@ The application runs as a decoupled single-page application (SPA) communicating 
    - Runs `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
    - Connects to managed PostgreSQL using the `DATABASE_URL` environment variable.
 3. **Database Architecture**
-   - Live PostgreSQL instances utilize three distinct schemas:
+   - Live PostgreSQL instances utilize four distinct schemas:
      - `production`: Manufacturing schedule jobs, machines, bottles, configurations, holidays, and audit logs.
      - `auth`: User authentication records, module catalog, and employee permissions.
-     - `hpr`: Hourly production reports, shift assignments, defect master, and quality inspection metrics.
+     - `hpr`: Hourly production reports, shift assignments, packaging master, employee master, defect master, and quality inspection metrics.
+     - `sqc`: Statistical Quality Control and re-packing registers (`repacking_numbering`, `repacking_sqc_qc_hold`).
 
 ---
 
@@ -313,10 +316,13 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `weight_rear` (`Numeric(10,2)`, nullable)
 - `weight_avg` (`Numeric(10,2)`, nullable)
 - `speed_per_min` (`Numeric(10,2)`, nullable)
-- `packing_category` (`String(100)`, nullable)
-- `packing_size` (`Integer`, nullable)
-- `cartons` (`Integer`, nullable)
-- `bottles_in_nos` (`Integer`, nullable)
+- `packing_category` (`String(100)`, nullable) — *TYPE 1 packaging category/type.*
+- `packing_size` (`Integer`, nullable) — *TYPE 1 pieces per pack.*
+- `cartons` (`Integer`, nullable) — *TYPE 1 carton count.*
+- `packing_category_2` (`String(100)`, nullable) — *TYPE 2 packaging category/type.*
+- `packing_size_2` (`Integer`, nullable) — *TYPE 2 pieces per pack.*
+- `cartons_2` (`Integer`, nullable) — *TYPE 2 carton count.*
+- `bottles_in_nos` (`Integer`, nullable) — *Total calculated bottles (`(packing_size * cartons) + (packing_size_2 * cartons_2)`).*
 - `efficiency_percent` (`Numeric(5,2)`, nullable)
 - `weight_efficiency` (`Numeric(10,2)`, nullable)
 - `sqc` (`Integer`, nullable)
@@ -324,6 +330,8 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `num` (`Integer`, nullable)
 - `remarks` (`Text`, nullable)
 - `job_id` (`String(20)`, non-null) — *Model defines `nullable=False`, stored as `""` if unassigned.*
+- `is_locked` (`Boolean`, default `False`) — *Row-level edit lock state persisted in database.*
+- `split_group_id` (`String(10)`, nullable) — *Sequential split group identifier (e.g. `SG001`) assigned when an hour is divided.*
 - **Constraints**: `uq_hpr_machine_hour` on (`production_time`, `machine_no`, `report_id`).
 - **Zero-Schema Duration Encoding**: Non-standard segment durations (arising from Lehr Out Time adjustments, split slots, or 3rd-shift carry-ins) are persisted without schema modification by embedding the real duration in minutes directly into `production_time.microsecond` (`minutes * 1000` for durations <= 720 min, and `(minutes - 1320) * 1000 + 500` for overflow <= 1440 min). Standard 60-minute rows store `0` microseconds. Uniqueness constraints, row identity, lock matching, and queries continue using normalized minute values (`_norm_time`), keeping full compatibility with existing DB indexes.
 - `TODO(verify)`: Check whether live PostgreSQL table constraint `hourly_production_job_id_not_null` enforces `NOT NULL` in all deployed databases or whether any legacy rows allow `NULL`.
@@ -344,6 +352,65 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `remarks` (`Text`, nullable)
 - `created_at` (`DateTime`, server default `now()`, non-null)
 - `updated_at` (`DateTime`, server default `now()`, non-null)
+
+#### `hpr.packaging_master`
+*Catalog of reusable packaging types and descriptions.*
+- `packaging_id` (`Integer`, **PK**, auto-increment) — *Internal primary key.*
+- `packaging_code` (`String(20)`, unique, non-null) — *Packaging short code (e.g. `"BOX-12"`).*
+- `packaging_description` (`String(150)`, non-null) — *Human-readable description.*
+
+#### `hpr.employee_master`
+*Master list of factory employees and personnel for quality sign-offs.*
+- `employee_id` (`String`, **PK**, non-null) — *Alphanumeric employee identifier.*
+- `employee_name` (`String`, non-null)
+- `is_active` (`Boolean`, default `True`, non-null)
+
+---
+
+### Schema: `sqc` (Statistical Quality Control & Repacking)
+
+#### `sqc.repacking_numbering`
+*Re-packing and re-sorting inspection entries under the NUMBERING layout.*
+- `entry_id` (`BigInteger`, **PK**, index, auto-increment)
+- `production_date` (`Date`, index, non-null)
+- `machine_no` (`SmallInteger`, index, non-null) — *Machine 1..4.*
+- `job_id` (`String`, index, non-null)
+- `bottle_id` (`Integer`, **FK** → `production.bottle_master.bottle_id`, nullable)
+- `pack_type` (`String`, nullable) — *Selected packaging type matching job/machine hourly data.*
+- `shift` (`SmallInteger`, non-null) — *Shift 1, 2, or 3.*
+- `entry_time` (`Time`, non-null) — *Manual inspection timestamp.*
+- `pcs_per_pack` (`Integer`, nullable) — *Pack size.*
+- `cartons` (`Integer`, nullable) — *Inspected carton count.*
+- `defective_bottles` (`Integer`, nullable) — *Identified defective bottle count.*
+- `defect_id` (`BigInteger`, **FK** → `hpr.defect_master.defect_id`, nullable)
+- `mould` (`String`, nullable) — *Mould cavity identifier.*
+- `section_no` (`String`, nullable) — *Machine section number.*
+- `checker_id` (`String`, **FK** → `hpr.employee_master.employee_id`, nullable) — *Checker employee ID.*
+- `remarks` (`Text`, nullable) — *Free-text remarks or QA sign-off notes.*
+- `created_at` (`DateTime(timezone=True)`, server default `now()`)
+- `updated_at` (`DateTime(timezone=True)`, server default `now()`, on update `now()`)
+
+#### `sqc.repacking_sqc_qc_hold`
+*Re-packing inspection entries under the SQC/QC HOLD layout.*
+- `entry_id` (`BigInteger`, **PK**, index, auto-increment)
+- `production_date` (`Date`, index, non-null)
+- `machine_no` (`SmallInteger`, index, non-null) — *Machine 1..4.*
+- `job_id` (`String`, index, non-null)
+- `bottle_id` (`Integer`, **FK** → `production.bottle_master.bottle_id`, nullable)
+- `pack_type` (`String`, nullable)
+- `lot_no` (`String`, nullable) — *Production batch/lot number.*
+- `shift` (`SmallInteger`, non-null) — *Shift 1, 2, or 3.*
+- `entry_time` (`Time`, non-null) — *Manual inspection timestamp.*
+- `pcs_per_pack` (`Integer`, nullable) — *Pack size.*
+- `cartons` (`Integer`, nullable)
+- `defective_bottles` (`Integer`, nullable)
+- `defect_id` (`BigInteger`, **FK** → `hpr.defect_master.defect_id`, nullable)
+- `mould` (`String`, nullable)
+- `section_no` (`String`, nullable)
+- `checker_id` (`String`, **FK** → `hpr.employee_master.employee_id`, nullable)
+- `remarks` (`Text`, nullable)
+- `created_at` (`DateTime(timezone=True)`, server default `now()`)
+- `updated_at` (`DateTime(timezone=True)`, server default `now()`, on update `now()`)
 
 ---
 
@@ -392,6 +459,9 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `POST /api/auth/logout`
   - **Auth**: Optional Bearer token
   - **Response**: HTTP 204 No Content
+- `GET /api/auth/employees`
+  - **Auth**: Authenticated User
+  - **Response**: Array of active employee records `[ { "employee_id": "<id>", "employee_name": "<name>" }, ... ]`. Reused across the ERP for employee selectors and sign-offs.
 
 #### Machines Router (`/api/production/machines`)
 - `GET /api/production/machines/`
@@ -482,6 +552,22 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
   - **Guard**: Edit access to `Holiday Master`
   - **Response**: `{ "ok": true }`
 
+#### Packaging Master Router (`/api/production/packaging`)
+- `GET /api/production/packaging/`
+  - **Guard**: Read access to `Bottle Master` or `Holiday Master`
+  - **Response**: Array of packaging masters `[ { "packaging_id", "packaging_code", "packaging_description" }, ... ]`.
+- `POST /api/production/packaging/`
+  - **Guard**: Edit access to `Bottle Master` or `Holiday Master`
+  - **Body**: `{ "packaging_code": "<max 20 chars>", "packaging_description": "<max 150 chars>" }`
+  - **Response**: Created `PackagingResponse` with unique `packaging_id`. Emits `CREATED_PACKAGING` audit log.
+- `PUT /api/production/packaging/{packaging_id}`
+  - **Guard**: Edit access to `Bottle Master` or `Holiday Master`
+  - **Body**: `{ "packaging_code", "packaging_description" }`
+  - **Response**: Updated `PackagingResponse`. Emits `UPDATED_PACKAGING` audit log.
+- `DELETE /api/production/packaging/{packaging_id}`
+  - **Guard**: Edit access to `Bottle Master` or `Holiday Master`
+  - **Response**: `{ "ok": true }`. Emits `DELETED_PACKAGING` audit log.
+
 #### Quality Defects Router (`/api/production/quality/defects`)
 - `GET /api/production/quality/defects/`
   - **Guard**: Read access to `Quality Control`
@@ -498,14 +584,59 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `GET /api/production/quality/daily/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
-  - **Response**: Daily quality report with hourly entries across all 4 machines and 3 shifts. For rows with non-standard durations (Lehr Out adjustments, split segments, prior-day carry-in), returns reconstructed `period_start` and `period_end` labels.
+  - **Response**: Daily quality report with hourly entries across all 4 machines and 3 shifts. For rows with non-standard durations (Lehr Out adjustments, split segments, prior-day carry-in), returns reconstructed `period_start` and `period_end` labels. Includes dual packaging data (`packing_category`, `packing_size`, `cartons`, `packing_category_2`, `packing_size_2`, `cartons_2`).
 - `GET /api/production/quality/daily/jobs/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
   - **Response**: Job-wise summary of production and quality runs for the selected manufacturing day.
 - `POST /api/production/quality/daily/`
   - **Guard**: Edit access to `Quality Control`
-  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row, which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries and preserves Job ID continuity across midnight.
+  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row (including pre-9 AM carry-in split segments), which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries, preserves Job ID continuity across midnight, and accepts both TYPE 1 and TYPE 2 packaging attributes.
+
+#### Repacking Router (`/api/production/repacking`)
+- `GET /api/production/repacking/employees`
+  - **Guard**: Authenticated User
+  - **Response**: Array of active employee records from `hpr.employee_master` for Checker and QA-Shift Executive dropdown selectors `[ { "employee_id", "employee_name", "roles" }, ... ]`.
+- `GET /api/production/repacking/`
+  - **Guard**: Read access to `Quality Control`
+  - **Query**: `date=YYYY-MM-DD`
+  - **Response**: Combined repacking data for both views `{ "numbering": [ ... ], "sqc_qc_hold": [ ... ] }`.
+- `GET /api/production/repacking/numbering`
+  - **Guard**: Read access to `Quality Control`
+  - **Query**: `date=YYYY-MM-DD`, `machine_no` (optional)
+  - **Response**: List of `RepackingNumbering` records for the date.
+- `POST /api/production/repacking/numbering`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Single numbering entry.
+  - **Response**: HTTP 201 Created with saved record.
+- `PUT /api/production/repacking/numbering/{entry_id}`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Updated fields for numbering record.
+- `DELETE /api/production/repacking/numbering/{entry_id}`
+  - **Guard**: Edit access to `Quality Control`
+  - **Response**: `{ "ok": true, "deleted": entry_id }`
+- `POST /api/production/repacking/numbering/save`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Array of numbering entries `[ { ... }, ... ]`. Atomically saves and updates the full day's numbering entries.
+  - **Response**: Array of committed `NumberingEntryResponse` objects.
+- `GET /api/production/repacking/sqc-qc-hold`
+  - **Guard**: Read access to `Quality Control`
+  - **Query**: `date=YYYY-MM-DD`, `machine_no` (optional)
+  - **Response**: List of `RepackingSqcQcHold` records for the date.
+- `POST /api/production/repacking/sqc-qc-hold`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Single SQC/QC Hold entry.
+  - **Response**: HTTP 201 Created with saved record.
+- `PUT /api/production/repacking/sqc-qc-hold/{entry_id}`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Updated fields for SQC/QC Hold record.
+- `DELETE /api/production/repacking/sqc-qc-hold/{entry_id}`
+  - **Guard**: Edit access to `Quality Control`
+  - **Response**: `{ "ok": true, "deleted": entry_id }`
+- `POST /api/production/repacking/sqc-qc-hold/save`
+  - **Guard**: Edit access to `Quality Control`
+  - **Body**: Array of SQC/QC Hold entries `[ { ... }, ... ]`. Atomically saves and updates the full day's SQC/QC Hold entries.
+  - **Response**: Array of committed `SqcQcHoldEntryResponse` objects.
 
 ---
 
@@ -548,20 +679,27 @@ Source code is located under `src/`.
 
 ### Directory Architecture
 - `src/components/`
+  - `dashboard/`: `DashboardModule` (Executive analytics dashboard: real-time KPI cards for Actual/Planned production, Variance, Weight Efficiency % WT EFF, Pieces EFF%, and Total Draw; Recharts comparative bar charts; machine draw distribution; timeline visualizer; and print-isolated view).
   - `planning/`: Calendar grid register, `PlanningDrawer`, `EditMachineModal`, `EndJobModal`.
-  - `master-management/`: `MachinesModule`, `BottleMasterPanel`, `BottleExportPanel`, `HolidayMasterPanel`.
-  - `quality/`: `ProductionQualityMonitor` (hourly checks, defects, weight efficiency, SQC/QC Hold/NUM day totals, one-decimal efficiency display, Lehr Out inputs/locks, and top-level navigation to Numbering and SQC/QC Hold views), `QualityReport` (Machine Wise Production and Efficiency analysis, shift averages, authoritative stored efficiency, job-scoped remarks, responsive centered shift-wise efficiency card, clean white machine rows, spaced subtotals with runtime minutes, bottle row-wise overall efficiency, and visibility toggle), `Re-PackingReport` (two-layout Numbering and SQC/QC Hold ERP dashboard with 13-column structure including GOB, manual 12-hour AM/PM time picker, and job-anchored dynamic row addition/removal), `AllMachineReport` (cross-machine daily summary), `DailyMcSpeedWeightReport` (daily machine speed and weight summary).
+  - `master-management/`: `MachinesModule`, `BottleMasterPanel`, `BottleExportPanel`, `PackagingMasterPanel` (CRUD interface for `hpr.packaging_master` codes and descriptions), `HolidayMasterPanel`.
+  - `quality/`:
+    - `ProductionQualityMonitor`: Hourly quality checks, three-tier defect logging, weight distribution, uncapped one-decimal efficiency display, SQC/QC Hold/NUM day totals, dual packaging configuration (TYPE 1 and TYPE 2: Pack Type, Pack Size, Cartons) with automatic carton aggregation, dual timeline splitting (Packing Timeline vs Production Timeline), pre-9 AM carry-in split row support, Lehr Out minute inputs and shift locks, and streamlined PDF export generation.
+    - `Re-PackingReport`: Two-layout Numbering and SQC/QC Hold ERP dashboard with database persistence in schema `sqc`. Features 13-column grids, standardized Pack Size, dynamic job-anchored row insertion/removal (`+`/`-`), custom 12-hour floating time picker with shift-enforced hour constraints and 24-hour parsing fallback, GOB/mould/section tracking, employee master dropdowns for Checker Name and QA-Shift Executive, job-scoped pack type resolution, and fast date-keyed caching.
+    - `QualityReport`: Machine Wise Production and Efficiency analysis, shift averages, authoritative stored efficiency, job-scoped remarks, responsive centered shift-wise efficiency card, clean white machine rows, spaced subtotals with runtime minutes from shared `layerOutTimeline`, bottle row-wise overall efficiency, and visibility toggle.
+    - `AllMachineReport`: Multi-machine cross-shift daily summary.
+    - `DailyMcSpeedWeightReport`: Daily machine speed and weight summary.
   - `profile/`: User profile display, password change modal.
   - `layout/`: Top navigation bar, sidebar, and module tab switcher.
 - `src/context/`
   - `AuthContext.tsx`: Token management, profile storage in `localStorage`, login/logout flows.
   - `ERPContext.tsx`: Module switching, active cache management, planning batch operations.
 - `src/services/`
-  - `planningRepository.ts`: Central data repository caching machines, bottles, configs, jobs, and holidays; coordinates batch saving and deletes.
-  - `qualityRepository.ts`: Quality defect and daily inspection report fetching and saving.
+  - `planningRepository.ts`: Central data repository caching machines, bottles, configs, jobs, holidays, and packaging masters (`getPackagingMasters`, `createPackagingMaster`, `updatePackagingMaster`, `deletePackagingMaster`); coordinates batch saving and deletes.
+  - `qualityRepository.ts`: Quality defect and daily inspection report fetching and saving, supporting TYPE 1 and TYPE 2 packaging attributes.
+  - `repackingRepository.ts`: Re-packing persistence layer for Numbering and SQC/QC HOLD records, providing combined date fetching with local caching (`loadDate`), employee master lookup (`getEmployees`), and atomic bulk save/delete endpoints.
 - `src/utils/`
   - `api.ts`: Centralized `fetch` wrapper injecting bearer tokens, request timeouts (30s), and error formatting.
-  - `layerOutTimeline.ts`: Shared Lehr Out timeline builder (`buildLayerOutTimeline`) and period decoder (`layerOutInputsFromSavedPeriods`) handling variable durations, split rows, and midnight transitions.
+  - `layerOutTimeline.ts`: Shared Lehr Out timeline utilities: `buildLayerOutTimeline` (packing slots), `layerOutInputsFromSavedPeriods` (saved period decoder), and `buildProductionTimeline` (continuous production time slots accounting for per-shift Lehr Out offsets and midnight crossings).
   - `planningCalculations.ts` & `calculations.ts`: Furnace draw, output tonnage, speed, and time estimations.
   - `reportHeader.ts`: Centralized enterprise branding utility providing corporate headers across PDF/Excel exports.
   - `exportData.ts`: Formatted dataset exports for Excel and PDF.

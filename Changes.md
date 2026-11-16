@@ -147,4 +147,74 @@ This document tracks the recent bug fixes and configuration updates made to the 
   6. **Zero Backend / Schema Impact**: Entirely UI-driven ERP module that reuses existing read-only daily quality records; does not alter database schemas or create breaking API dependencies.
 - **Files Touched**: `src/components/quality/Re-PackingReport.tsx`, `src/components/quality/ProductionQualityMonitor.tsx`
 
+## 16. Packaging Master Management (`hpr.packaging_master`), Endpoints & Panel Integration
+- **Issue**: Plant operations required a standardized catalog of packaging specifications (carton configurations, box sizes, trays) rather than entering arbitrary, unvalidated packaging text.
+- **Fix**:
+  1. **Model & Schema**: Mapped `PackagingMaster` in `Backend/app/models/packaging.py` against `hpr.packaging_master` (`packaging_id` PK, `packaging_code` VARCHAR(20) UNIQUE, `packaging_description` VARCHAR(150)) and created Pydantic schemas in `Backend/app/schemas/packaging.py`.
+  2. **FastAPI CRUD Router**: Implemented `Backend/app/api/production/packaging.py` providing GET, POST, PUT, and DELETE endpoints governed by `require_any_module_read` and `require_any_module_edit` permissions on Master Management modules, with audit logging (`CREATED_PACKAGING`, `UPDATED_PACKAGING`, `DELETED_PACKAGING`).
+  3. **Frontend Management Panel**: Created `PackagingMasterPanel.tsx` and mounted it inside `MachinesModule.tsx` as a new tab ("Packaging Master") with edit/delete confirmation modals and synchronized backend loading via `planningRepository`.
+- **Files Touched**: `Backend/app/models/packaging.py`, `Backend/app/schemas/packaging.py`, `Backend/app/api/production/packaging.py`, `Backend/app/main.py`, `src/components/master-management/PackagingMasterPanel.tsx`, `src/components/master-management/MachinesModule.tsx`, `src/services/planningRepository.ts`
+
+## 17. Dedicated Repacking Database Persistence (Numbering & SQC/QC HOLD), Schemas, API & Combined Caching
+- **Issue**: Re-Packing data was initially stored only in ephemeral client state, causing re-sorting inspections, defect records, and sign-offs to be lost on page refresh or date navigation.
+- **Fix**:
+  1. **Database ORM Models**: Created `RepackingNumbering` and `RepackingSqcQcHold` in `Backend/app/models/repacking.py` located within the `sqc` schema. Defined fields for date, machine, job, bottle, pack type, shift, time, pack size, cartons, defective bottles, defect ID, mould, section, checker ID, remarks, and lot number (for SQC/QC Hold).
+  2. **FastAPI Endpoints**: Built comprehensive CRUD and atomic bulk-save endpoints in `Backend/app/api/production/repacking.py` (`POST /numbering/save`, `POST /sqc-qc-hold/save`), along with a combined date-fetch endpoint (`GET /api/production/repacking/`).
+  3. **Frontend Repository & Caching**: Created `src/services/repackingRepository.ts` featuring a date-keyed cache (`repackingDataCache`) to eliminate redundant HTTP queries when toggling between Numbering and SQC/QC Hold views.
+- **Files Touched**: `Backend/app/models/repacking.py`, `Backend/app/schemas/repacking.py`, `Backend/app/api/production/repacking.py`, `Backend/app/main.py`, `src/services/repackingRepository.ts`, `src/components/quality/Re-PackingReport.tsx`
+
+## 18. Executive Analytics Dashboard Activation (`DashboardModule.tsx`)
+- **Issue**: Plant management and executives lacked a unified high-level performance cockpit combining schedule execution, furnace draw, weight efficiency, and line throughput.
+- **Fix**:
+  1. **Component Activation**: Activated `DashboardModule` in `src/App.tsx` and linked it to the top navigation bar under `#dashboard`.
+  2. **Executive KPI Suite**: Added real-time summary cards displaying Actual Production (bottles), Planned / As Per Speed, Variance, Weight Efficiency (% WT EFF), Pieces Efficiency (%), and Total Draw (tonnage).
+  3. **Visual Analytics & Print Isolation**: Integrated Recharts bar charts for target vs actual output and machine efficiency comparisons, machine draw distribution, hourly timeline tracking, and dedicated `@media print` isolation routines (`isolateReportForPrint`).
+- **Files Touched**: `src/App.tsx`, `src/components/dashboard/DashboardModule.tsx`
+
+## 19. Employee Master Metadata Registration & Checker/QA-Executive Lookup
+- **Issue**: Foreign keys on `repacking_numbering.checker_id` and `repacking_sqc_qc_hold.checker_id` referencing `hpr.employee_master` failed during automated metadata reflection in CI and local SQLite testing.
+- **Fix**:
+  1. **Model Registration**: Added minimal `EmployeeMaster` model mapping `hpr.employee_master` (`employee_id`, `employee_name`, `is_active`) and registered it in `Base.metadata`.
+  2. **API Endpoint**: Exposed `GET /api/production/repacking/employees` and `GET /api/auth/employees` to serve active employees for dropdown selectors.
+  3. **Test Coverage**: Added `Backend/tests/test_employee_master_metadata.py` verifying `Base.metadata` includes `employee_master`.
+- **Files Touched**: `Backend/app/models/employee.py`, `Backend/app/db/base.py`, `Backend/app/api/auth.py`, `Backend/tests/test_employee_master_metadata.py`
+
+## 20. Re-Packing Report Field Standardization & Shift-Restricted Custom Time Picker
+- **Issue**:
+  1. The column header "Pcs/Pack" caused operational confusion with package quantities; plant standard is "Pack Size".
+  2. The "Bottle" column duplicated information already conveyed by "Job Name".
+  3. Free-form time entry allowed operators to log inspection times outside the active shift hours.
+- **Fix**:
+  1. **Nomenclature & Layout**: Renamed "Pcs/Pack" to "Pack Size" and removed the redundant "Bottle" column across both NUMBERING and SQC/QC HOLD tables.
+  2. **Shift-Restricted Time Picker**: Enhanced the floating 12-hour time picker (`CellTimePicker`) to restrict selectable hours to the current row's shift (Shift 1: 9:00 AM – 5:00 PM, Shift 2: 5:00 PM – 1:00 AM, Shift 3: 1:00 AM – 9:00 AM) while maintaining flexible 24-hour string parsing fallbacks.
+  3. **Dropdown Typing**: Fixed `triggerRef` typing in `TimePickerDropdown` to permit null values on mount.
+- **Files Touched**: `src/components/quality/Re-PackingReport.tsx`
+
+## 21. Dual Packaging Types (TYPE 1 and TYPE 2) Across Quality Inspection & Re-Packing
+- **Issue**: Modern glass packaging lines frequently run dual packing configurations simultaneously (e.g. cartons and bulk trays). The Hourly Production Report only supported a single packing category, pack size, and carton count, forcing operators to combine or omit packaging types.
+- **Fix**:
+  1. **Database Schema & Migration**: Added `packing_category_2` (VARCHAR 100), `packing_size_2` (INTEGER), and `cartons_2` (INTEGER) to `hpr.hourly_production`. Added idempotent startup check `_ensure_hourly_production_type2_packing_columns` in `Backend/app/main.py`.
+  2. **Quality Monitor Grid**: Added distinct column groups for TYPE 1 and TYPE 2 packaging (Pack Type, Pack Size, Cartons) in `ProductionQualityMonitor.tsx`. Total bottles produced is computed as `(TYPE 1 Pack Size * TYPE 1 Cartons) + (TYPE 2 Pack Size * TYPE 2 Cartons)`.
+  3. **Job-Scoped Pack Type Resolution**: Updated `Re-PackingReport.tsx` to harvest both TYPE 1 and TYPE 2 packing categories from hourly data and map them by Job ID and Bottle ID (`packTypesForRow`). Each row's dropdown offers only the exact pack types reported during that job's operational hours.
+- **Files Touched**: `Backend/app/models/quality.py`, `Backend/app/schemas/quality.py`, `Backend/app/api/production/quality_daily.py`, `Backend/app/main.py`, `src/services/qualityRepository.ts`, `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/Re-PackingReport.tsx`
+
+## 22. Shared Production Timeline Builder (`buildProductionTimeline`) & Quality Report Integration
+- **Issue**: Calculating the actual Production Timeline (the continuous 24-hour cycle from 7:00 AM to 7:00 AM next day, offset by annealing lehr transit times) was coupled directly to the monitor component and omitted from the Machine Wise Production and Efficiency report.
+- **Fix**:
+  1. **Pure Utility Function**: Implemented `buildProductionTimeline` in `src/utils/layerOutTimeline.ts`. Offsets packing start and end boundaries backwards by applicable per-shift Lehr Out minutes, handling boundary transitions and 24-hour day wrapping.
+  2. **Continuous Production Time Display**: Rendered dedicated "Production Timeline" column alongside "Packing Timeline" in `ProductionQualityMonitor.tsx`.
+  3. **Quality Report Alignment**: Refactored `QualityReport.tsx` to consume `buildProductionTimeline`, guaranteeing that reported machine runtime minutes and start times match the Hourly Production Monitor.
+- **Files Touched**: `src/utils/layerOutTimeline.ts`, `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/QualityReport.tsx`
+
+## 23. Timeline Adjustments for Pre-9 AM Carry-In Split Rows & Display-Order Job Continuations
+- **Issue**:
+  1. Splitting the initial 9:00 AM row before 9:00 AM (e.g. 8:30 AM carved out of the previous day's carry-in) placed the split row chronologically after the final 8:00 AM row instead of at the top of the table.
+  2. The first row (9:00 AM) was hard-coded to disallow row splitting (`canSplit={time !== PRODUCTION_TIMES[0].time}`).
+  3. The "Continue Job" (`+`) action relied on raw clock minute comparisons, which miscalculated next targets when crossing midnight or encountering pre-9 AM split segments.
+- **Fix**:
+  1. **Pre-9 AM Timeline Adjustments**: Implemented `toOrderedTimelineMinutes`, `isPreDayStartSplitKey`, and `alignSplitMinuteToInterval` in `ProductionQualityMonitor.tsx`. Pre-9 AM split rows are shifted back by 24 hours so they sort strictly at the top of the table before 9:00 AM.
+  2. **Universal Row Splitting**: Removed the first-row split restriction (`canSplit={(slot?.durationMinutes ?? 0) > 0}`), allowing any row with duration > 0 to be split. Preserved parent `period_start` (e.g. 8:00 AM) when creating pre-9 AM splits.
+  3. **Display-Order Job Continuations**: Replaced raw clock comparison with display index navigation (`orderedKeys.indexOf(time)`). Job extensions cleanly cascade into the immediate next displayed row regardless of whether it is an hourly slot, a split segment, or a cross-day transition.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
 
