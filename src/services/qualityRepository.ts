@@ -589,7 +589,7 @@ export const qualityRepository = {
     dateKey: string,
     hourly: QualityDayHourly,
     shifts: QualityShiftMap,
-    options: { keepalive?: boolean; deletedSplits?: Record<string, string[]> } = {}
+    options: { keepalive?: boolean; deletedSplits?: Record<string, string[]>; lockTimes?: Record<string, string[]> } = {}
   ): Promise<QualitySaveResult> {
     try {
       const res = await apiFetch('/api/production/quality/daily/', {
@@ -601,6 +601,9 @@ export const qualityRepository = {
           shift_assignments: shifts,
           ...(options.deletedSplits && Object.keys(options.deletedSplits).length > 0
             ? { deleted_splits: options.deletedSplits }
+            : {}),
+          ...(options.lockTimes && Object.keys(options.lockTimes).length > 0
+            ? { lock_times: options.lockTimes }
             : {}),
         }),
       });

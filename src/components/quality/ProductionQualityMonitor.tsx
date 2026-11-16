@@ -175,6 +175,21 @@ const getIntervalDisplayForKey = (
 
 const isSplitKey = (key: string): boolean => !PRODUCTION_TIME_SET.has(key);
 
+/** Next canonical hourly production slot after the given row key (evaluated by
+ *  chronological timeline). Used for + visibility: show + only when this slot has
+ *  no entry. Returns null when there is no next hourly slot in the same day. */
+const getNextHourlySlot = (time: string): string | null => {
+  const t = toOrderedTimelineMinutes(time);
+  if (t === null) return null;
+  let next: { time: string; t: number } | null = null;
+  for (const pt of PRODUCTION_TIMES) {
+    const tt = toOrderedTimelineMinutes(pt.time);
+    if (tt === null || tt <= t) continue;
+    if (!next || tt < next.t) next = { time: pt.time, t: tt };
+  }
+  return next?.time ?? null;
+};
+
 /** A split row that belongs to the carry-in hour before the 9 AM production
  *  day start (e.g. 8:30 AM carved out of the first 9:00 AM row). These rows
  *  sit at the TOP of the table, before 9:00 AM — not after the final 8:00 AM
@@ -691,13 +706,13 @@ const PackingMultiSelect: React.FC<{ selected: string[]; onChange: (v: string[])
   useEffect(() => {
     const listener = (codes: string[]) => setPackOptions(codes);
     packOptionsListeners.add(listener);
-    loadPackOptions();
+    void loadPackOptions();
     return () => {
       packOptionsListeners.delete(listener);
     };
   }, []);
   useEffect(() => {
-    if (open) fetchPackOptions();
+    if (open) void loadPackOptions();
   }, [open]);
 
   useEffect(() => {
@@ -1315,6 +1330,11 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
   return (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
 };
 
+const hasBottleSelection = (value: unknown): boolean => {
+  if (value == null) return false;
+  return String(value).trim() !== '';
+};
+
 /**
  * The ONE hourly slot of this machine and day that is still current — the
  * entry the "+" / "−" buttons belong to. Empty string when no bottle has been
@@ -1350,7 +1370,7 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
   // without changing the result when no splits exist.
   let activeTime = '';
   for (const key of getOrderedDisplayKeys(rows)) {
-    if (rows[key]?.bottle_id) activeTime = key;
+    if (hasBottleSelection(rows[key]?.bottle_id)) activeTime = key;
   }
   return activeTime;
 };
@@ -1822,8 +1842,10 @@ const QualityTimeRow = React.memo<{
   copyRowDown: (time: string) => void;
   removeBottle: (time: string) => void;
   canEdit: boolean;
-  /** True only for the current entry of the running job (see activeJobEntryTime). */
+  /** True only for the current/latest entry of the running job (controls delete/−). */
   isActiveEntry: boolean;
+  /** True when the + button should be shown for this entry (next hourly slot is empty). */
+  canShowPlus: boolean;
   /** Bottle name of this entry, shown as plain text once a bottle is picked. */
   bottleName: string;
   /** Row lock (Machine 1–4 tables only): when true the production fields of
@@ -1871,6 +1893,7 @@ const QualityTimeRow = React.memo<{
   removeBottle,
   canEdit,
   isActiveEntry,
+  canShowPlus,
   bottleName,
   locked,
   toggleRowLock,
@@ -1901,11 +1924,10 @@ const QualityTimeRow = React.memo<{
   void periodStart;
   void periodEnd;
 
-  // Bottle/action area, two states only (see activeJobEntryTime): a row without
-  // a bottle is a new-job row and offers the bottle dropdown, a row with a
-  // bottle shows it as plain text and only the current entry of the running
-  // job carries the "+" / "−" buttons.
-  const hasBottle = !!entry?.bottle_id;
+  // Bottle/action area: a row without a bottle offers the dropdown; a row with
+  // a bottle shows plain text. "+" visibility depends on the next hourly slot,
+  // while "−" remains available only on the current/latest entry.
+  const hasBottle = hasBottleSelection(entry?.bottle_id);
   const isCurrentEntry = hasBottle && isActiveEntry;
 
   // Production Timeline is the Packing Timeline shifted back by the applicable
@@ -2255,54 +2277,53 @@ const QualityTimeRow = React.memo<{
               </span>
             )}
           </div>
-          {/* "+" extends the running job into the next hour and "−" permanently
-              deletes this row (its database record, auto-saved), so both belong
-              to the current entry alone. A historical or closed job entry has
-              plain text and no buttons at all. */}
-          {isCurrentEntry && canEdit && (
-            <button
-              onClick={() => copyRowDown(time)}
-              title="Copy this row to the next empty slot"
-              style={{
-                width: '24px', height: '24px', borderRadius: '5px',
-                border: '1px solid #bfdbfe', backgroundColor: '#eff6ff', color: '#2563eb',
-                fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: 0, flexShrink: 0, transition: 'background-color 0.15s',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#dbeafe'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
-            >
-              +
-            </button>
-          )}
-          {isCurrentEntry ? (
-            canEdit && !locked ? (
+          {/* "+" extends the job into the upcoming hourly slot when that next hourly
+              slot has no entry. "−" is shown alongside "+" so the entry can be deleted. */}
+          {hasBottle && canShowPlus && canEdit && (
+            <>
               <button
-                onClick={() => removeBottle(time)}
-                title="Permanently delete this row"
+                onClick={() => copyRowDown(time)}
+                title="Copy this row to the next empty slot"
                 style={{
                   width: '24px', height: '24px', borderRadius: '5px',
-                  border: '1px solid #fecdd3', backgroundColor: '#fff1f2', color: '#be123c',
+                  border: '1px solid #bfdbfe', backgroundColor: '#eff6ff', color: '#2563eb',
                   fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   padding: 0, flexShrink: 0, transition: 'background-color 0.15s',
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#dbeafe'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#eff6ff'; }}
               >
-                −
+                +
               </button>
-            ) : (
-              <button
-                disabled
-                title={locked ? 'This row is locked and cannot be edited.' : 'No edit permission for Quality Control'}
-                style={mutedActionButton}
-              >
-                −
-              </button>
-            )
-          ) : !hasBottle ? (
+              {!locked ? (
+                <button
+                  onClick={() => removeBottle(time)}
+                  title="Permanently delete this row"
+                  style={{
+                    width: '24px', height: '24px', borderRadius: '5px',
+                    border: '1px solid #fecdd3', backgroundColor: '#fff1f2', color: '#be123c',
+                    fontSize: '16px', fontWeight: 700, lineHeight: 1, cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    padding: 0, flexShrink: 0, transition: 'background-color 0.15s',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#ffe4e6'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff1f2'; }}
+                >
+                  −
+                </button>
+              ) : (
+                <button
+                  disabled
+                  title="This row is locked and cannot be edited."
+                  style={mutedActionButton}
+                >
+                  −
+                </button>
+              )}
+            </>
+          )}
+          {!hasBottle && (
             <button
               disabled
               title="No bottle to remove"
@@ -2310,7 +2331,7 @@ const QualityTimeRow = React.memo<{
             >
               −
             </button>
-          ) : null}
+          )}
         </div>
       </td>
 
@@ -3515,6 +3536,8 @@ export const QualityControlModule: React.FC = () => {
           // the backend on machine + production_time / entry_id). No shift
           // writes, no other-row deletions, no day reload — the response's
           // full-day state is used ONLY to backfill this row's ids below.
+          // Save and lock are combined into one request to avoid an extra
+          // round-trip; the backend applies the lock in the same transaction.
           const rowPayload: Record<string, Record<string, QualityHourlyEntry>> = {
             [mStr]: {
               [time]: machinePayload[time],
@@ -3522,7 +3545,7 @@ export const QualityControlModule: React.FC = () => {
           };
           const touchedNow = touchedTimes.current[dateKey];
           const seq = touchedNow?.[mStr]?.[time];
-          const result = await qualityRepository.save(dateKey, rowPayload, {}, {});
+          const result = await qualityRepository.save(dateKey, rowPayload, {}, { lockTimes: { [mStr]: [time] } });
           if (!result.ok) {
             patchLock(false);
             toast.error(result.error ?? 'Save failed. Row not locked.');
@@ -3534,8 +3557,8 @@ export const QualityControlModule: React.FC = () => {
             toast.error('Save failed — row not locked.');
             return;
           }
-          // Backfill ONLY this row's DB-generated ids, keeping the operator's
-          // values and the optimistic lock. No full-table merge, no period
+          // Backfill ONLY this row's DB-generated ids and confirmed lock state,
+          // keeping the operator's values. No full-table merge, no period
           // re-stamp, no other row is touched so memoized rows skip re-render.
           const savedEntry = result.hourly?.[mStr]?.[time];
           if (savedEntry) {
@@ -3548,7 +3571,7 @@ export const QualityControlModule: React.FC = () => {
                 report_id: savedEntry.report_id || prevEntry.report_id || '',
                 job_id: savedEntry.job_id || prevEntry.job_id || '',
                 split_group_id: savedEntry.split_group_id || prevEntry.split_group_id || '',
-                is_locked: true,
+                is_locked: savedEntry.is_locked ?? true,
               };
               if (
                 mergedEntry.entry_id === prevEntry.entry_id &&
@@ -3579,15 +3602,9 @@ export const QualityControlModule: React.FC = () => {
               delete byDateTouched[mStr][time];
             }
           }
-          const lockRes = await qualityRepository.setRowLock({
-            dateKey,
-            machineNo: activeMachine,
-            productionTime: time,
-            isLocked: true,
-          });
-          if (!lockRes.ok) {
+          if (!(result.hourly?.[mStr]?.[time]?.is_locked ?? false)) {
             patchLock(false);
-            toast.error(lockRes.error ?? 'Save succeeded but lock failed.');
+            toast.error('The row was saved, but the lock could not be confirmed.');
             return;
           }
           toast.success(`Row ${time} saved and locked.`);
@@ -3648,14 +3665,22 @@ export const QualityControlModule: React.FC = () => {
     return byId;
   }, [bottles, childrenByParent]);
 
-  // Same rule for the handlers, evaluated against the live store so it is right
-  // even when a handler runs before the next render. A job that a later entry
-  // has extended — or that a later job has replaced — is closed: its bottle,
-  // bottle name and Job ID stay exactly as they are and it cannot be extended.
+  // Delete (−) remains only on the current/latest entry of the running job.
   const isActiveEntryTime = useCallback((time: string): boolean => {
     const machineKey = String(activeMachine);
     const rows = productionStoreRef.current?.[dateKey]?.[machineKey] ?? {};
     return time === activeJobEntryTime(rows);
+  }, [dateKey, activeMachine]);
+
+  // "+" is shown/allowed when the immediately upcoming hourly slot has no entry.
+  const canExtendFromTime = useCallback((time: string, rows?: Record<string, QualityHourlyEntry | undefined>): boolean => {
+    const machineKey = String(activeMachine);
+    const byMachine = rows ?? (productionStoreRef.current?.[dateKey]?.[machineKey] ?? {});
+    const source = byMachine[time];
+    if (!hasBottleSelection(source?.bottle_id)) return false;
+    const nextSlot = getNextHourlySlot(time);
+    if (!nextSlot) return false;
+    return !hasBottleSelection(byMachine[nextSlot]?.bottle_id);
   }, [dateKey, activeMachine]);
 
   // Applies a confirmed bottle pick using the existing job-change logic
@@ -3730,7 +3755,7 @@ export const QualityControlModule: React.FC = () => {
   // next day's first row — crossing the day boundary never starts a new job.
   const copyRowDown = useCallback((time: string) => {
     if (!canEdit) return;
-    if (!isActiveEntryTime(time)) return;
+    if (!canExtendFromTime(time)) return;
     // Target the continuation row from the ACTUAL display timeline, never from
     // an array position. Every row's own key is the END of its interval (hourly
     // rows and split segments alike), so the next row strictly after the
@@ -3829,7 +3854,7 @@ export const QualityControlModule: React.FC = () => {
       }
       return prev;
     });
-  }, [dateKey, activeMachine, canEdit, markTouched, isActiveEntryTime]);
+  }, [dateKey, activeMachine, canEdit, markTouched, canExtendFromTime]);
 
   // Applies a confirmed "−" removal as a PERMANENT row delete: the row's
   // database record is dropped through the backend API and auto-saved right
@@ -3907,16 +3932,15 @@ export const QualityControlModule: React.FC = () => {
     })();
   }, [canEdit, dateKey, activeMachine]);
 
-  // Remove the current entry PERMANENTLY: the row's database record is
-  // deleted (not merely cleared) via the backend and auto-saved, so it stays
-  // gone after refresh. A historical or closed job entry is read-only and can
-  // never be deleted. Because this cannot be undone, it is staged for
-  // confirmation and applied only after the user clicks Yes.
+  // Remove an entry PERMANENTLY: the row's database record is deleted (not merely
+  // cleared) via the backend and auto-saved, so it stays gone after refresh.
+  // Because this cannot be undone, it is staged for confirmation and applied only
+  // after the user clicks Yes. Allowed when "+" is available for the entry.
   const removeBottle = useCallback((time: string) => {
     if (!canEdit) return;
-    if (!isActiveEntryTime(time)) return;
+    if (!canExtendFromTime(time)) return;
     setPendingJobChange({ kind: 'remove', time });
-  }, [canEdit, isActiveEntryTime]);
+  }, [canEdit, canExtendFromTime]);
 
   /** User clicked Yes: apply the staged bottle/job change. */
   const confirmJobChange = useCallback(() => {
@@ -5197,10 +5221,10 @@ rows.push(dateAndDay);
                   const isFirstInShift = !seen.has(shiftIdx);
                   seen.add(shiftIdx);
                   const entry = activeRows[time];
-                  // Only the current entry of the running job carries the "+" and
-                  // "−" buttons; every earlier entry of that job — and every entry
-                  // of a job a later entry has replaced — is read-only plain text.
+                  // "−" stays on the current/latest entry only. "+" is shown when the
+                  // immediately upcoming hourly slot has no entry.
                   const isActiveEntry = time === activeEntryTime;
+                  const canShowPlus = canExtendFromTime(time, activeRows);
                   const bottleName = entry?.bottle_id
                     ? bottleNameById.get(entry.bottle_id) ?? entry.bottle_id
                     : '';
@@ -5259,6 +5283,7 @@ rows.push(dateAndDay);
                       removeBottle={removeBottle}
                       canEdit={canEdit}
                       isActiveEntry={isActiveEntry}
+                      canShowPlus={canShowPlus}
                       bottleName={bottleName}
                       locked={rowLocked}
                       toggleRowLock={toggleRowLock}

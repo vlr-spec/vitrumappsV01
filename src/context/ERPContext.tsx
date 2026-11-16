@@ -394,13 +394,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Master saves) so the Planning Table picks up the new data automatically.
   useEffect(() => {
     let lastVersion = getCacheVersion();
+    // Poll for cache-refresh signals without creating constant timer churn.
     const interval = setInterval(() => {
       const currentVersion = getCacheVersion();
       if (currentVersion !== lastVersion) {
         lastVersion = currentVersion;
         setPlannerVersion((v) => v + 1);
       }
-    }, 500);
+    }, 2000);
     return () => clearInterval(interval);
   }, []);
 

@@ -130,6 +130,11 @@ class QualityDailyRequest(BaseModel):
     # after Save/Refresh/reload; only the listed keys are deleted and Job IDs
     # of every other row are untouched.
     deleted_splits: Optional[Dict[str, List[str]]] = None
+    # Optional row locks to apply in the same transaction after saving the
+    # provided hourly entries. Used to combine a row edit save + lock into one
+    # request (machine -> list of production_time labels to lock). Only rows
+    # present in this day's report after the save are affected.
+    lock_times: Optional[Dict[str, List[str]]] = None
 
 class QualityDailyResponse(BaseModel):
     hourly: Dict[str, Dict[str, QualityHourlyEntrySchema]]

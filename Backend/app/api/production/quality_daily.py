@@ -1826,6 +1826,29 @@ def save_daily_quality(
                     is_locked=bool(getattr(entry, 'is_locked', False)),
                 )
 
+        # Optional: lock specific rows in the same transaction as the save.
+        # This lets the UI combine "save edited row + lock checkbox" into one
+        # request while keeping the dedicated /lock/ endpoint for pure toggles.
+        if payload.lock_times:
+            lock_entries = db.query(HourlyProduction).filter(
+                HourlyProduction.report_id == report.report_id
+            ).all()
+            lock_map: Dict[Tuple[int, Optional[dtime]], HourlyProduction] = {
+                (int(e.machine_no), _norm_time(e.production_time)): e for e in lock_entries
+            }
+            for m_str, times in (payload.lock_times or {}).items():
+                try:
+                    m_no = int(m_str)
+                except Exception:
+                    continue
+                for t_label in (times or []):
+                    slot = _slot_time(t_label)
+                    if slot is None:
+                        continue
+                    entry = lock_map.get((m_no, slot))
+                    if entry is not None:
+                        entry.is_locked = True
+
         # Step 5: Single Commit
         db.commit()
     except HTTPException:
