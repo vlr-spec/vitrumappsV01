@@ -217,4 +217,26 @@ This document tracks the recent bug fixes and configuration updates made to the 
   3. **Display-Order Job Continuations**: Replaced raw clock comparison with display index navigation (`orderedKeys.indexOf(time)`). Job extensions cleanly cascade into the immediate next displayed row regardless of whether it is an hourly slot, a split segment, or a cross-day transition.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
 
+## 24. Hourly Production Monitor Excel Export Matched to PDF Report
+- **Issue**: The Hourly Production Monitor's Export button produced a plain `.csv` containing an extra Machine column and no report heading, styling, shift colours or Day Avg / Summary row, so the exported file looked nothing like the existing PDF print report.
+- **Fix**:
+  1. **Styled XLSX Export**: Replaced the CSV writer with a lazily loaded ExcelJS workbook named `Hourly Production`, downloaded as `.xlsx` so all formatting is preserved.
+  2. **PDF-Identical Layout**: Used the same 18-column table (17 columns on 2-gob machines, which omit Weight M), the same column order, and the same rows — 24 hourly slots plus split segments — from the existing in-memory store and helpers.
+  3. **Report Heading**: Added the centered, bold company name and the `date - day    Machine: No. n` line, each merged across the full report width.
+  4. **Table Formatting**: Applied the PDF's dark navy header with white bold wrapped labels, thin borders on every cell, centered numeric/time columns, left-aligned Bottle Name and Remarks, proportional column widths and consistent row heights.
+  5. **Row Colours & Summary**: Reused the PDF's shift palette (light blue / light green / light cream), split-group highlight, and the bold light-shaded Day Avg / Summary row with the existing totals in their existing columns.
+  6. **Print Setup**: Hid gridlines, set A4 landscape with fit-to-one-page-width, and added report title plus `Page x of y` to the print footer.
+  7. **No Data Changes**: Dates, machine numbers, bottle names, production values, calculations and the PDF report itself were left untouched; numeric-looking values are only stored as numbers for correct Excel formatting.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
+## 25. Hourly Production Monitor Export & Print Now Include All Four Machines
+- **Issue**: Export Excel and Print only produced the currently selected machine's report because both handlers read the active machine's rows and active-machine timelines, leaving the other three machines out of the file/PDF.
+- **Fix**:
+  1. **Shared Per-Machine Model**: Added `buildMachineReportModel` which runs the existing ordering, layer-out/timeline, duration, shift, Day Avg and summary helpers for any machine number, so each machine uses its own rows without changing any calculation.
+  2. **All-Machine Data Snapshot**: `reportStoreForDate` reuses the loaded `24 x 4` day store; if Export/Print runs before the day load completes, it fetches that day once so a machine is never reported empty.
+  3. **Excel**: One `Hourly Production` worksheet now contains Machine 1 → Machine 4 sequentially. Each report has its own centered company/date/day/machine heading, its own table (18 columns on 3-gob machines, 17 on 2-gob machines), shift colours, split highlight, Day Avg / Summary row and a spacer row between reports. Print setup remains landscape A4, fit to one page width, with footer title/page numbering.
+  4. **Print**: One landscape PDF with exactly one complete machine report per page and explicit `addPage()` breaks between reports. Each machine picks the most readable existing font profile that keeps its complete table on a single page, and every page carries its own machine heading and footer.
+  5. **Restrictions Respected**: No changes to PDF styling, production/efficiency/shift/timeline calculations, summary values, UI, backend APIs, database schema or production data; each report reads only its own machine's records.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
 

@@ -14,6 +14,46 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-11-17 — Hourly Production Monitor Excel Export Matched to PDF Report
+- **Problem:**
+  - The Hourly Production Monitor's Export button downloaded a plain `.csv` with an extra Machine column and no heading, header styling, shift colours or Day Avg / Summary row, so the export looked nothing like the existing PDF print report.
+- **Root Cause:**
+  - `handleExport` manually built comma-separated rows and a text/csv Blob, discarding all of the layout and formatting that the PDF path applies through jsPDF + autoTable.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Replaced the CSV writer with a lazily loaded ExcelJS workbook (`Hourly Production` worksheet) downloaded as `.xlsx`.
+    - Reused the PDF's centered heading (company name + `date - day    Machine: No. n`), merged across the full report width.
+    - Reused the PDF's exact 18-column table (17 on 2-gob machines, omitting Weight M), its rows, its split segments and its Day Avg / Summary values.
+    - Applied dark navy header cells with white bold wrapped text, thin borders, centered numeric/time columns, left-aligned Bottle Name and Remarks, proportional column widths and consistent row heights.
+    - Applied the PDF's shift-wise row palette (light blue / light green / light cream) plus the split-group highlight, and a bold light-shaded summary row.
+    - Hid gridlines, set landscape A4 with fit-to-one-page-width and added the report title + `Page x of y` to the print footer.
+  - No production values, calculations, timelines, summary calculations, PDF generation, UI or backend code were changed; numeric-looking values are only stored as numbers for correct Excel formatting.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - None. Frontend-only export change; no API contract, schema or persisted data changes.
+
+---
+
+### 2026-11-17 — Hourly Production Monitor Export & Print Now Include All Four Machines
+- **Problem:**
+  - Export Excel and Print generated only the report of the currently selected machine tab, even though the report is meant to cover the whole selected production date.
+- **Root Cause:**
+  - Both `handleExport` and `handlePrint` read the active machine's rows (`productionStore[dateKey][activeMachine]`) and used the active-machine timelines, durations and summary values, so the other three machines' records were never included.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Added a shared `buildMachineReportModel(machineNo, date, store, inputs, gobCount)` builder that evaluates the existing helpers for any machine: ordered display keys, layer-out timeline, durations, shift indices, production timeline, day averages and totals. No calculation rule was changed.
+    - Added `reportStoreForDate()`: the normal date load already returns the full `24 x 4` grid for all machines, so the loaded store is reused; if Export/Print runs before the load finishes, the same day is fetched once so no machine is reported empty.
+    - **Excel:** one `.xlsx` file with the `Hourly Production` worksheet containing Machine 1 → Machine 4 sequentially. Each machine gets its own centered company/date/day/machine heading, its own table (18 columns for 3-gob, 17 for 2-gob), shift colours, split highlight, Day Avg / Summary row and a spacer row between reports. Print setup remains A4 landscape, fit to one page width, with the footer title and page numbering.
+    - **Print:** one landscape PDF with exactly one complete machine report per page and an explicit page break between machines (`addPage()`). Each machine independently picks the most readable existing font profile that keeps its whole table on a single page, so no report is split across pages. Every page carries its own machine heading and footer.
+    - No production values, efficiency/shift/timeline calculations, PDF styling, UI, backend API or database schema were changed; each report reads only its own machine's records.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - None. Frontend-only; reuses the existing day-load endpoint, which already returns all four machines.
+
+---
+
 ### 2026-11-15 — Timeline Adjustments for Pre-9 AM Split Rows, First-Row Splitting & Display-Order Job Continuations
 - **Problem:**
   - Carving out a manual split row before the 9:00 AM production-day start (e.g. 8:30 AM carved out of the initial 9:00 AM carry-in hour) caused the split segment to be sorted after 8:00 AM at the bottom of the table rather than at the top before 9:00 AM.

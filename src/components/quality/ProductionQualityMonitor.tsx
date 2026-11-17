@@ -4,7 +4,7 @@ import { toast, Toaster } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth, MODULES } from '../../context/AuthContext';
 import { planningRepository } from '../../services/planningRepository';
-import { qualityRepository, QualityHourlyEntry, QualityShiftMap, QualityDayLoad, QualityDayHourly, hasMeaningfulData } from '../../services/qualityRepository';
+import { qualityRepository, QualityHourlyEntry, QualityHourlyStore, QualityShiftMap, QualityDayLoad, QualityDayHourly, hasMeaningfulData } from '../../services/qualityRepository';
 import { COMPANY_NAME, getReportHeaderLines } from '../../utils/reportHeader';
 import { calculateTheoreticalBottles } from '../../utils/calculations';
 import QualityReport from './QualityReport';
@@ -1347,6 +1347,154 @@ const calcRowAverage = (e: QualityHourlyEntry | undefined, gobCount: number): st
   const vals = [f, r].filter((v) => !isNaN(v));
   if (!vals.length) return '';
   return (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
+};
+
+/**
+ * Complete report model for ONE machine of the selected production date.
+ *
+ * Export Excel and Print both use this builder for all four machines so every
+ * machine report is produced from the same stored rows, timelines, durations,
+ * shift assignments and summary rules the on-screen table uses. It changes no
+ * calculation: it only evaluates the existing helpers with a machine number
+ * instead of the currently selected tab. `store` carries the already-loaded
+ * 24 x 4 grid for the date, so each machine reads its own production records.
+ */
+interface MachineReportModel {
+  machineNo: number;
+  gobCount: number;
+  hasM: boolean;
+  rows: Record<string, QualityHourlyEntry>;
+  displayKeys: string[];
+  timelineSlots: Record<string, LayerOutSlot>;
+  durationByKey: Record<string, number>;
+  shiftIdxByKey: Record<string, number>;
+  productionTimeSlots: Record<string, ProductionTimeSlot>;
+  dayAvgs: { front: string; middle: string; rear: string; avg: string };
+  stats: {
+    totalCartons: number;
+    totalCartonsType2: number;
+    totalBottles: number;
+    avgEff: string;
+  };
+}
+
+const buildMachineReportModel = (
+  machineNo: number,
+  date: string,
+  store: QualityHourlyStore,
+  inputs: LayerOutInputStore,
+  gobCount: number,
+): MachineReportModel => {
+  const machineKey = String(machineNo);
+  const rows = store[date]?.[machineKey] ?? {};
+  const { orderedKeys, slots } = buildLayerOutTimelineForDateMachine(
+    date,
+    machineKey,
+    store,
+    inputs,
+  );
+
+  // Same duration rule as the on-screen table: the row's real period when it
+  // has one, otherwise the ordering-derived interval (hourly rows stay 1 hour).
+  const durationByKey: Record<string, number> = {};
+  for (const k of orderedKeys) {
+    const slot = slots[k];
+    durationByKey[k] = slot
+      ? slot.durationMinutes / 60
+      : durationHoursFromEntry(rows[k], getDurationHoursForKey(orderedKeys, k));
+  }
+
+  // Same shift-index rule as the on-screen table, including split rows
+  // inheriting their parent hour's shift.
+  const shiftIdxByKey: Record<string, number> = {};
+  const hourlyShift = new Map<string, number>(
+    PRODUCTION_TIMES.map((pt) => [pt.time, pt.shift_id - 1]),
+  );
+  for (const k of orderedKeys) {
+    if (hourlyShift.has(k)) {
+      shiftIdxByKey[k] = hourlyShift.get(k) ?? 0;
+    } else {
+      const tOwn = toTimelineMinutes(k);
+      let s = 0;
+      for (const pt of PRODUCTION_TIMES) {
+        const tPt = toTimelineMinutes(pt.time);
+        if (tPt !== null && tOwn !== null && tPt <= tOwn) s = pt.shift_id - 1;
+        else break;
+      }
+      const stored = rows[k]?.shift_id;
+      shiftIdxByKey[k] = stored ? Math.max(0, Math.min(2, stored - 1)) : s;
+    }
+  }
+
+  const layerOut = layerOutValuesForDateMachine(inputs, date, machineKey);
+  const productionTimeSlots = buildProductionTimeline(
+    orderedKeys,
+    slots,
+    shiftIdxByKey,
+    layerOut,
+  );
+
+  const hasM = gobCount === 3;
+
+  // Day Avg / Summary — identical rules to the on-screen memo, per machine.
+  const collect = (field: 'weight_front' | 'weight_middle' | 'weight_rear'): string => {
+    const vals: number[] = [];
+    for (const k of orderedKeys) {
+      const v = parseFloat(rows[k]?.[field] ?? '');
+      if (!isNaN(v)) vals.push(v);
+    }
+    return vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : '';
+  };
+  const avgVals: number[] = [];
+  for (const k of orderedKeys) {
+    const v = parseFloat(calcRowAverage(rows[k], gobCount));
+    if (!isNaN(v)) avgVals.push(v);
+  }
+  const dayAvgs = {
+    front: collect('weight_front'),
+    middle: collect('weight_middle'),
+    rear: collect('weight_rear'),
+    avg: avgVals.length ? (avgVals.reduce((s, v) => s + v, 0) / avgVals.length).toFixed(1) : '',
+  };
+
+  let totalCartons = 0;
+  let totalCartonsType2 = 0;
+  let totalBottles = 0;
+  const effVals: number[] = [];
+  for (const k of orderedKeys) {
+    const e = rows[k];
+    const ct = parseInt(e?.cartons ?? '');
+    if (!isNaN(ct)) totalCartons += ct;
+    const ct2 = parseInt(e?.cartons_2 ?? '');
+    if (!isNaN(ct2)) totalCartonsType2 += ct2;
+    const pieces = calcTotalBottlesInNos(e);
+    if (pieces !== null) totalBottles += pieces;
+    // A zero-carton row contributes its displayed 0% to the average; every
+    // other row keeps its stored (authoritative) efficiency — unchanged.
+    const eff = ct === 0
+      ? parseFloat(calcEffForEntry(e, gobCount, durationByKey[k] ?? 1))
+      : parseFloat(String(e?.efficiency_percentage ?? ''));
+    if (!isNaN(eff)) effVals.push(eff);
+  }
+
+  return {
+    machineNo,
+    gobCount,
+    hasM,
+    rows,
+    displayKeys: orderedKeys,
+    timelineSlots: slots,
+    durationByKey,
+    shiftIdxByKey,
+    productionTimeSlots,
+    dayAvgs,
+    stats: {
+      totalCartons,
+      totalCartonsType2,
+      totalBottles,
+      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
+    },
+  };
 };
 
 const hasBottleSelection = (value: unknown): boolean => {
@@ -4386,125 +4534,85 @@ export const QualityControlModule: React.FC = () => {
     // No automatic retry and no status auto-reset (legacy full-day path).
   };
 
-  const handleExport = () => {
-    const rows: string[] = [];
+  // Snapshot of every machine's rows for the selected date. The date load
+  // already returns the full 24 x 4 grid, so the store normally holds all four
+  // machines. If Export/Print runs before that load finishes (or the load
+  // failed and no rows are cached), fetch the same day once so a machine is
+  // never reported empty by accident.
+  const reportStoreForDate = useCallback(async (): Promise<QualityHourlyStore> => {
+    if (productionStore[dateKey]) return productionStore;
+    const { hourly, ok } = await qualityRepository.load(dateKey);
+    if (!ok) return productionStore;
+    return { ...productionStore, [dateKey]: hourly };
+  }, [dateKey, productionStore]);
 
-   // Report header: company name + selected date and day
-rows.push(reportHeader.company);
+  const buildReportsForAllMachines = useCallback(
+    (store: QualityHourlyStore) =>
+      [1, 2, 3, 4].map((machineNo) =>
+        buildMachineReportModel(machineNo, dateKey, store, layerOutInputs, gobCountFor(machineNo)),
+      ),
+    [dateKey, layerOutInputs, gobCountFor],
+  );
 
-const [day, month, year] = dateLabel.split('-');
-const reportDate = new Date(`${year}-${month}-${day}T00:00:00`);
-
-const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
-  weekday: 'long',
-})}`;
-
-rows.push(dateAndDay);
-
-    const header = [
-      'Shift', 'Time', 'Production Timeline', 'Machine', 'Bottle Name', 'Weight F', 'Weight M', 'Weight R',
-      'AVG', 'Speed/Min',
-      'TYPE 1 - Pack Type', 'TYPE 1 - Pack Size', 'TYPE 1 - Cartons',
-      'TYPE 2 - Pack Type', 'TYPE 2 - Pack Size', 'TYPE 2 - Cartons',
-      'Bottles in Pieces', 'Pieces EFF%', 'Remarks',
-    ];
-    rows.push(header.join(','));
-    // Every displayed row in timeline order — the 24 hourly rows plus any
-    // split segments exactly as they appear in the table. Split rows show
-    // their time range only (e.g. "3:00–3:34 PM"); no Entry ID, Job ID or
-    // split identifier is exported. Values and calculations are untouched —
-    // efficiency uses the same per-row duration the table itself uses.
-    for (const key of displayKeys) {
-      const e = productionStore[dateKey]?.[String(activeMachine)]?.[key];
-      const slot = timelineSlots[key];
-      const timeLabel = slot
-        ? formatIntervalDisplayLabel(slot.start, slot.end)
-        : getIntervalDisplayForKey(displayKeys, key, e);
-      const productionSlot = productionTimeSlots[key];
-      const productionTimeLabel = productionSlot
-        ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
-        : timeLabel;
-      const shiftLabel = SHIFT_LABELS[(e?.shift_id ?? 0) - 1]
-        ?? SHIFT_LABELS[shiftIdxByKey[key] ?? 0]
-        ?? '';
-      if (!e) {
-        rows.push([shiftLabel, timeLabel, productionTimeLabel, `Machine ${activeMachine}`, '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''].join(','));
-        continue;
-      }
-      const bottleName = bottles.find((b) => b.id === e.bottle_id)?.name ?? e.bottle_id;
-      const eff = calcEffFor(e, activeMachine, durationByKey[key] ?? 1);
-      rows.push(
-        [
-          shiftLabel,
-          timeLabel,
-          productionTimeLabel,
-          `Machine ${activeMachine}`,
-          bottleName,
-          e.weight_front,
-          e.weight_middle,
-          e.weight_rear,
-          calcRowAvgFor(e, activeMachine),
-          e.speed_per_min,
-          (e.packing_category ?? []).join(' / '),
-          e.packing_size,
-          e.cartons,
-          (e.packing_category_2 ?? []).join(' / '),
-          e.packing_size_2,
-          e.cartons_2,
-          calcBottlesInNosFor(e) || e.bottles_in_nos,
-          eff,
-          e.remarks,
-        ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')
-      );
-    }
-    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `production-quality-monitor-machine-${activeMachine}-${dateKey}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success(`Exported Machine ${activeMachine} — ${dateLabel} to CSV`);
-  };
-
-  const [isPrinting, setIsPrinting] = useState(false);
-
-  // Generates a landscape PDF of the currently loaded Quality Monitor data and
-  // downloads it directly — mirrors the Production Planning module's print
-  // behavior (jspdf + jspdf-autotable, no window.print() / browser dialog).
-  const handlePrint = async () => {
-    if (isPrinting) return;
-    setIsPrinting(true);
-
+  // Excel export — ALL FOUR machines in ONE worksheet, in machine order, each
+  // with its own centered heading and Day Avg / Summary row. Layout, borders,
+  // colours and column order mirror the PDF report. Every row comes from the
+  // selected date's loaded store for that machine, so records are never
+  // combined across machines and no calculation changes.
+  const handleExport = async () => {
     try {
-      // jspdf + autoTable are only needed for printing — load them lazily so
-      // the initial bundle stays small. CJS interop fallback via .default.
-      const jspdfModule: any = await import('jspdf');
-      const jsPDF = jspdfModule.jsPDF ?? jspdfModule.default?.jsPDF;
-      const autoTableModule: any = await import('jspdf-autotable');
-      const autoTable = autoTableModule.autoTable ?? autoTableModule.default;
+      // exceljs is only needed for export — load it lazily so the initial
+      // bundle stays small (same pattern as the planning module export).
+      const exceljsModule: any = await import('exceljs');
+      const ExcelJS = exceljsModule.Workbook ? exceljsModule : exceljsModule.default;
 
-      // Collect ALL currently available monitor data — the same in-memory store
-      // the table renders from, so no extra API/database calls are needed.
-      const byTime = productionStore[dateKey]?.[String(activeMachine)] ?? {};
+      const store = await reportStoreForDate();
+      const reports = buildReportsForAllMachines(store);
+      const bottleNameFor = (id: string) => bottles.find((b) => b.id === id)?.name ?? id;
 
-      const bottleNameFor = (id: string) =>
-        bottles.find((b) => b.id === id)?.name ?? id;
-
-      // Report header — company name + selected date and day, centred.
-      // Everything else (report title, machine line and shift assignments)
-      // is intentionally omitted from the printed report.
+      // Report heading — company name + selected date and day + machine.
       const [day, month, year] = dateLabel.split('-');
       const reportDate = new Date(`${year}-${month}-${day}T00:00:00`);
-
       const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
         weekday: 'long',
       })}`;
 
-      // ── Table header (single compact row): Pack Type / Pack Size / Cartons
-      // are kept for both groups but the TYPE 1 / TYPE 2 group headings are
-      // no longer printed. Weight F/M/R depends on machine gob type.
-      const head = [[
+      // Keep real numbers as numbers so Excel can format/sort them, while
+      // descriptive text (names, times, pack types, remarks) stays untouched.
+      const numeric = (value: unknown): any => {
+        if (typeof value === 'number') return Number.isFinite(value) ? value : '';
+        if (typeof value !== 'string') return value ?? '';
+        const trimmed = value.trim();
+        if (!trimmed) return '';
+        if (/^-?(?:\d+|\d*\.\d+)$/.test(trimmed)) return Number(trimmed);
+        return value;
+      };
+
+      // ARGB colours, kept in sync with the PDF's SHIFT_ROW_BG palette.
+      const toArgb = (hex: string) => `FF${hex.replace('#', '').toUpperCase()}`;
+      const HEADER_FILL = 'FF1E293B'; // dark navy, same as PDF headStyles
+      const SUMMARY_FILL = 'FFF0F4FA';
+      const SPLIT_FILL = toArgb('#fff7e1');
+      const BORDER_COLOR = 'FFCBD5E1';
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Hourly Production');
+
+      // One shared set of widths for all four sections. Machines 2/3 omit
+      // Weight M (17 columns) while machines 1/4 use all 18; these widths stay
+      // readable in both layouts (col 17 is Pieces EFF% or Remarks, col 18 is
+      // Remarks).
+      const colWidths = [6.5, 9.5, 9.5, 24, 7.5, 7.5, 8, 8.5, 9, 10, 9.5, 8.5, 10, 9.5, 8.5, 8.5, 14, 20];
+      colWidths.forEach((width, index) => {
+        worksheet.getColumn(index + 1).width = width;
+      });
+
+      // Hide Excel's default gridlines. Each machine section owns its heading
+      // and column header, so no single header row is frozen for the whole
+      // four-machine sheet.
+      worksheet.views = [{ showGridLines: false }];
+
+      const tableHeaderFor = (hasM: boolean) => [
         'Shift',
         'Time',
         'Production Timeline',
@@ -4521,96 +4629,341 @@ rows.push(dateAndDay);
         'Bottles',
         'Pieces EFF%',
         'Remarks',
-      ]];
+      ];
 
-      // ── Body: every displayed row in timeline order (calculations identical
-      // to on-screen) — the 24 hourly rows plus any split segments. Split rows
-      // show their time range only (e.g. "3:00–3:34 PM"); no Entry ID, Job ID
-      // or split identifier is printed. ───
-      const body: any[][] = [];
-      const bodyMeta: { shiftIdx: number; grouped: boolean; summary?: boolean }[] = [];
-      for (const key of displayKeys) {
-        const e = byTime[key];
-        const slot = timelineSlots[key];
-        const timeLabel = slot
-          ? formatIntervalDisplayLabel(slot.start, slot.end)
-          : getIntervalDisplayForKey(displayKeys, key, e);
-        const productionSlot = productionTimeSlots[key];
-        const productionTimeLabel = productionSlot
-          ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
-          : timeLabel;
-        const shiftIdx = e?.shift_id ? Math.max(0, Math.min(2, e.shift_id - 1)) : (shiftIdxByKey[key] ?? 0);
-        bodyMeta.push({ shiftIdx, grouped: !!(e?.split_group_id ?? '').trim() });
-        body.push([
-          SHIFT_LABELS[shiftIdx] ?? '',
-          timeLabel,
-          productionTimeLabel,
-          e?.bottle_id ? bottleNameFor(e.bottle_id) : '',
-          e?.weight_front ?? '',
-          ...(hasM ? [e?.weight_middle ?? ''] : []),
-          e?.weight_rear ?? '',
-          calcRowAvgFor(e, activeMachine),
-          e?.speed_per_min ?? '',
-          (e?.packing_category ?? []).join(' / '),
-          e?.packing_size ?? '',
-          e?.cartons ?? '',
-          (e?.packing_category_2 ?? []).join(' / '),
-          e?.packing_size_2 ?? '',
-          e?.cartons_2 ?? '',
-          calcBottlesInNosFor(e) || e?.bottles_in_nos || '',
-          calcEffFor(e, activeMachine, durationByKey[key] ?? 1),
-          e?.remarks ?? '',
-        ]);
+      let rowNumber = 1;
+
+      for (const report of reports) {
+        const tableHeader = tableHeaderFor(report.hasM);
+        const colCount = tableHeader.length;
+
+        // ── Centered machine heading (merged across this report's width) ──
+        worksheet.getRow(rowNumber).getCell(1).value = reportHeader.company;
+        worksheet.mergeCells(rowNumber, 1, rowNumber, colCount);
+        const titleRow = worksheet.getRow(rowNumber);
+        titleRow.height = 26;
+        titleRow.getCell(1).font = { bold: true, size: 14, color: { argb: 'FF1E293B' } };
+        titleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+        rowNumber++;
+
+        worksheet.getRow(rowNumber).getCell(1).value =
+          `${dateAndDay}    Machine: No. ${report.machineNo}`;
+        worksheet.mergeCells(rowNumber, 1, rowNumber, colCount);
+        const subtitleRow = worksheet.getRow(rowNumber);
+        subtitleRow.height = 20;
+        subtitleRow.getCell(1).font = { bold: true, size: 10.5, color: { argb: 'FF1E293B' } };
+        subtitleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+        rowNumber++;
+
+        // ── Column header row: dark navy + white bold, wrapped labels ─────
+        const headerRow = worksheet.getRow(rowNumber);
+        headerRow.values = tableHeader;
+        headerRow.height = 34;
+        for (let c = 1; c <= colCount; c++) {
+          const cell = headerRow.getCell(c);
+          cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+          cell.border = {
+            top: { style: 'thin', color: { argb: BORDER_COLOR } },
+            left: { style: 'thin', color: { argb: BORDER_COLOR } },
+            bottom: { style: 'thin', color: { argb: BORDER_COLOR } },
+            right: { style: 'thin', color: { argb: BORDER_COLOR } },
+          };
+        }
+        rowNumber++;
+
+        // ── Body: this machine's displayed rows only (24 hourly rows plus
+        // its split segments), in timeline order. ───────────────────────────
+        const bodyStartRow = rowNumber;
+        const bodyMeta: { shiftIdx: number; grouped: boolean }[] = [];
+        for (const key of report.displayKeys) {
+          const e = report.rows[key];
+          const slot = report.timelineSlots[key];
+          const timeLabel = slot
+            ? formatIntervalDisplayLabel(slot.start, slot.end)
+            : getIntervalDisplayForKey(report.displayKeys, key, e);
+          const productionSlot = report.productionTimeSlots[key];
+          const productionTimeLabel = productionSlot
+            ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
+            : timeLabel;
+          const shiftIdx = e?.shift_id
+            ? Math.max(0, Math.min(2, e.shift_id - 1))
+            : (report.shiftIdxByKey[key] ?? 0);
+          bodyMeta.push({
+            shiftIdx,
+            grouped: !!(e?.split_group_id ?? '').trim(),
+          });
+
+          worksheet.getRow(rowNumber).values = [
+            SHIFT_LABELS[shiftIdx] ?? '',
+            timeLabel,
+            productionTimeLabel,
+            e?.bottle_id ? bottleNameFor(e.bottle_id) : '',
+            numeric(e?.weight_front ?? ''),
+            ...(report.hasM ? [numeric(e?.weight_middle ?? '')] : []),
+            numeric(e?.weight_rear ?? ''),
+            numeric(calcRowAverage(e, report.gobCount)),
+            numeric(e?.speed_per_min ?? ''),
+            (e?.packing_category ?? []).join(' / '),
+            numeric(e?.packing_size ?? ''),
+            numeric(e?.cartons ?? ''),
+            (e?.packing_category_2 ?? []).join(' / '),
+            numeric(e?.packing_size_2 ?? ''),
+            numeric(e?.cartons_2 ?? ''),
+            numeric(calcBottlesInNos(e) || e?.bottles_in_nos || ''),
+            numeric(calcEffForEntry(e, report.gobCount, report.durationByKey[key] ?? 1)),
+            e?.remarks ?? '',
+          ];
+          rowNumber++;
+        }
+
+        // ── Day Avg / Summary row — this machine's own totals ─────────────
+        const summaryValues: any[] = new Array(colCount).fill('');
+        summaryValues[0] = 'Day Avg / Summary';
+        let wIdx = 4;
+        summaryValues[wIdx++] = numeric(report.dayAvgs.front);
+        if (report.hasM) summaryValues[wIdx++] = numeric(report.dayAvgs.middle);
+        summaryValues[wIdx++] = numeric(report.dayAvgs.rear);
+        summaryValues[wIdx++] = numeric(report.dayAvgs.avg);
+        wIdx++; // Speed
+        wIdx++; // TYPE 1 Pack Type
+        wIdx++; // TYPE 1 Pack Size
+        summaryValues[wIdx++] = report.stats.totalCartons;
+        wIdx++; // TYPE 2 Pack Type
+        wIdx++; // TYPE 2 Pack Size
+        summaryValues[wIdx++] = report.stats.totalCartonsType2;
+        summaryValues[wIdx++] = report.stats.totalBottles;
+        summaryValues[wIdx++] = `${report.stats.avgEff}%`;
+        const summaryRowNumber = rowNumber;
+        worksheet.getRow(summaryRowNumber).values = summaryValues;
+        worksheet.mergeCells(summaryRowNumber, 1, summaryRowNumber, 4);
+        rowNumber++;
+
+        // ── Body + summary formatting ──────────────────────────────────────
+        for (let r = bodyStartRow; r <= summaryRowNumber; r++) {
+          const row = worksheet.getRow(r);
+          const isSummary = r === summaryRowNumber;
+          const meta = bodyMeta[r - bodyStartRow];
+          const fill = isSummary
+            ? SUMMARY_FILL
+            : meta?.grouped
+              ? SPLIT_FILL
+              : toArgb(SHIFT_ROW_BG[meta?.shiftIdx ?? 0] ?? SHIFT_ROW_BG[0]);
+
+          row.height = isSummary ? 20 : 18;
+
+          for (let c = 1; c <= colCount; c++) {
+            const cell = row.getCell(c);
+            // Bottle Name (col 4) and Remarks (last col) stay left aligned;
+            // every numeric/time column is centered like the PDF.
+            const leftAligned = c === 4 || c === colCount;
+            const horizontal = isSummary && c === 1 ? 'right' : leftAligned ? 'left' : 'center';
+
+            cell.font = { bold: isSummary, size: 9, color: { argb: 'FF1E293B' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+            cell.alignment = { horizontal, vertical: 'middle', wrapText: leftAligned };
+            cell.border = {
+              top: { style: 'thin', color: { argb: BORDER_COLOR } },
+              left: { style: 'thin', color: { argb: BORDER_COLOR } },
+              bottom: { style: 'thin', color: { argb: BORDER_COLOR } },
+              right: { style: 'thin', color: { argb: BORDER_COLOR } },
+            };
+          }
+        }
+
+        // Spacing between machine reports — one borderless blank row.
+        worksheet.getRow(rowNumber).height = 12;
+        rowNumber++;
       }
 
-      // Day Avg / Summary row — mirrors the on-screen totals.
-      const colCount = hasM ? 18 : 17;
-      const summary: any[] = new Array(colCount).fill('');
-      summary[0] = {
-        content: 'Day Avg / Summary',
-        colSpan: 4,
-        styles: { halign: 'right', fontStyle: 'bold' },
+      // ── Print setup: landscape, one page wide, footer title/paging ──────
+      worksheet.pageSetup = {
+        paperSize: 9, // A4
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        horizontalCentered: true,
+        margins: {
+          left: 0.25,
+          right: 0.25,
+          top: 0.5,
+          bottom: 0.6,
+          header: 0.2,
+          footer: 0.25,
+        },
       };
-      let wIdx = 4;
-      summary[wIdx++] = dayAvgs.front;
-      if (hasM) summary[wIdx++] = dayAvgs.middle;
-      summary[wIdx++] = dayAvgs.rear;
-      summary[wIdx++] = dayAvgs.avg;
-      wIdx++; // Speed
-      wIdx++; // TYPE 1 Pack Type
-      wIdx++; // TYPE 1 Pack Size
-      summary[wIdx++] = stats.totalCartons.toLocaleString();
-      wIdx++; // TYPE 2 Pack Type
-      wIdx++; // TYPE 2 Pack Size
-      summary[wIdx++] = stats.totalCartonsType2.toLocaleString();
-      summary[wIdx++] = stats.totalBottles.toLocaleString();
-      summary[wIdx++] = `${stats.avgEff}%`;
-      body.push(summary);
-      bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
 
-      // ── Column widths + alignment ────────────────────────────────────────
-      // A4 landscape is 297mm wide; with 7.5mm side margins the available
-      // width is 282mm. Both width lists sum to exactly 282mm so the header
-      // and every data column stay aligned across the full page width.
-      const colWidths = hasM
-        ? [12, 17, 17, 37, 12, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 26]
-        : [12, 17, 17, 43, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 32];
+      const footerText =
+        `&L&"Calibri,Regular"&8Hourly Production Monitor — All Machines — ${dateLabel}` +
+        '&R&"Calibri,Regular"&8Page &P of &N';
+      worksheet.headerFooter.oddFooter = footerText;
+      worksheet.headerFooter.evenFooter = footerText;
 
-      const columnStyles: Record<number, any> = {};
-      colWidths.forEach((w, i) => {
-        const leftAligned = i === 3 || i === colWidths.length - 1;
-        columnStyles[i] = { cellWidth: w, halign: leftAligned ? 'left' : 'center' };
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `production-quality-monitor-all-machines-${dateKey}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported all 4 machines — ${dateLabel} to Excel`);
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to export Excel. Please try again.');
+    }
+  };
+
+  const [isPrinting, setIsPrinting] = useState(false);
+
+  // Generates ONE landscape PDF containing all four machine reports — one
+  // complete machine per page with an explicit page break between reports.
+  // The existing PDF design/formatting is unchanged; only the scope moves from
+  // the selected machine to all four machines of the selected date.
+  const handlePrint = async () => {
+    if (isPrinting) return;
+    setIsPrinting(true);
+
+    try {
+      // jspdf + autoTable are only needed for printing — load them lazily so
+      // the initial bundle stays small. CJS interop fallback via .default.
+      const jspdfModule: any = await import('jspdf');
+      const jsPDF = jspdfModule.jsPDF ?? jspdfModule.default?.jsPDF;
+      const autoTableModule: any = await import('jspdf-autotable');
+      const autoTable = autoTableModule.autoTable ?? autoTableModule.default;
+
+      // All four machines come from the same loaded day store the table uses
+      // (fetched once if the date has not finished loading). Each machine
+      // reads only its own rows.
+      const store = await reportStoreForDate();
+      const reports = buildReportsForAllMachines(store);
+
+      const bottleNameFor = (id: string) =>
+        bottles.find((b) => b.id === id)?.name ?? id;
+
+      // Report header — company name + selected date and day, centred.
+      const [day, month, year] = dateLabel.split('-');
+      const reportDate = new Date(`${year}-${month}-${day}T00:00:00`);
+      const dateAndDay = `${dateLabel} - ${reportDate.toLocaleDateString('en-US', {
+        weekday: 'long',
+      })}`;
 
       const PAGE_MARGIN_X = 7.5;
       const PAGE_MARGIN_BOTTOM = 8;
       const TABLE_START_Y = 17;
       const FOOTER_Y_FROM_BOTTOM = 4.5;
 
+      // ── One PDF section per machine, using that machine's own rows, gob
+      // layout and summary values. Nothing is combined across machines. ───
+      const sections = reports.map((report) => {
+        const head = [[
+          'Shift',
+          'Time',
+          'Production Timeline',
+          'Bottle Name',
+          ...(report.hasM ? ['Weight F', 'Weight M', 'Weight R'] : ['Weight F', 'Weight R']),
+          'Average',
+          'Speed/Min',
+          'Pack Type',
+          'Pack Size',
+          'Cartons',
+          'Pack Type',
+          'Pack Size',
+          'Cartons',
+          'Bottles',
+          'Pieces EFF%',
+          'Remarks',
+        ]];
+
+        const body: any[][] = [];
+        const bodyMeta: { shiftIdx: number; grouped: boolean; summary?: boolean }[] = [];
+        for (const key of report.displayKeys) {
+          const e = report.rows[key];
+          const slot = report.timelineSlots[key];
+          const timeLabel = slot
+            ? formatIntervalDisplayLabel(slot.start, slot.end)
+            : getIntervalDisplayForKey(report.displayKeys, key, e);
+          const productionSlot = report.productionTimeSlots[key];
+          const productionTimeLabel = productionSlot
+            ? formatProductionIntervalLabel(productionSlot.start, productionSlot.end)
+            : timeLabel;
+          const shiftIdx = e?.shift_id
+            ? Math.max(0, Math.min(2, e.shift_id - 1))
+            : (report.shiftIdxByKey[key] ?? 0);
+          bodyMeta.push({ shiftIdx, grouped: !!(e?.split_group_id ?? '').trim() });
+          body.push([
+            SHIFT_LABELS[shiftIdx] ?? '',
+            timeLabel,
+            productionTimeLabel,
+            e?.bottle_id ? bottleNameFor(e.bottle_id) : '',
+            e?.weight_front ?? '',
+            ...(report.hasM ? [e?.weight_middle ?? ''] : []),
+            e?.weight_rear ?? '',
+            calcRowAverage(e, report.gobCount),
+            e?.speed_per_min ?? '',
+            (e?.packing_category ?? []).join(' / '),
+            e?.packing_size ?? '',
+            e?.cartons ?? '',
+            (e?.packing_category_2 ?? []).join(' / '),
+            e?.packing_size_2 ?? '',
+            e?.cartons_2 ?? '',
+            calcBottlesInNos(e) || e?.bottles_in_nos || '',
+            calcEffForEntry(e, report.gobCount, report.durationByKey[key] ?? 1),
+            e?.remarks ?? '',
+          ]);
+        }
+
+        // Day Avg / Summary row — this machine's own totals only.
+        const colCount = report.hasM ? 18 : 17;
+        const summary: any[] = new Array(colCount).fill('');
+        summary[0] = {
+          content: 'Day Avg / Summary',
+          colSpan: 4,
+          styles: { halign: 'right', fontStyle: 'bold' },
+        };
+        let wIdx = 4;
+        summary[wIdx++] = report.dayAvgs.front;
+        if (report.hasM) summary[wIdx++] = report.dayAvgs.middle;
+        summary[wIdx++] = report.dayAvgs.rear;
+        summary[wIdx++] = report.dayAvgs.avg;
+        wIdx++; // Speed
+        wIdx++; // TYPE 1 Pack Type
+        wIdx++; // TYPE 1 Pack Size
+        summary[wIdx++] = report.stats.totalCartons.toLocaleString();
+        wIdx++; // TYPE 2 Pack Type
+        wIdx++; // TYPE 2 Pack Size
+        summary[wIdx++] = report.stats.totalCartonsType2.toLocaleString();
+        summary[wIdx++] = report.stats.totalBottles.toLocaleString();
+        summary[wIdx++] = `${report.stats.avgEff}%`;
+        body.push(summary);
+        bodyMeta.push({ shiftIdx: 0, grouped: false, summary: true });
+
+        // ── Column widths + alignment (unchanged PDF design) ─────────────
+        // A4 landscape is 297mm wide; with 7.5mm side margins the available
+        // width is 282mm. Both width lists sum to exactly 282mm so the header
+        // and every data column stay aligned across the full page width.
+        const colWidths = report.hasM
+          ? [12, 17, 17, 37, 12, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 26]
+          : [12, 17, 17, 43, 12, 12, 14, 13, 15, 14, 13, 15, 14, 13, 13, 13, 32];
+
+        const columnStyles: Record<number, any> = {};
+        colWidths.forEach((w, i) => {
+          const leftAligned = i === 3 || i === colWidths.length - 1;
+          columnStyles[i] = { cellWidth: w, halign: leftAligned ? 'left' : 'center' };
+        });
+
+        return { machineNo: report.machineNo, head, body, bodyMeta, columnStyles };
+      });
+
       // Compact print profiles, tried from most readable to most compact.
       // The first profile that keeps the complete table on a single A4
-      // landscape page wins, so the normal 24-hour report uses the largest
-      // font while split rows are still accommodated without truncation.
+      // landscape page wins, so each machine keeps the same design as before.
       const printProfiles = [
         { fontSize: 7, cellPadding: 1.2, fill: 0.96 },
         { fontSize: 6.5, cellPadding: 1.0, fill: 0.94 },
@@ -4623,23 +4976,27 @@ rows.push(dateAndDay);
         { fontSize: 3, cellPadding: 0, fill: 0.80 },
       ];
 
-      let doc: any = null;
-      for (const profile of printProfiles) {
-        const candidate = new jsPDF('landscape');
-        const pageW = candidate.internal.pageSize.getWidth();
-        const pageH = candidate.internal.pageSize.getHeight();
+      // Applies the existing PDF report design for ONE machine on the current
+      // page of `doc`.
+      const drawMachineReport = (
+        doc: any,
+        section: typeof sections[number],
+        profile: typeof printProfiles[number],
+      ) => {
+        const pageW = doc.internal.pageSize.getWidth();
+        const pageH = doc.internal.pageSize.getHeight();
         const centerX = pageW / 2;
 
-        // Header — only the company name and report date remain.
-        candidate.setFont('helvetica', 'bold');
-        candidate.setFontSize(10);
-        candidate.setTextColor(30, 41, 59);
-        candidate.text(reportHeader.company, centerX, 9, { align: 'center' });
+        // Header — company name and this machine's date/day line.
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(30, 41, 59);
+        doc.text(reportHeader.company, centerX, 9, { align: 'center' });
 
-        candidate.setFont('helvetica', 'normal');
-        candidate.setFontSize(8);
-        candidate.text(
-          `${dateAndDay}    Machine: No. ${activeMachine}`,
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.text(
+          `${dateAndDay}    Machine: No. ${section.machineNo}`,
           centerX,
           13.5,
           { align: 'center' },
@@ -4652,12 +5009,12 @@ rows.push(dateAndDay);
         const availableHeight = pageH - PAGE_MARGIN_BOTTOM - TABLE_START_Y;
         const minCellHeight = Math.max(
           1.6,
-          (availableHeight / (body.length + 1)) * profile.fill,
+          (availableHeight / (section.body.length + 1)) * profile.fill,
         );
 
-        autoTable(candidate, {
-          head,
-          body,
+        autoTable(doc, {
+          head: section.head,
+          body: section.body,
           startY: TABLE_START_Y,
           margin: {
             top: TABLE_START_Y,
@@ -4669,7 +5026,7 @@ rows.push(dateAndDay);
           includeEmptyRows: true,
           // Never split a production row across pages.
           rowPageBreak: 'avoid',
-          columnStyles,
+          columnStyles: section.columnStyles,
           styles: {
             fontSize: profile.fontSize,
             cellPadding: profile.cellPadding,
@@ -4691,7 +5048,7 @@ rows.push(dateAndDay);
           alternateRowStyles: false,
           didParseCell: (data: any) => {
             if (data.section !== 'body') return;
-            const meta = bodyMeta[data.row.index];
+            const meta = section.bodyMeta[data.row.index];
             if (meta?.summary) {
               data.cell.styles.fillColor = [240, 244, 250];
               data.cell.styles.fontStyle = 'bold';
@@ -4703,16 +5060,34 @@ rows.push(dateAndDay);
             }
           },
         });
+      };
 
-        doc = candidate;
-        if (candidate.getNumberOfPages() === 1) break;
-      }
+      // Pick, per machine, the most readable profile that keeps that machine's
+      // complete report on exactly one page. Probes mirror the final drawing.
+      const chosenProfiles = sections.map((section) => {
+        for (const profile of printProfiles) {
+          const probe = new jsPDF('landscape');
+          drawMachineReport(probe, section, profile);
+          if (probe.getNumberOfPages() === 1) return profile;
+        }
+        return printProfiles[printProfiles.length - 1];
+      });
 
-      if (!doc) {
-        throw new Error('Could not create the report document.');
-      }
+      // Final document: Machine 1 → 4, one report per page, explicit page
+      // breaks between reports.
+      const doc = new jsPDF('landscape');
+      const pageMachine: number[] = [];
+      sections.forEach((section, index) => {
+        if (index > 0) doc.addPage();
+        drawMachineReport(doc, section, chosenProfiles[index]);
+        // Each section was verified to fit one page; this also keeps the
+        // footer mapping correct even if a future profile ever needed more.
+        while (pageMachine.length < doc.getNumberOfPages()) {
+          pageMachine.push(section.machineNo);
+        }
+      });
 
-      // ── Footer with page numbers ────────────────────────────────────────
+      // ── Footer with the machine title + page numbering ──────────────────
       const pageCount = doc.getNumberOfPages();
       const pageW = doc.internal.pageSize.getWidth();
       const pageH = doc.internal.pageSize.getHeight();
@@ -4720,12 +5095,16 @@ rows.push(dateAndDay);
         doc.setPage(i);
         doc.setFontSize(7);
         doc.setTextColor(100, 116, 139);
-        doc.text(`Hourly Production Monitor — Machine ${activeMachine} — ${dateLabel}`, 10, pageH - FOOTER_Y_FROM_BOTTOM);
+        doc.text(
+          `Hourly Production Monitor — Machine ${pageMachine[i - 1] ?? 1} — ${dateLabel}`,
+          10,
+          pageH - FOOTER_Y_FROM_BOTTOM,
+        );
         doc.text(`Page ${i} of ${pageCount}`, pageW - 10, pageH - FOOTER_Y_FROM_BOTTOM, { align: 'right' });
       }
 
-      doc.save(`Production_Quality_Monitor_${dateKey}.pdf`);
-      toast.success('Generated PDF successfully.');
+      doc.save(`Production_Quality_Monitor_All_Machines_${dateKey}.pdf`);
+      toast.success('Generated PDF for all 4 machines successfully.');
     } catch (error) {
       console.error(error);
       toast.error('Failed to generate PDF. Please try again.');
