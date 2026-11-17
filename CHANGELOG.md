@@ -14,6 +14,114 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-11-17 — Strict Job ID Validation, Bottle Name Master Resolution & Extra Row Identity in Repacking Module
+- **Problem:**
+  - In `repacking_numbering` and `repacking_sqc_qc_hold`, erroneous payloads or frontend inputs could persist bottle name strings (e.g. `'100 ML MEDLEY'`, `'60 ML RECTANGULAR'`) directly into the `job_id` column, breaking relational consistency.
+  - In `Re-PackingReport.tsx`, the "JOB NAME" column displayed raw numeric IDs (e.g. `"65"`) when a bottle name was not eagerly fetched or when a row was added dynamically via `(+)`.
+  - Dynamically added rows (`(+)`) lacked inheritance of the parent row's `jobId` and `bottleId`, leading to unassigned or corrupted job identifiers upon batch saving.
+- **Root Cause:**
+  - Backend lacked explicit validation preventing bottle names from being passed as `job_id`.
+  - Re-packing combined fetch omitted `production.bottle_master` lookup data, forcing the UI to fall back to raw numeric IDs.
+  - `ExtraRow` state structure omitted `jobId` and `bottleId` parent fields.
+- **Fix:**
+  - `Backend/app/api/production/repacking.py`:
+    - Implemented `_reject_bottle_name_job_ids(db, job_ids)` and integrated it into `_validate_references`. Queries `production.bottle_master` and rejects requests with HTTP 400 if `job_id` matches a bottle name.
+    - Updated `get_repacking_data` to query `production.bottle_master` and return `bottle_names: List[BottleNameItem]` in the single combined response.
+  - `Backend/app/schemas/repacking.py`:
+    - Added `BottleNameItem` schema (`bottle_id: int`, `bottle_name: str`) and added `bottle_names` to `RepackingDataResponse`.
+  - `src/services/repackingRepository.ts`:
+    - Added `BottleNameItem` interface and updated `repackingDataCache` to store and return `bottleNames`.
+  - `src/components/quality/Re-PackingReport.tsx`:
+    - Updated `bottleNameFor` to resolve names from `bottleNames` and return an empty cell rather than falling back to numeric IDs.
+    - Extended `ExtraRow` to store `jobId` and `bottleId` copied directly from the parent row on `(+)` click.
+    - Updated `jobIdForRow` to prioritize authoritative Job IDs from daily production runs, omitting `job_id` from updates if legacy data contained an invalid bottle name.
+- **Files Changed:**
+  - `Backend/app/api/production/repacking.py`
+  - `Backend/app/schemas/repacking.py`
+  - `src/services/repackingRepository.ts`
+  - `src/components/quality/Re-PackingReport.tsx`
+- **API or DB Impact:**
+  - `GET /api/production/repacking/` response includes `bottle_names: List[BottleNameItem]`.
+  - All mutating repacking endpoints (`POST`, `PUT`, bulk saves) strictly reject bottle names in `job_id` with HTTP 400.
+
+---
+
+### 2026-11-16 — Precision Efficiency Calculations, Zero-Carton Handling & HPM Summary Alignment in QualityReport and Quality Monitor
+- **Problem:**
+  - Logging zero cartons (e.g. line clearings, packaging changes) rendered blank/null efficiency badges instead of an explicit `0%`.
+  - Rows with unassigned or partial packaging entries failed to display efficiency or bottle estimates even when authoritative stored `efficiency_percentage` or `bottles_in_nos` metrics were present in the database.
+  - In `QualityReport.tsx`, the Shift-Wise Overall EFF% used a simplistic inline check that calculated machine efficiency differently from the Hourly Production Monitor's summary row.
+- **Root Cause:**
+  - `packagingBottles` and `EffBadge` treated `0` as falsy, dropping zero-carton values.
+  - Calculation helpers lacked fallback checks to database-persisted fields.
+  - Overall efficiency calculation logic was duplicated and diverged between the report card and the monitor grid.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Updated `packagingBottles` to recognize `cartons === 0` as a valid numeric outcome (`0` bottles).
+    - Updated `EffBadge` and `calcEffForEntry` to format and render explicit `0%` styling when efficiency is 0.
+    - Added fallbacks to stored `bottles_in_nos` and stored `efficiency_percentage` in `calcTotalBottlesInNos` and `calcEffForEntry`.
+  - `src/components/quality/QualityReport.tsx`:
+    - Built `daySummaryEfficiencyForEntry` implementing the exact HPM Day Summary rule: non-zero carton rows use stored efficiency, zero-carton rows evaluate actual pieces efficiency, and blank entries are ignored.
+    - Integrated `daySummaryEfficiencyForEntry` into `buildShiftWiseRows` to guarantee complete alignment between the Shift-Wise Overall EFF% and the Hourly Production Monitor.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/components/quality/QualityReport.tsx`
+- **API or DB Impact:**
+  - None. Frontend calculation accuracy and visual rendering enhancement.
+
+---
+
+### 2026-11-16 — Active Entry Time Checks & Slot Availability Logic in QualityControlModule
+- **Problem:**
+  - In `ProductionQualityMonitor.tsx`, the row action buttons ("+" extension and "−" delete) were restricted only to entries passing slot availability rules, which could inadvertently disable controls on the latest active production entry.
+- **Root Cause:**
+  - Action visibility and handler guards relied exclusively on `canExtendFromTime` without falling back to `isActiveEntryTime`.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Updated `copyRowDown`, `removeBottle`, and render conditions to check `(canExtendFromTime(time) || isActiveEntryTime(time))`.
+    - Guarantees that the active running production entry always presents "+" and "−" capabilities while keeping earlier uncompleted rows manageable.
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - None.
+
+---
+
+### 2026-11-16 — Atomic Row Locking in Daily Quality Save, Connection Pool Hardening & ERP Cache Polling Optimization
+- **Problem:**
+  - Saving edited row metrics and toggling row lock checkboxes required separate HTTP calls, leading to potential out-of-sync database states if the second call failed.
+  - High concurrency during shift-end quality reporting produced occasional PostgreSQL connection timeouts and stale connection errors.
+  - High-frequency 500ms polling for ERP cache updates created unnecessary CPU timer wakeups on client browsers.
+- **Root Cause:**
+  - `save_daily_quality` lacked an atomic row locking parameter in its save payload.
+  - SQLAlchemy connection pool used default settings without pre-ping health checks or idle connection recycling.
+  - `ERPContext.tsx` polled `getCacheVersion()` every 500ms.
+- **Fix:**
+  - `Backend/app/schemas/quality.py`:
+    - Added `lock_times: Optional[Dict[str, List[str]]]` to `QualityDailyRequest`.
+  - `Backend/app/api/production/quality_daily.py`:
+    - Updated `save_daily_quality` to apply `is_locked = True` on specified machine rows within the same commit transaction.
+  - `Backend/app/db/session.py`:
+    - Hardened PostgreSQL engine pooling: `pool_pre_ping=True`, `pool_size=10`, `max_overflow=20`, `pool_recycle=1800`, and `pool_timeout=30`.
+  - `src/services/qualityRepository.ts`:
+    - Added `lockTimes` to `qualityRepository.save` options.
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Integrated atomic lock dispatch via `saveDailyQuality`.
+    - Added `getNextHourlySlot` to look ahead to the next canonical hourly production slot.
+  - `src/context/ERPContext.tsx`:
+    - Adjusted cache polling interval from 500ms to 2000ms.
+- **Files Changed:**
+  - `Backend/app/schemas/quality.py`
+  - `Backend/app/api/production/quality_daily.py`
+  - `Backend/app/db/session.py`
+  - `src/services/qualityRepository.ts`
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+  - `src/context/ERPContext.tsx`
+- **API or DB Impact:**
+  - `POST /api/production/quality/daily/` payload supports optional `lock_times` map.
+
+---
+
 ### 2026-11-15 — Timeline Adjustments for Pre-9 AM Split Rows, First-Row Splitting & Display-Order Job Continuations
 - **Problem:**
   - Carving out a manual split row before the 9:00 AM production-day start (e.g. 8:30 AM carved out of the initial 9:00 AM carry-in hour) caused the split segment to be sorted after 8:00 AM at the bottom of the table rather than at the top before 9:00 AM.

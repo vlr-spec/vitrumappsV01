@@ -133,6 +133,14 @@ docker compose up --build
 | `SESSION_IDLE_TIMEOUT_DAYS` | Backend | Inactivity window before an idle session token is invalidated | No | `30` (Default: `30`) |
 | `VITE_API_URL` | Frontend | Target backend API base URL | Yes | `https://api.example.com` (Default: `http://127.0.0.1:8000`) |
 
+### Database Connection Pooling (PostgreSQL Engine)
+For non-SQLite PostgreSQL connections, SQLAlchemy engine pooling in [`Backend/app/db/session.py`](file:///d:/V10/production-planningV05/Backend/app/db/session.py) is hardened against stale connections and connection drops:
+- `pool_pre_ping=True`: Probes connections prior to checkout from the pool to automatically detect and discard closed or broken connections.
+- `pool_size=10`: Maintains 10 persistent connections in the steady-state pool.
+- `max_overflow=20`: Allows up to 20 additional burst connections during high concurrent plant activity.
+- `pool_recycle=1800`: Recycles idle connections after 30 minutes to prevent backend disconnects caused by cloud firewall / PostgreSQL idle timeouts.
+- `pool_timeout=30`: Blocks for up to 30 seconds waiting for an available pool slot before raising a timeout exception.
+
 > **Security Note:** Never commit `.env` files containing live credentials. Store production connection strings securely in Render Environment Variables or GitHub Actions Secrets.
 
 *Note on repository artifacts:* The root `.env.example` mentions `GEMINI_API_KEY` and `APP_URL`. These are Google AI Studio template artifacts and are not consumed by the core planning or quality modules.
@@ -591,7 +599,7 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
   - **Response**: Job-wise summary of production and quality runs for the selected manufacturing day.
 - `POST /api/production/quality/daily/`
   - **Guard**: Edit access to `Quality Control`
-  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row (including pre-9 AM carry-in split segments), which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries, preserves Job ID continuity across midnight, and accepts both TYPE 1 and TYPE 2 packaging attributes.
+  - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row (including pre-9 AM carry-in split segments), which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries, preserves Job ID continuity across midnight, and accepts both TYPE 1 and TYPE 2 packaging attributes. Supports optional `lock_times` mapping (`Dict[str, List[str]]`) to atomically lock specific machine hourly rows in the same transaction as the daily save.
 
 #### Repacking Router (`/api/production/repacking`)
 - `GET /api/production/repacking/employees`
@@ -600,7 +608,8 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `GET /api/production/repacking/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
-  - **Response**: Combined repacking data for both views `{ "numbering": [ ... ], "sqc_qc_hold": [ ... ] }`.
+  - **Response**: Combined repacking data for both views `{ "numbering": [ ... ], "sqc_qc_hold": [ ... ], "bottle_names": [ { "bottle_id", "bottle_name" }, ... ] }`. Includes `production.bottle_master` id-to-name lookup in the single round-trip so the frontend can resolve bottle names across saved rows, production runs, and dynamically added rows without extra requests.
+  - **Integrity Guard**: All mutating repacking routes enforce `_reject_bottle_name_job_ids(db, ...)` before writing, rejecting requests with HTTP 400 if a bottle name is mistakenly submitted as `job_id`.
 - `GET /api/production/repacking/numbering`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`, `machine_no` (optional)
@@ -683,20 +692,20 @@ Source code is located under `src/`.
   - `planning/`: Calendar grid register, `PlanningDrawer`, `EditMachineModal`, `EndJobModal`.
   - `master-management/`: `MachinesModule`, `BottleMasterPanel`, `BottleExportPanel`, `PackagingMasterPanel` (CRUD interface for `hpr.packaging_master` codes and descriptions), `HolidayMasterPanel`.
   - `quality/`:
-    - `ProductionQualityMonitor`: Hourly quality checks, three-tier defect logging, weight distribution, uncapped one-decimal efficiency display, SQC/QC Hold/NUM day totals, dual packaging configuration (TYPE 1 and TYPE 2: Pack Type, Pack Size, Cartons) with automatic carton aggregation, dual timeline splitting (Packing Timeline vs Production Timeline), pre-9 AM carry-in split row support, Lehr Out minute inputs and shift locks, and streamlined PDF export generation.
-    - `Re-PackingReport`: Two-layout Numbering and SQC/QC Hold ERP dashboard with database persistence in schema `sqc`. Features 13-column grids, standardized Pack Size, dynamic job-anchored row insertion/removal (`+`/`-`), custom 12-hour floating time picker with shift-enforced hour constraints and 24-hour parsing fallback, GOB/mould/section tracking, employee master dropdowns for Checker Name and QA-Shift Executive, job-scoped pack type resolution, and fast date-keyed caching.
-    - `QualityReport`: Machine Wise Production and Efficiency analysis, shift averages, authoritative stored efficiency, job-scoped remarks, responsive centered shift-wise efficiency card, clean white machine rows, spaced subtotals with runtime minutes from shared `layerOutTimeline`, bottle row-wise overall efficiency, and visibility toggle.
+    - `ProductionQualityMonitor`: Hourly quality checks, three-tier defect logging, weight distribution, uncapped one-decimal efficiency display, SQC/QC Hold/NUM day totals, dual packaging configuration (TYPE 1 and TYPE 2: Pack Type, Pack Size, Cartons) with automatic carton aggregation, dual timeline splitting (Packing Timeline vs Production Timeline), pre-9 AM carry-in split row support, Lehr Out minute inputs and shift locks, and streamlined PDF export generation. Row action controls ("+" extension and "−" permanent delete) dynamically evaluate the next chronological hourly slot availability alongside active-entry status. Supports atomic row locking via `lock_times` during daily saves and incorporates fallback handling for stored bottle and efficiency metrics with explicit 0% formatting.
+    - `Re-PackingReport`: Two-layout Numbering and SQC/QC Hold ERP dashboard with database persistence in schema `sqc`. Features 13-column grids, standardized Pack Size, dynamic job-anchored row insertion/removal (`+`/`-`), custom 12-hour floating time picker with shift-enforced hour constraints and 24-hour parsing fallback, GOB/mould/section tracking, employee master dropdowns for Checker Name and QA-Shift Executive, job-scoped pack type resolution, and fast date-keyed caching. Enforces strict separation between persisted `job_id` and displayed JOB NAME (resolved via `bottle_names` lookup without numeric fallbacks), with dynamically added rows inheriting both parent `jobId` and `bottleId`.
+    - `QualityReport`: Machine Wise Production and Efficiency analysis, shift averages, authoritative stored efficiency, job-scoped remarks, responsive centered shift-wise efficiency card, clean white machine rows, spaced subtotals with runtime minutes from shared `layerOutTimeline`, bottle row-wise overall efficiency, and visibility toggle. Employs `daySummaryEfficiencyForEntry` to align Shift-Wise Overall EFF% directly with the Hourly Production Monitor's Day Summary rule without discrepancies.
     - `AllMachineReport`: Multi-machine cross-shift daily summary.
     - `DailyMcSpeedWeightReport`: Daily machine speed and weight summary.
   - `profile/`: User profile display, password change modal.
   - `layout/`: Top navigation bar, sidebar, and module tab switcher.
 - `src/context/`
   - `AuthContext.tsx`: Token management, profile storage in `localStorage`, login/logout flows.
-  - `ERPContext.tsx`: Module switching, active cache management, planning batch operations.
+  - `ERPContext.tsx`: Module switching, active cache management, planning batch operations, and throttled cache polling (2000ms interval) to minimize timer churn.
 - `src/services/`
   - `planningRepository.ts`: Central data repository caching machines, bottles, configs, jobs, holidays, and packaging masters (`getPackagingMasters`, `createPackagingMaster`, `updatePackagingMaster`, `deletePackagingMaster`); coordinates batch saving and deletes.
   - `qualityRepository.ts`: Quality defect and daily inspection report fetching and saving, supporting TYPE 1 and TYPE 2 packaging attributes.
-  - `repackingRepository.ts`: Re-packing persistence layer for Numbering and SQC/QC HOLD records, providing combined date fetching with local caching (`loadDate`), employee master lookup (`getEmployees`), and atomic bulk save/delete endpoints.
+  - `repackingRepository.ts`: Re-packing persistence layer for Numbering and SQC/QC HOLD records, providing combined date fetching with local caching (`loadDate`), employee master lookup (`getEmployees`), display bottle name resolution (`BottleNameItem`), and atomic bulk save/delete endpoints.
 - `src/utils/`
   - `api.ts`: Centralized `fetch` wrapper injecting bearer tokens, request timeouts (30s), and error formatting.
   - `layerOutTimeline.ts`: Shared Lehr Out timeline utilities: `buildLayerOutTimeline` (packing slots), `layerOutInputsFromSavedPeriods` (saved period decoder), and `buildProductionTimeline` (continuous production time slots accounting for per-shift Lehr Out offsets and midnight crossings).
