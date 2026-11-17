@@ -217,6 +217,7 @@ This document tracks the recent bug fixes and configuration updates made to the 
   3. **Display-Order Job Continuations**: Replaced raw clock comparison with display index navigation (`orderedKeys.indexOf(time)`). Job extensions cleanly cascade into the immediate next displayed row regardless of whether it is an hourly slot, a split segment, or a cross-day transition.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
 
+<<<<<<< HEAD
 ## 24. Hourly Production Monitor Excel Export Matched to PDF Report
 - **Issue**: The Hourly Production Monitor's Export button produced a plain `.csv` containing an extra Machine column and no report heading, styling, shift colours or Day Avg / Summary row, so the exported file looked nothing like the existing PDF print report.
 - **Fix**:
@@ -238,5 +239,52 @@ This document tracks the recent bug fixes and configuration updates made to the 
   4. **Print**: One landscape PDF with exactly one complete machine report per page and explicit `addPage()` breaks between reports. Each machine picks the most readable existing font profile that keeps its complete table on a single page, and every page carries its own machine heading and footer.
   5. **Restrictions Respected**: No changes to PDF styling, production/efficiency/shift/timeline calculations, summary values, UI, backend APIs, database schema or production data; each report reads only its own machine's records.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+=======
+## 24. Atomic Row Locking via `lock_times` in Daily Quality Save & PostgreSQL Connection Pool Hardening
+- **Issue**:
+  1. Operators checking row lock checkboxes during an inspection edit required two separate network requests (saving row metrics first, then triggering a separate lock toggle endpoint), risking partial failures.
+  2. High concurrency during shift-end handovers caused intermittent PostgreSQL connection drops and timeout exceptions on Render/AWS RDS.
+  3. Frequent 500ms polling for ERP planning cache updates created unnecessary CPU timer wakeups on client browsers.
+- **Fix**:
+  1. **Atomic Lock in Save Payload**: Added `lock_times` (mapping of machine number to list of production time labels) to `QualityDailyRequest` schema and `qualityRepository.save`. Updated `save_daily_quality` in `quality_daily.py` to set `entry.is_locked = True` on matching rows within the same commit transaction.
+  2. **Engine Pool Hardening**: Configured PostgreSQL connection pooling in `Backend/app/db/session.py` with `pool_pre_ping=True`, `pool_size=10`, `max_overflow=20`, `pool_recycle=1800` (recycles connections every 30 min), and `pool_timeout=30`.
+  3. **Throttled Cache Polling**: Reduced cache version check frequency in `ERPContext.tsx` from 500ms to 2000ms.
+- **Files Touched**: `Backend/app/schemas/quality.py`, `Backend/app/api/production/quality_daily.py`, `Backend/app/db/session.py`, `src/services/qualityRepository.ts`, `src/context/ERPContext.tsx`
+
+## 25. Active Entry & Slot-Availability Row Extension Logic in QualityControlModule
+- **Issue**:
+  1. The "+" (job continuation) and "−" (permanent removal) buttons were shown only on the singular latest active row, preventing operators from extending earlier uncompleted slots into adjacent empty hours.
+  2. When edge-case conditions arose in slot detection, the active entry could lose its extension and removal controls.
+- **Fix**:
+  1. **Next Hourly Slot Detection**: Created `getNextHourlySlot` to look ahead to the next canonical hourly production slot. Added `canExtendFromTime(time, rows)` to show "+" whenever the immediately upcoming hourly slot is empty.
+  2. **Active Entry Fallback**: Updated `copyRowDown`, `removeBottle`, and row action rendering in `ProductionQualityMonitor.tsx` to check `(canExtendFromTime(time) || isActiveEntryTime(time))`, ensuring the latest active production entry always preserves "+" and "−" capabilities.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
+## 26. Precision Efficiency Calculation & Zero-Carton / Stored-Fallback Alignment across Quality Monitor and Quality Report
+- **Issue**:
+  1. When operators logged 0 cartons for a run (e.g. during a line shutdown or pack change), the efficiency badge rendered blank or null instead of explicit `0%`.
+  2. When packaging category or carton fields were omitted or partially filled, calculated bottle and efficiency helpers returned blank rather than utilizing stored `bottles_in_nos` or `efficiency_percentage` fallbacks.
+  3. In `QualityReport.tsx`, the upper Shift-Wise "Overall EFF%" card calculated overall machine efficiency using a simplistic inline ternary that diverged from the Hourly Production Monitor's Day Avg / Summary calculation.
+- **Fix**:
+  1. **Explicit Zero-Carton & 0% Efficiency Handling**: Updated `packagingBottles` to treat `cartons === 0` as a legitimate numeric value (`0` bottles). Updated `EffBadge` and `calcEffForEntry` in `ProductionQualityMonitor.tsx` to explicitly format and display `0%` when efficiency evaluates to 0.
+  2. **Stored Metric Fallbacks**: Added fallback checks to stored `bottles_in_nos` and stored `efficiency_percentage` in `calcTotalBottlesInNos` and `calcEffForEntry` when packaging entries are empty or unassigned.
+  3. **Unified Day Summary Efficiency Helper**: Created `daySummaryEfficiencyForEntry` in `QualityReport.tsx` implementing the authoritative HPM Day Summary rule: non-zero carton rows use stored efficiency, zero-carton rows compute actual pieces efficiency against theoretical speed, and blank entries are cleanly excluded. Wired this helper directly into `buildShiftWiseRows` to guarantee identical overall efficiency between both screens.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/QualityReport.tsx`
+
+## 27. Strict Job ID Validation & Bottle Name Resolution in Repacking Module (`_reject_bottle_name_job_ids` & `BottleNameItem`)
+- **Issue**:
+  1. Operators or automated payloads could mistakenly submit bottle names (e.g. `'100 ML MEDLEY'`, `'60 ML RECTANGULAR'`) into the `job_id` column of `repacking_numbering` or `repacking_sqc_qc_hold`, corrupting foreign key and job identity consistency.
+  2. The UI displayed numeric bottle IDs (e.g. `"65"`) under the "JOB NAME" column when a bottle name was not eagerly fetched or when a row was added dynamically via `(+)`.
+  3. Dynamically added rows (`(+)`) did not track the parent row's `jobId` and `bottleId`, leading to empty or unassigned job identifiers upon save.
+- **Fix**:
+  1. **Backend Name Rejection**: Implemented `_reject_bottle_name_job_ids` in `Backend/app/api/production/repacking.py`. Checks incoming `job_id` values against `production.bottle_master.bottle_name` and rejects name values with HTTP 400 (`"job_id cannot be a bottle name ('...'). Use the actual Job ID; the bottle name is resolved from bottle_id."`).
+  2. **Combined Bottle Master Lookup**: Added `BottleNameItem` schema and included `bottle_names: List[BottleNameItem]` in `RepackingDataResponse`. `get_repacking_data` queries `production.bottle_master` to return `(bottle_id, bottle_name)` pairs in the single round-trip.
+  3. **Frontend Bottle Name Resolution & Clean Rendering**:
+     - Updated `Re-PackingReport.tsx` to resolve bottle names using `bottleNames` lookup from `repackingRepository.getRepackingData`.
+     - `bottleNameFor` never returns raw numeric IDs, rendering an empty cell instead of showing numeric strings like `"65"`.
+     - Updated `ExtraRow` interface to store `jobId: string` and `bottleId: number | null` copied directly from the parent row when clicking `(+)`.
+     - `jobIdForRow` prioritizes resolving valid Job IDs from daily production runs, omitting `job_id` from updates if legacy data contained an invalid bottle name.
+- **Files Touched**: `Backend/app/api/production/repacking.py`, `Backend/app/schemas/repacking.py`, `src/services/repackingRepository.ts`, `src/components/quality/Re-PackingReport.tsx`
+>>>>>>> 8728331f9714831964b0bb6413c1fbf9c058b09c
 
 
