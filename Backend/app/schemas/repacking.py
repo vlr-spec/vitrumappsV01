@@ -400,11 +400,21 @@ class RepackingSaveResponse(BaseModel):
     items: List[Union[NumberingEntryResponse, SqcQcHoldEntryResponse]]
 
 
+class BottleNameItem(BaseModel):
+    """Bottle identity used only for display: production.bottle_master lookup."""
+
+    bottle_id: int
+    bottle_name: str
+
+
 class RepackingDataResponse(BaseModel):
     """Combined response for both numbering and SQC/QC HOLD entries of one date.
 
     Allows the frontend to fetch all saved repacking data for a production date
-    in a single API request instead of two separate round-trips.
+    in a single API request instead of two separate round-trips. ``bottle_names``
+    is the bottle-master lookup (id -> name) the UI uses for the JOB NAME column;
+    no bottle name is ever stored in the repacking tables.
     """
     numbering: List[NumberingEntryResponse] = []
     sqc_qc_hold: List[SqcQcHoldEntryResponse] = []
+    bottle_names: List[BottleNameItem] = []

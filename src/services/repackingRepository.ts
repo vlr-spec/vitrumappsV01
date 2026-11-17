@@ -71,6 +71,14 @@ export interface RepackingSqcQcHoldEntry {
   updated_at?: string | null;
 }
 
+/** Display-only bottle lookup returned by the combined repacking GET. */
+export interface BottleNameItem {
+  /** production.bottle_master.bottle_id — the numeric ID stored in the DB. */
+  bottle_id: number;
+  /** production.bottle_master.bottle_name — for the JOB NAME column only. */
+  bottle_name: string;
+}
+
 export interface EmployeeItem {
   /** ``hpr.employee_master.employee_id`` — always a string so leading zeros ("0003") survive. */
   employee_id: string;
@@ -86,7 +94,11 @@ let employeesCache: EmployeeItem[] | null = null;
 // (e.g. navigating away and back, or switching layouts on a previously loaded date).
 const repackingDataCache: Record<
   string,
-  { numbering: RepackingNumberingEntry[]; sqc: RepackingSqcQcHoldEntry[] } | null
+  {
+    numbering: RepackingNumberingEntry[];
+    sqc: RepackingSqcQcHoldEntry[];
+    bottleNames: BottleNameItem[];
+  } | null
 > = {};
 
 export const repackingRepository = {
@@ -115,7 +127,11 @@ export const repackingRepository = {
    */
   async getRepackingData(
     productionDate: string
-  ): Promise<{ numbering: RepackingNumberingEntry[]; sqc: RepackingSqcQcHoldEntry[] }> {
+  ): Promise<{
+    numbering: RepackingNumberingEntry[];
+    sqc: RepackingSqcQcHoldEntry[];
+    bottleNames: BottleNameItem[];
+  }> {
     const cached = repackingDataCache[productionDate];
     if (cached) return cached;
 
@@ -124,11 +140,13 @@ export const repackingRepository = {
       const data = (await apiFetch(`/api/production/repacking/?${qs}`)) as {
         numbering?: unknown;
         sqc_qc_hold?: unknown;
+        bottle_names?: unknown;
       };
 
       const result = {
         numbering: Array.isArray(data?.numbering) ? (data.numbering as RepackingNumberingEntry[]) : [],
         sqc: Array.isArray(data?.sqc_qc_hold) ? (data.sqc_qc_hold as RepackingSqcQcHoldEntry[]) : [],
+        bottleNames: Array.isArray(data?.bottle_names) ? (data.bottle_names as BottleNameItem[]) : [],
       };
 
       repackingDataCache[productionDate] = result;
@@ -139,7 +157,7 @@ export const repackingRepository = {
         this.getNumbering(productionDate),
         this.getSqcQcHold(productionDate),
       ]);
-      const result = { numbering, sqc };
+      const result = { numbering, sqc, bottleNames: [] as BottleNameItem[] };
       repackingDataCache[productionDate] = result;
       return result;
     }

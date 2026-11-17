@@ -13,6 +13,7 @@ from app.api.permissions import require_module_read, require_module_edit, MODULE
 from app.models.auth import AuthUser
 from app.models.audit_log import AuditLog
 from app.schemas.repacking import (
+    BottleNameItem,
     EmployeeResponse,
     NumberingEntryCreate,
     NumberingEntryUpdate,
@@ -104,18 +105,51 @@ def _validate_string_lengths(payload_dict: dict) -> None:
             )
 
 
+def _reject_bottle_name_job_ids(db: Session, job_ids: List[Optional[str]]) -> None:
+    """job_id holds an actual Job ID only — never a bottle name.
+
+    Bottle names belong to production.bottle_master and are returned to the UI
+    through the bottle_id JOIN. Rejecting a name here keeps a frontend mistake
+    from corrupting stored records.
+    """
+    bottle_table = _production_table("bottle_master")
+    for job_id in job_ids:
+        value = _clean_optional_str(job_id)
+        if not value:
+            continue
+        found = db.execute(
+            text(
+                f"SELECT 1 FROM {bottle_table} "
+                "WHERE LOWER(TRIM(bottle_name)) = LOWER(TRIM(:name)) LIMIT 1"
+            ),
+            {"name": value},
+        ).fetchone()
+        if found:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"job_id cannot be a bottle name ('{value}'). "
+                    "Use the actual Job ID; the bottle name is resolved from bottle_id."
+                ),
+            )
+
+
 def _validate_references(
     db: Session,
     checker_id: Optional[str] = None,
     bottle_id: Optional[int] = None,
     defect_ids: Optional[List[Optional[int]]] = None,
+    job_id: Optional[str] = None,
 ) -> None:
     """Verify every foreign key against its master table before writing.
 
     checker_id  -> hpr.employee_master.employee_id
     bottle_id   -> production.bottle_master.bottle_id
     defect_id   -> hpr.defect_master.defect_id
+    job_id      -> never a production.bottle_master.bottle_name
     """
+    _reject_bottle_name_job_ids(db, [job_id])
+
     if checker_id is not None:
         employee_table = _hpr_table("employee_master")
         found = db.execute(
@@ -282,7 +316,11 @@ def _update_entry_group(
         defect_targets = _target_defect_ids(payload)
     checker_id = data["checker_id"] if "checker_id" in data else None
     bottle_id = data["bottle_id"] if "bottle_id" in data else None
-    _validate_references(db, checker_id=checker_id, bottle_id=bottle_id, defect_ids=defect_targets or [])
+    job_id = data["job_id"] if "job_id" in data else None
+    _validate_references(
+        db, checker_id=checker_id, bottle_id=bottle_id,
+        defect_ids=defect_targets or [], job_id=job_id,
+    )
 
     update_fields = {k: v for k, v in data.items() if k in allowed_fields}
     if not update_fields and defect_targets is None:
@@ -726,7 +764,9 @@ def get_repacking_data(
     """Fetch both numbering and SQC/QC HOLD entries for a production date in one request.
 
     Replaces two separate GET /numbering and GET /sqc-qc-hold calls with a single
-    round-trip, returning both datasets together for the given date.
+    round-trip. The bottle-master id -> name lookup is returned in the same
+    response so the UI can display bottle names for production rows too without
+    an extra API call or any bottle-name column in the repacking tables.
     """
     conditions = []
     params = {}
@@ -744,9 +784,26 @@ def get_repacking_data(
     numbering_results = db.execute(text(_numbering_select(where_clause)), params).mappings().all()
     sqc_results = db.execute(text(_sqc_select(where_clause)), params).mappings().all()
 
+    # Display-only lookup straight from production.bottle_master. Keyed by the
+    # same bottle_id stored on both repacking tables and on hourly_production,
+    # so saved rows, production runs and (+) rows all resolve the same name.
+    bottle_table = _production_table("bottle_master")
+    bottle_rows = db.execute(
+        text(
+            f"SELECT bottle_id, bottle_name FROM {bottle_table} "
+            "ORDER BY LOWER(bottle_name), bottle_id"
+        )
+    ).mappings().all()
+    bottle_names = [
+        BottleNameItem(bottle_id=int(r["bottle_id"]), bottle_name=str(r["bottle_name"]))
+        for r in bottle_rows
+        if r["bottle_id"] is not None and r["bottle_name"]
+    ]
+
     return RepackingDataResponse(
         numbering=_group_numbering_rows(numbering_results),
         sqc_qc_hold=_group_sqc_rows(sqc_results),
+        bottle_names=bottle_names,
     )
 
 
@@ -805,6 +862,7 @@ def create_numbering_entry(
         checker_id=base_params.get("checker_id"),
         bottle_id=base_params.get("bottle_id"),
         defect_ids=target_defects,
+        job_id=base_params.get("job_id"),
     )
 
     try:
@@ -936,6 +994,7 @@ def save_numbering_batch(
                 checker_id=base_params.get("checker_id"),
                 bottle_id=base_params.get("bottle_id"),
                 defect_ids=d_ids,
+                job_id=base_params.get("job_id"),
             )
             affected_ids.extend(
                 _insert_repacking_rows(db, num_table, _NUMBERING_INSERT_FIELDS, base_params, d_ids)
@@ -1044,6 +1103,7 @@ def create_sqc_qc_hold_entry(
         checker_id=base_params.get("checker_id"),
         bottle_id=base_params.get("bottle_id"),
         defect_ids=target_defects,
+        job_id=base_params.get("job_id"),
     )
 
     try:
@@ -1174,6 +1234,7 @@ def save_sqc_qc_hold_batch(
                 checker_id=base_params.get("checker_id"),
                 bottle_id=base_params.get("bottle_id"),
                 defect_ids=d_ids,
+                job_id=base_params.get("job_id"),
             )
             affected_ids.extend(
                 _insert_repacking_rows(db, sqc_table, _SQC_INSERT_FIELDS, base_params, d_ids)

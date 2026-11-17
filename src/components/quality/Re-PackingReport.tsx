@@ -43,10 +43,11 @@
  * ONE entry, a mid-day job change yields one entry per run, and distinct jobs
  * are never merged.
  *
- * No new API endpoint, no save/persistence, no backend or schema change, and
- * no change to any production calculation or the Hourly Production Monitor —
- * this is a UI-only, editable representation of existing data reusing the
- * existing Vitrum Glass ERP blue-and-white theme.
+ * Persistence uses the existing repackingRepository endpoints only — no new
+ * API endpoint or schema change, and no change to any production calculation
+ * or the Hourly Production Monitor. job_id stores only the actual Job ID;
+ * JOB NAME is the bottle name resolved from bottle_id via
+ * production.bottle_master, never from job_id.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -59,6 +60,7 @@ import {
   RepackingNumberingEntry,
   RepackingSqcQcHoldEntry,
   EmployeeItem,
+  BottleNameItem,
 } from '../../services/repackingRepository';
 import {
   qualityRepository,
@@ -310,11 +312,16 @@ const shiftIdForReportKey = (key: string): number => {
 const entryBottle = (e: QualityHourlyEntry | undefined): string => String(e?.bottle_id ?? '').trim();
 const entryJob = (e: QualityHourlyEntry | undefined): string => String(e?.job_id ?? '').trim();
 
-const bottleNameFor = (bottleId: string, bottles: { id: string; name: string }[]): string => {
+/**
+ * Resolve a bottle NAME from its numeric ID using the bottle-master lookup
+ * returned by the repacking API. Never returns the numeric ID: an unresolved
+ * ID renders as an empty cell rather than showing "65" in the JOB NAME column.
+ */
+const bottleNameFor = (bottleId: string, lookup: { id: string; name: string }[]): string => {
   const id = String(bottleId ?? '').trim();
   if (!id) return '';
-  const hit = bottles.find((b) => String(b.id ?? '').trim() === id);
-  return hit?.name?.trim() || id;
+  const hit = lookup.find((b) => String(b.id ?? '').trim() === id);
+  return hit?.name?.trim() || '';
 };
 
 interface HourPoint {
@@ -1592,7 +1599,12 @@ type ValuesStore = Record<string, CellValues>;
  */
 interface ExtraRow {
   id: number;
+  /** Bottle name shown in JOB NAME (never persisted as job_id). */
   jobName: string;
+  /** Actual Job ID copied from the row this one was added under. */
+  jobId: string;
+  /** Bottle ID copied from the row this one was added under. */
+  bottleId: number | null;
   shift: string;
   packType: string;
   pcsPack: string;
@@ -1688,6 +1700,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const [packagingMasterCodes, setPackagingMasterCodes] = useState<string[]>([]);
   const [savedNumbering, setSavedNumbering] = useState<Record<number, RepackingNumberingEntry[]>>({});
   const [savedSqc, setSavedSqc] = useState<Record<number, RepackingSqcQcHoldEntry[]>>({});
+  // Display-only bottle lookup (bottle_id -> bottle_name) from production.bottle_master.
+  // Returned by the same combined GET as the saved rows, so no extra API call is made.
+  const [bottleNames, setBottleNames] = useState<BottleNameItem[]>([]);
   const [baselineNumbering, setBaselineNumbering] = useState<ValuesStore>({});
   const [baselineSqc, setBaselineSqc] = useState<ValuesStore>({});
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
@@ -1748,7 +1763,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
   const loadSavedData = useCallback(async (targetKey: string) => {
     try {
-      const { numbering, sqc } = await repackingRepository.getRepackingData(targetKey);
+      const { numbering, sqc, bottleNames: names } = await repackingRepository.getRepackingData(targetKey);
+      setBottleNames(names);
+
+      // Saved rows already carry bottle_name via the repository's bottle_id JOIN.
+      // This lookup is the same bottle-master data, so a row can never fall back
+      // to displaying its numeric bottle_id in the JOB NAME column.
+      const nameById = new Map(names.map((b) => [String(b.bottle_id), b.bottle_name]));
 
       const numMap: Record<number, RepackingNumberingEntry[]> = {};
       const numInitVals: ValuesStore = {};
@@ -1761,7 +1782,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
         const key = `db:${entry.entry_id}`;
         const vals: CellValues = {
-          jobName: entry.bottle_name || entry.job_id || '',
+          // Bottle name comes from the bottle_id -> bottle_master JOIN.
+          jobName: entry.bottle_name || nameById.get(String(entry.bottle_id)) || '',
           packType: entry.pack_type || '',
           shift: String(entry.shift || 1),
           time: entry.entry_time || '',
@@ -1795,7 +1817,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
         const key = `db:${entry.entry_id}`;
         const vals: CellValues = {
-          jobName: entry.bottle_name || entry.job_id || '',
+          // Bottle name comes from the bottle_id -> bottle_master JOIN.
+          jobName: entry.bottle_name || nameById.get(String(entry.bottle_id)) || '',
           packType: entry.pack_type || '',
           lotNo: entry.lot_no || '',
           shift: String(entry.shift || 1),
@@ -2013,12 +2036,83 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     return out;
   }, [dayHourly]);
 
+  /**
+   * bottle_id -> bottle_name lookup for the JOB NAME column.
+   * Primary source: production.bottle_master via the repacking API response.
+   * Secondary source: the bottle list already loaded in ERPContext (no extra
+   * API call). Both are names only — a missing name renders blank, never the
+   * numeric bottle ID.
+   */
+  const bottleOptions = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string }>();
+    for (const b of bottles) {
+      const id = String(b.id ?? '').trim();
+      if (id) byId.set(id, { id, name: String(b.name ?? '').trim() });
+    }
+    for (const b of bottleNames) {
+      const id = String(b.bottle_id ?? '').trim();
+      if (id) byId.set(id, { id, name: String(b.bottle_name ?? '').trim() });
+    }
+    return Array.from(byId.values()).filter((b) => !!b.name);
+  }, [bottleNames, bottles]);
+
   const runJobName = useCallback(
-    (run: JobRun): string => bottleNameFor(run.bottleId, bottles),
-    [bottles]
+    (run: JobRun): string => bottleNameFor(run.bottleId, bottleOptions),
+    [bottleOptions]
   );
   const runShift = (run: JobRun): string => String(run.points[0]?.slot.shift_id ?? 1);
   const runTime = (run: JobRun): string => runIntervalLabel(run);
+
+  /** True when a value is a bottle name rather than a real Job ID. */
+  const isBottleName = useCallback(
+    (value: string): boolean => {
+      const v = String(value ?? '').trim().toLowerCase();
+      return !!v && bottleOptions.some((b) => String(b.name ?? '').trim().toLowerCase() === v);
+    },
+    [bottleOptions]
+  );
+
+  /**
+   * Actual Job ID of the production row for this machine + bottle. Used only
+   * to repair legacy records that stored a bottle name in job_id; it reads the
+   * production data already loaded for the date, so no extra API call is made.
+   */
+  const productionJobIdForBottle = useCallback(
+    (machineNo: number, bottleId: string | number | null | undefined): string => {
+      const id = String(bottleId ?? '').trim();
+      if (!id) return '';
+      for (const entry of Object.values(dayHourly[String(machineNo)] ?? {})) {
+        if (String(entry.bottle_id ?? '').trim() === id) {
+          const jobId = String(entry.job_id ?? '').trim();
+          if (jobId) return jobId;
+        }
+      }
+      return '';
+    },
+    [dayHourly]
+  );
+
+  /** The value that must be sent as job_id: always an actual Job ID. */
+  const jobIdForRow = useCallback(
+    (machineNo: number, row: OrderedRow): string => {
+      if (row.kind === 'run') return String(row.run.jobId ?? '').trim();
+      if (row.kind === 'extra') return String(row.extra.jobId ?? '').trim();
+      const stored = String(row.dbEntry.job_id ?? '').trim();
+      // Legacy rows may carry a bottle name here — never write that back.
+      if (!stored || isBottleName(stored)) {
+        return productionJobIdForBottle(machineNo, row.dbEntry.bottle_id);
+      }
+      return stored;
+    },
+    [isBottleName, productionJobIdForBottle]
+  );
+
+  /** The value that must be sent as bottle_id: always the bottle master ID. */
+  const bottleIdForRow = useCallback((row: OrderedRow): number | null => {
+    if (row.kind === 'run') return row.run.bottleId ? parseInt(row.run.bottleId, 10) || null : null;
+    if (row.kind === 'extra') return row.extra.bottleId ?? null;
+    return row.dbEntry.bottle_id ?? null;
+  }, []);
 
   const rowKeyFor = (machineNo: number, run: JobRun, rowIndex: number): string =>
     `${dateKey}|${machineNo}|${rowIndex}|${run.bottleId || 'job'}|${run.runKey}`;
@@ -2026,30 +2120,17 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const cellValue = (store: ValuesStore, key: string, field: string, fallback: string): string =>
     store[key]?.[field] ?? fallback;
 
-  /** Production Job ID of a rendered row, used to match its production record. */
-  const productionJobIdFor = (row: OrderedRow): string => {
-    if (row.kind === 'db') return String((row.dbEntry as { job_id: string }).job_id ?? '');
-    if (row.kind === 'run') return row.run.jobId;
-    return row.extra.jobName;
-  };
-
   /**
    * All unique Pack Types reported in the Hourly Production Report for the
-   * row's production job on the selected date. The job is matched by Job ID
-   * first, then by Bottle ID; when neither can be resolved (e.g. a manually
-   * added row) the machine-wide list for the day is used so the dropdown is
-   * never missing options that production actually reported.
+   * row's production job on the selected date. The job is matched by actual
+   * Job ID first, then by Bottle ID; never by the bottle name shown in the
+   * JOB NAME cell.
    */
   const packTypesForRow = (machineNo: number, row: OrderedRow): string[] => {
     const info = machinePackInfo[machineNo];
     if (!info) return [];
-    const jobId = productionJobIdFor(row).trim();
-    const bottleId =
-      row.kind === 'run'
-        ? String(row.run.bottleId ?? '').trim()
-        : row.kind === 'db'
-        ? String((row.dbEntry as { bottle_id?: number | string | null }).bottle_id ?? '').trim()
-        : '';
+    const jobId = jobIdForRow(machineNo, row);
+    const bottleId = String(bottleIdForRow(row) ?? '').trim();
     const jobInfo = jobId ? info.byJob[`job:${jobId}`] : undefined;
     if (jobInfo) return jobInfo.packTypes;
     const bottleInfo = bottleId ? info.byJob[`bottle:${bottleId}`] : undefined;
@@ -2076,11 +2157,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     shift: string,
     packType: string,
     pcsPack: string,
-    time: string
+    time: string,
+    jobId: string,
+    bottleId: number | null
   ) => {
     const row: ExtraRow = {
       id: (extraIdRef.current += 1),
       jobName,
+      jobId,
+      bottleId,
       shift,
       packType,
       pcsPack,
@@ -2214,25 +2299,28 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
           let jobNameFallback = '';
           let shiftFallback = '1';
-          let defaultBottleId: number | null = null;
-          let defaultJobId = '';
           let entryId: string | null = null;
 
           if (row.kind === 'db') {
             entryId = String(row.dbEntry.entry_id);
-            jobNameFallback = row.dbEntry.bottle_name || row.dbEntry.job_id || '';
+            // JOB NAME is always the bottle name resolved from bottle_id by
+            // the backend JOIN with production.bottle_master — never job_id.
+            jobNameFallback = row.dbEntry.bottle_name || '';
             shiftFallback = String(row.dbEntry.shift || 1);
-            defaultBottleId = row.dbEntry.bottle_id ?? null;
-            defaultJobId = row.dbEntry.job_id || '';
           } else if (row.kind === 'run') {
             jobNameFallback = runJobName(row.run);
             shiftFallback = runShift(row.run);
-            defaultBottleId = row.run.bottleId ? parseInt(row.run.bottleId, 10) || null : null;
-            defaultJobId = row.run.jobId || '';
           } else {
             jobNameFallback = row.extra.jobName;
             shiftFallback = row.extra.shift;
           }
+
+          const defaultBottleId = bottleIdForRow(row);
+          const defaultJobId = jobIdForRow(machineNo, row);
+          // A legacy row that stored a bottle name in job_id must be repaired
+          // on the next save instead of writing that name back again.
+          const hasLegacyBottleNameJobId =
+            row.kind === 'db' && isBottleName(String(row.dbEntry.job_id ?? ''));
 
           const effectiveJobName = (currentVals.jobName ?? jobNameFallback).trim();
           const effectiveShift = parseInt(currentVals.shift ?? shiftFallback, 10) || 1;
@@ -2299,18 +2387,24 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
           let bottleId: number | null = defaultBottleId;
           if (effectiveJobName) {
-            const bHit = bottles.find(
-              (b) => b.name.toLowerCase() === effectiveJobName.toLowerCase() || String(b.id) === effectiveJobName
+            const bHit = bottleOptions.find(
+              (b) => b.name.toLowerCase() === effectiveJobName.toLowerCase() || b.id === effectiveJobName
             );
             if (bHit) {
               bottleId = parseInt(bHit.id, 10) || null;
             }
           }
-          const jobId = defaultJobId || effectiveJobName || 'JOB';
+          // job_id is an actual production Job ID; it is never derived from
+          // the bottle name displayed in the JOB NAME cell.
+          const jobId = defaultJobId;
+          // Repair legacy rows only when the real Job ID could be resolved
+          // from the production data already loaded for this date.
+          const needsJobIdRepair = hasLegacyBottleNameJobId && !!jobId;
 
           if (entryId) {
             const hasChanged =
               !baseline ||
+              needsJobIdRepair ||
               currentVals.jobName !== baseline.jobName ||
               currentVals.shift !== baseline.shift ||
               currentVals.time !== baseline.time ||
@@ -2339,7 +2433,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 entry_ids: row.kind === 'db' ? (row.dbEntry.entry_ids || [entryId]) : [entryId],
                 production_date: dateKey,
                 machine_no: machineNo,
-                job_id: jobId,
                 bottle_id: bottleId,
                 shift: effectiveShift,
                 entry_time: effectiveTime,
@@ -2352,6 +2445,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 checker_id: checkerId,
                 remarks: effectiveRemarks,
               };
+              // For a legacy row whose stored job_id is a bottle name and can
+              // not be resolved, omit the field so the bad name is never
+              // written back. Other edits still save normally.
+              if (jobId) updateObj.job_id = jobId;
               // Only persist Pack Type / PCS-Pack when the user actually changed
               // them versus the persisted baseline. This keeps existing saved
               // values unchanged on unrelated subsequent saves and avoids
@@ -2383,6 +2480,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               (!isNum && Boolean(effectiveLotNo));
 
             if (hasUserEnteredData) {
+              if (!jobId) {
+                alert(
+                  `Could not resolve a Job ID for ${effectiveJobName || 'this row'} on Machine ${machineNo}. ` +
+                  'Please refresh the page and try again.'
+                );
+                return;
+              }
               if (!effectiveTime) {
                 alert(`Please select a Time for ${effectiveJobName || 'new entry'} on Machine ${machineNo} before saving.`);
                 return;
@@ -2639,8 +2743,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           row.kind === 'extra'
                             ? row.extra.jobName
                             : isDbRow
-                            ? (row.dbEntry.bottle_name || row.dbEntry.job_id || '')
+                            ? (row.dbEntry.bottle_name || '')
                             : runJobName(row.run);
+                        const rowJobId = jobIdForRow(machineNo, row);
+                        const rowBottleId = bottleIdForRow(row);
                         const shiftFallback =
                           row.kind === 'extra'
                             ? row.extra.shift
@@ -2692,7 +2798,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(numberingValues, key, 'shift', shiftFallback),
                                       cellValue(numberingValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
-                                      ''
+                                      '',
+                                      rowJobId,
+                                      rowBottleId
                                     )
                                   }
                                 />
@@ -2937,8 +3045,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                           row.kind === 'extra'
                             ? row.extra.jobName
                             : isDbRow
-                            ? (row.dbEntry.bottle_name || row.dbEntry.job_id || '')
+                            ? (row.dbEntry.bottle_name || '')
                             : runJobName(row.run);
+                        const rowJobId = jobIdForRow(machineNo, row);
+                        const rowBottleId = bottleIdForRow(row);
                         const shiftFallback =
                           row.kind === 'extra'
                             ? row.extra.shift
@@ -2990,7 +3100,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(sqcValues, key, 'shift', shiftFallback),
                                       cellValue(sqcValues, key, 'packType', isDbRow ? (row.dbEntry.pack_type || '') : basePackType),
                                       cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
-                                      ''
+                                      '',
+                                      rowJobId,
+                                      rowBottleId
                                     )
                                   }
                                 />
