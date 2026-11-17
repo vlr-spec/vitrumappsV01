@@ -57,7 +57,6 @@ class NumberingEntryBase(BaseModel):
     entry_time: Union[time, str]
     pcs_per_pack: Optional[int] = Field(None, ge=0)
     cartons: Optional[int] = Field(None, ge=0)
-    defective_bottles: Optional[int] = Field(None, ge=0)
     defect_id: Optional[Union[int, str]] = None
     defect_ids: Optional[List[Union[int, str]]] = None
     mould: Optional[str] = None
@@ -82,7 +81,7 @@ class NumberingEntryBase(BaseModel):
             raise ValueError("entry_time cannot be empty")
         return t
 
-    @field_validator("bottle_id", "pcs_per_pack", "cartons", "defective_bottles", mode="before")
+    @field_validator("bottle_id", "pcs_per_pack", "cartons", mode="before")
     @classmethod
     def coerce_int(cls, v):
         if v is None or v == "":
@@ -122,7 +121,6 @@ class NumberingEntryUpdate(BaseModel):
     entry_time: Optional[Union[time, str]] = None
     pcs_per_pack: Optional[int] = Field(None, ge=0)
     cartons: Optional[int] = Field(None, ge=0)
-    defective_bottles: Optional[int] = Field(None, ge=0)
     defect_id: Optional[Union[int, str]] = None
     defect_ids: Optional[List[Union[int, str]]] = None
     entry_ids: Optional[List[Union[int, str]]] = None
@@ -147,7 +145,7 @@ class NumberingEntryUpdate(BaseModel):
             return None
         return parse_time_input(v)
 
-    @field_validator("bottle_id", "pcs_per_pack", "cartons", "defective_bottles", mode="before")
+    @field_validator("bottle_id", "pcs_per_pack", "cartons", mode="before")
     @classmethod
     def coerce_int(cls, v):
         if v is None or v == "":
@@ -197,7 +195,6 @@ class NumberingEntryResponse(BaseModel):
     entry_time: str
     pcs_per_pack: Optional[int] = None
     cartons: Optional[int] = None
-    defective_bottles: Optional[int] = None
     defect_id: Optional[str] = None
     defect_ids: Optional[List[str]] = None
     defect_name: Optional[str] = None

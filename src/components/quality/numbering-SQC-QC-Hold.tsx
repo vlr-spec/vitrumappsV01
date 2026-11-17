@@ -1,5 +1,5 @@
 /**
- * Re-PackingReport.tsx — Re-Packing Report with NUMBERING and SQC/QC HOLD layouts.
+ * numbering-SQC-QC-Hold.tsx — Re-Packing Report with NUMBERING and SQC/QC HOLD layouts.
  *
  * Two-layout Re-Packing Report rendered as a compact ERP dashboard: light
  * page background, white machine cards with subtle borders / rounded corners
@@ -1789,7 +1789,6 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           time: entry.entry_time || '',
           pcsPack: entry.pcs_per_pack != null ? String(entry.pcs_per_pack) : '',
           cartons: entry.cartons != null ? String(entry.cartons) : '',
-          noOfBottle: entry.defective_bottles != null ? String(entry.defective_bottles) : '',
           defects: entry.defect_name || '',
           mould: entry.mould || '',
           sectionNo: entry.section_no || '',
@@ -2437,7 +2436,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 shift: effectiveShift,
                 entry_time: effectiveTime,
                 cartons: effectiveCartons,
-                defective_bottles: effectiveDefectiveBottles,
+                ...(isNum ? {} : { defective_bottles: effectiveDefectiveBottles }),
                 defect_id: defectId,
                 defect_ids: defectIds,
                 mould: effectiveMould,
@@ -2505,7 +2504,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                 entry_time: effectiveTime,
                 pcs_per_pack: effectivePcsPack,
                 cartons: effectiveCartons,
-                defective_bottles: effectiveDefectiveBottles,
+                ...(isNum ? {} : { defective_bottles: effectiveDefectiveBottles }),
                 defect_id: defectId,
                 defect_ids: defectIds,
                 mould: effectiveMould,
@@ -3197,7 +3196,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             </td>
                             <td style={sqcCellTd(7, SQC_COLUMNS.length)}>
                               <CellNumInput
-                                value={cellValue(sqcValues, key, 'noOfBottle', isDbRow && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
+                                value={cellValue(sqcValues, key, 'noOfBottle', isDbRow && 'defective_bottles' in row.dbEntry && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
                                 onChange={(v) => setSqcCell(key, 'noOfBottle', v)}
                                 style={SQC_INPUT_STYLE}
                               />

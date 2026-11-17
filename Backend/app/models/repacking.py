@@ -23,7 +23,6 @@ class RepackingNumbering(Base):
     entry_time = Column(Time, nullable=False)
     pcs_per_pack = Column(Integer, nullable=True)
     cartons = Column(Integer, nullable=True)
-    defective_bottles = Column(Integer, nullable=True)
     defect_id = Column(BigInteger, ForeignKey(hpr_fk("defect_master.defect_id")), nullable=True)
     mould = Column(String, nullable=True)
     section_no = Column(String, nullable=True)

@@ -23,7 +23,6 @@ export interface RepackingNumberingEntry {
   entry_time: string;
   pcs_per_pack: number | null;
   cartons: number | null;
-  defective_bottles: number | null;
   defect_id: string | null;
   defect_ids?: string[];
   defect_name?: string | null;

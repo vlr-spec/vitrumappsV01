@@ -10,7 +10,7 @@ import { calculateTheoreticalBottles } from '../../utils/calculations';
 import QualityReport from './QualityReport';
 import AllMachineReport from './AllMachineReport';
 import DailyMcSpeedWeightReport from './DailyMcSpeedWeightReport';
-import RePackingReport from './Re-PackingReport';
+import RePackingReport from './numbering-SQC-QC-Hold';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shift master — mirrors the production.shift_master table

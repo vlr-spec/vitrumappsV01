@@ -389,7 +389,6 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `entry_time` (`Time`, non-null) — *Manual inspection timestamp.*
 - `pcs_per_pack` (`Integer`, nullable) — *Pack size.*
 - `cartons` (`Integer`, nullable) — *Inspected carton count.*
-- `defective_bottles` (`Integer`, nullable) — *Identified defective bottle count.*
 - `defect_id` (`BigInteger`, **FK** → `hpr.defect_master.defect_id`, nullable)
 - `mould` (`String`, nullable) — *Mould cavity identifier.*
 - `section_no` (`String`, nullable) — *Machine section number.*
