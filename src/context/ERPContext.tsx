@@ -222,6 +222,7 @@ const MODULE_TO_SLUG: Record<string, string> = {
   'Settings': 'settings',
   'Profile': 'profile',
   'Dashboard': 'dashboard',
+  'Reports': 'reports',
 };
 
 const SLUG_TO_MODULE: Record<string, string> = {
@@ -232,6 +233,7 @@ const SLUG_TO_MODULE: Record<string, string> = {
   settings: 'Settings',
   profile: 'Profile',
   dashboard: 'Dashboard',
+  reports: 'Reports',
 };
 
 /** Slug for any module: known entries keep their stable URL, everything else

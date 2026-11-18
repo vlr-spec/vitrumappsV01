@@ -29,7 +29,7 @@ export const MODULES = {
 } as const;
 
 /** Modules that belong to the application shell (no module_master row). */
-export const APP_MODULES = ['Dashboard', 'Settings', 'Profile'];
+export const APP_MODULES = ['Dashboard', 'Settings', 'Profile', 'Reports'];
 
 export interface AuthUser {
   employee_id: string;

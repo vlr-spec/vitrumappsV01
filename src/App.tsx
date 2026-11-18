@@ -11,6 +11,7 @@ import { DashboardModule } from './components/dashboard/DashboardModule';
 import { PlanningModule } from './components/planning/PlanningModule';
 import { MachinesModule } from './components/master-management/MachinesModule';
 import { QualityControlModule } from './components/quality/ProductionQualityMonitor';
+import { ProductionReportModule } from './components/reports/ProductionReportModule';
 import { SettingsModule } from './components/settings/SettingsModule';
 import { ProfileModule } from './components/profile/ProfileModule';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
@@ -26,6 +27,7 @@ const BUILT_IN_MODULES = [
   'Production Planning',
   'Master Management',
   'Quality Control',
+  'Reports',
   'Settings',
   'Profile',
 ];
@@ -48,6 +50,7 @@ const MainLayout: React.FC = () => {
             {activeModule === 'Production Planning' && <PlanningModule />}
             {activeModule === 'Master Management' && <MachinesModule />}
             {activeModule === 'Quality Control' && <QualityControlModule />}
+            {activeModule === 'Reports' && <ProductionReportModule />}
             {activeModule === 'Settings' && <SettingsModule />}
             {activeModule === 'Profile' && <ProfileModule />}
             {!BUILT_IN_MODULES.includes(activeModule) && (
