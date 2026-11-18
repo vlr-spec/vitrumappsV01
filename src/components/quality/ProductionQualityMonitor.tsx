@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Printer, Download, CalendarDays, ChevronUp, ChevronDown } from 'lucide-react';
+import { Printer, Download, CalendarDays, ChevronUp, ChevronDown, Eye, EyeOff } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth, MODULES } from '../../context/AuthContext';
@@ -2023,6 +2023,8 @@ const QualityTimeRow = React.memo<{
   toggleRowLock: (time: string, entry?: QualityHourlyEntry) => void;
   /** Column-level lock: when true this row's checkbox cannot be changed. */
   columnLocked?: boolean;
+  /** True when the Production Timeline column is visible (shared by all four machine tabs). */
+  showProductionTime?: boolean;
   /** Layer Out Time (min) for this shift, shown once in the merged shift cell. */
   layerOutValue?: string;
   /** Validation message for an invalid Layer Out Time entry. */
@@ -2065,6 +2067,7 @@ const QualityTimeRow = React.memo<{
   locked,
   toggleRowLock,
   columnLocked = false,
+  showProductionTime = false,
   layerOutValue,
   layerOutError,
   onLayerOutChange,
@@ -2261,6 +2264,7 @@ const QualityTimeRow = React.memo<{
         />
       </td>
 
+      {showProductionTime && (
       <td
         style={{ ...tdCenter, padding: '6px 2px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
         onMouseEnter={() => setProductionTimeHovered(true)}
@@ -2318,6 +2322,7 @@ const QualityTimeRow = React.memo<{
           </button>
         )}
       </td>
+      )}
 
       <td
         style={{ ...tdCenter, padding: '6px 2px', fontWeight: 500, fontSize: '12px', color: C.textMuted, whiteSpace: 'nowrap' }}
@@ -2583,6 +2588,9 @@ export const QualityControlModule: React.FC = () => {
   const canEdit = hasPermission(MODULES.QUALITY_CONTROL, 'edit');
 
   const [activeMachine, setActiveMachine] = useState(1);
+  // Production Timeline column visibility — UI-only, shared by all four
+  // machine tabs for the whole session (default hidden). No data is changed.
+  const [showProductionTimeline, setShowProductionTimeline] = useState(false);
   // Re-Packing Report layout (NUMBERING ↔ SQC/QC HOLD). Controlled from the
   // main navigation bar so both views are directly reachable from the top
   // nav — purely UI navigation state, no data logic affected.
@@ -4554,11 +4562,13 @@ export const QualityControlModule: React.FC = () => {
     [dateKey, layerOutInputs, gobCountFor],
   );
 
-  // Excel export — ALL FOUR machines in ONE worksheet, in machine order, each
-  // with its own centered heading and Day Avg / Summary row. Layout, borders,
-  // colours and column order mirror the PDF report. Every row comes from the
-  // selected date's loaded store for that machine, so records are never
-  // combined across machines and no calculation changes.
+  // Excel export — ONE workbook with FOUR worksheets (Machine 1 … Machine 4),
+  // in machine order. Each sheet holds only its own machine's report with the
+  // existing centered heading, table layout, shift colours and Day Avg /
+  // Summary row. Layout, borders, colours and column order mirror the PDF
+  // report. Every row comes from the selected date's loaded store for that
+  // machine, so records are never combined across machines and no calculation
+  // changes.
   const handleExport = async () => {
     try {
       // exceljs is only needed for export — load it lazily so the initial
@@ -4596,21 +4606,12 @@ export const QualityControlModule: React.FC = () => {
       const BORDER_COLOR = 'FFCBD5E1';
 
       const workbook = new ExcelJS.Workbook();
-      const worksheet = workbook.addWorksheet('Hourly Production');
 
-      // One shared set of widths for all four sections. Machines 2/3 omit
-      // Weight M (17 columns) while machines 1/4 use all 18; these widths stay
-      // readable in both layouts (col 17 is Pieces EFF% or Remarks, col 18 is
-      // Remarks).
+      // One shared set of widths for every machine worksheet. Machines 2/3
+      // omit Weight M (17 columns) while machines 1/4 use all 18; these widths
+      // stay readable in both layouts (col 17 is Pieces EFF% or Remarks, col 18
+      // is Remarks).
       const colWidths = [6.5, 9.5, 9.5, 24, 7.5, 7.5, 8, 8.5, 9, 10, 9.5, 8.5, 10, 9.5, 8.5, 8.5, 14, 20];
-      colWidths.forEach((width, index) => {
-        worksheet.getColumn(index + 1).width = width;
-      });
-
-      // Hide Excel's default gridlines. Each machine section owns its heading
-      // and column header, so no single header row is frozen for the whole
-      // four-machine sheet.
-      worksheet.views = [{ showGridLines: false }];
 
       const tableHeaderFor = (hasM: boolean) => [
         'Shift',
@@ -4631,11 +4632,22 @@ export const QualityControlModule: React.FC = () => {
         'Remarks',
       ];
 
-      let rowNumber = 1;
-
+      // Each machine goes to its own worksheet in sequence. No machine's rows
+      // are ever written to another machine's sheet.
       for (const report of reports) {
+        const worksheet = workbook.addWorksheet(`Machine ${report.machineNo}`);
+
+        colWidths.forEach((width, index) => {
+          worksheet.getColumn(index + 1).width = width;
+        });
+
+        // Hide Excel's default gridlines on every machine sheet.
+        worksheet.views = [{ showGridLines: false }];
+
         const tableHeader = tableHeaderFor(report.hasM);
         const colCount = tableHeader.length;
+
+        let rowNumber = 1;
 
         // ── Centered machine heading (merged across this report's width) ──
         worksheet.getRow(rowNumber).getCell(1).value = reportHeader.company;
@@ -4738,7 +4750,6 @@ export const QualityControlModule: React.FC = () => {
         const summaryRowNumber = rowNumber;
         worksheet.getRow(summaryRowNumber).values = summaryValues;
         worksheet.mergeCells(summaryRowNumber, 1, summaryRowNumber, 4);
-        rowNumber++;
 
         // ── Body + summary formatting ──────────────────────────────────────
         for (let r = bodyStartRow; r <= summaryRowNumber; r++) {
@@ -4772,34 +4783,31 @@ export const QualityControlModule: React.FC = () => {
           }
         }
 
-        // Spacing between machine reports — one borderless blank row.
-        worksheet.getRow(rowNumber).height = 12;
-        rowNumber++;
+        // ── Print setup per machine sheet: landscape, one page wide, footer
+        // title/paging. Each sheet describes its own machine only. ──────────
+        worksheet.pageSetup = {
+          paperSize: 9, // A4
+          orientation: 'landscape',
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          horizontalCentered: true,
+          margins: {
+            left: 0.25,
+            right: 0.25,
+            top: 0.5,
+            bottom: 0.6,
+            header: 0.2,
+            footer: 0.25,
+          },
+        };
+
+        const footerText =
+          `&L&"Calibri,Regular"&8Hourly Production Monitor — Machine ${report.machineNo} — ${dateLabel}` +
+          '&R&"Calibri,Regular"&8Page &P of &N';
+        worksheet.headerFooter.oddFooter = footerText;
+        worksheet.headerFooter.evenFooter = footerText;
       }
-
-      // ── Print setup: landscape, one page wide, footer title/paging ──────
-      worksheet.pageSetup = {
-        paperSize: 9, // A4
-        orientation: 'landscape',
-        fitToPage: true,
-        fitToWidth: 1,
-        fitToHeight: 0,
-        horizontalCentered: true,
-        margins: {
-          left: 0.25,
-          right: 0.25,
-          top: 0.5,
-          bottom: 0.6,
-          header: 0.2,
-          footer: 0.25,
-        },
-      };
-
-      const footerText =
-        `&L&"Calibri,Regular"&8Hourly Production Monitor — All Machines — ${dateLabel}` +
-        '&R&"Calibri,Regular"&8Page &P of &N';
-      worksheet.headerFooter.oddFooter = footerText;
-      worksheet.headerFooter.evenFooter = footerText;
 
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], {
@@ -5569,6 +5577,37 @@ export const QualityControlModule: React.FC = () => {
 
         {activeMachine >= 1 && activeMachine <= 4 && (
         <div className="qm-table-card" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1278px' : '1218px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
+        {/* Production Timeline visibility toggle — top-left of the table,
+            directly above the SHIFT column. Shared by all four machine tabs. */}
+        <div className="no-print" style={{ display: 'flex', alignItems: 'center', padding: '6px 0 6px 0' }}>
+          <button
+            type="button"
+            onClick={() => setShowProductionTimeline((v) => !v)}
+            title={showProductionTimeline ? 'Hide Production Timeline column' : 'Show Production Timeline column'}
+            aria-pressed={showProductionTimeline}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '3px',
+              height: '18px',
+              padding: '2px 5px',
+              fontSize: '9px',
+              fontWeight: 600,
+              lineHeight: 1,
+              color: '#ffffff',
+              backgroundColor: '#2563EB',
+              border: 'none',
+              borderRadius: '5px',
+              cursor: 'pointer',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563EB'; }}
+          >
+            {showProductionTimeline ? <EyeOff size={10} strokeWidth={2} /> : <Eye size={10} strokeWidth={2} />}
+            <span>{showProductionTimeline ? 'Hide Production Time' : 'Show Production Time'}</span>
+          </button>
+        </div>
         {/* Table — no scroll container in this chain: the sticky header must
             resolve against .qm-content-scroll (the module's single scrollport),
             so it stays pinned for the whole 24-hour table and only disappears
@@ -5587,7 +5626,9 @@ export const QualityControlModule: React.FC = () => {
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
                 <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
-                <th rowSpan={2} title="Production Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Production<br />Timeline</th>
+                {showProductionTimeline && (
+                  <th rowSpan={2} title="Production Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Production<br />Timeline</th>
+                )}
                 <th rowSpan={2} title="Packing Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Packing<br />Timeline</th>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '200px', borderBottom: `2px solid ${C.border}`, padding: '9px 10px', textAlign: 'left' }}>Bottle Name</th>
                 <th colSpan={hasM ? 3 : 2} style={{ ...stickyThStyle(0), borderBottom: `1px solid ${C.border}` }}>Weight (gms)</th>
@@ -5655,6 +5696,7 @@ export const QualityControlModule: React.FC = () => {
                       time={time}
                       displayTime={displayTime}
                       productionTime={productionTime}
+                      showProductionTime={showProductionTimeline}
                       isSplitRow={split}
                       // Same dynamic check for EVERY row — including the first
                       // row. The interval comes from the Lehr-Out-adjusted
@@ -5697,7 +5739,7 @@ export const QualityControlModule: React.FC = () => {
 
               {/* Day Avg / Summary row */}
               <tr style={{ backgroundColor: '#f0f4fa', borderTop: `2px solid ${C.border}` }}>
-                <td colSpan={5} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
+                <td colSpan={showProductionTimeline ? 5 : 4} style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 700, fontSize: '11px', color: '#334155', letterSpacing: '0.06em', textTransform: 'uppercase', borderRight: `1px solid ${C.border}`, whiteSpace: 'nowrap' }}>
                   Day Avg / Summary
                 </td>
                 <td style={{ padding: '8px 6px', textAlign: 'center', fontWeight: 700, fontSize: '12px', color: '#1e293b', borderRight: `1px solid ${C.border}` }}>
@@ -5761,7 +5803,7 @@ export const QualityControlModule: React.FC = () => {
                     Lock
                   </div>
                 </td>
-                <td colSpan={hasM ? 17 : 16} style={{ padding: '8px 10px', fontSize: '11.5px', fontWeight: columnLocked ? 600 : 400, color: columnLocked ? '#b91c1c' : '#94a3b8' }}>
+                <td colSpan={(hasM ? 17 : 16) - (showProductionTimeline ? 0 : 1)} style={{ padding: '8px 10px', fontSize: '11.5px', fontWeight: columnLocked ? 600 : 400, color: columnLocked ? '#b91c1c' : '#94a3b8' }}>
                   {columnLocked ? 'Column locked — row checkboxes cannot be changed.' : ''}
                 </td>
               </tr>
