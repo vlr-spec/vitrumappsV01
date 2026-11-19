@@ -217,29 +217,6 @@ This document tracks the recent bug fixes and configuration updates made to the 
   3. **Display-Order Job Continuations**: Replaced raw clock comparison with display index navigation (`orderedKeys.indexOf(time)`). Job extensions cleanly cascade into the immediate next displayed row regardless of whether it is an hourly slot, a split segment, or a cross-day transition.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
 
-<<<<<<< HEAD
-## 24. Hourly Production Monitor Excel Export Matched to PDF Report
-- **Issue**: The Hourly Production Monitor's Export button produced a plain `.csv` containing an extra Machine column and no report heading, styling, shift colours or Day Avg / Summary row, so the exported file looked nothing like the existing PDF print report.
-- **Fix**:
-  1. **Styled XLSX Export**: Replaced the CSV writer with a lazily loaded ExcelJS workbook named `Hourly Production`, downloaded as `.xlsx` so all formatting is preserved.
-  2. **PDF-Identical Layout**: Used the same 18-column table (17 columns on 2-gob machines, which omit Weight M), the same column order, and the same rows — 24 hourly slots plus split segments — from the existing in-memory store and helpers.
-  3. **Report Heading**: Added the centered, bold company name and the `date - day    Machine: No. n` line, each merged across the full report width.
-  4. **Table Formatting**: Applied the PDF's dark navy header with white bold wrapped labels, thin borders on every cell, centered numeric/time columns, left-aligned Bottle Name and Remarks, proportional column widths and consistent row heights.
-  5. **Row Colours & Summary**: Reused the PDF's shift palette (light blue / light green / light cream), split-group highlight, and the bold light-shaded Day Avg / Summary row with the existing totals in their existing columns.
-  6. **Print Setup**: Hid gridlines, set A4 landscape with fit-to-one-page-width, and added report title plus `Page x of y` to the print footer.
-  7. **No Data Changes**: Dates, machine numbers, bottle names, production values, calculations and the PDF report itself were left untouched; numeric-looking values are only stored as numbers for correct Excel formatting.
-- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
-
-## 25. Hourly Production Monitor Export & Print Now Include All Four Machines
-- **Issue**: Export Excel and Print only produced the currently selected machine's report because both handlers read the active machine's rows and active-machine timelines, leaving the other three machines out of the file/PDF.
-- **Fix**:
-  1. **Shared Per-Machine Model**: Added `buildMachineReportModel` which runs the existing ordering, layer-out/timeline, duration, shift, Day Avg and summary helpers for any machine number, so each machine uses its own rows without changing any calculation.
-  2. **All-Machine Data Snapshot**: `reportStoreForDate` reuses the loaded `24 x 4` day store; if Export/Print runs before the day load completes, it fetches that day once so a machine is never reported empty.
-  3. **Excel**: One `Hourly Production` worksheet now contains Machine 1 → Machine 4 sequentially. Each report has its own centered company/date/day/machine heading, its own table (18 columns on 3-gob machines, 17 on 2-gob machines), shift colours, split highlight, Day Avg / Summary row and a spacer row between reports. Print setup remains landscape A4, fit to one page width, with footer title/page numbering.
-  4. **Print**: One landscape PDF with exactly one complete machine report per page and explicit `addPage()` breaks between reports. Each machine picks the most readable existing font profile that keeps its complete table on a single page, and every page carries its own machine heading and footer.
-  5. **Restrictions Respected**: No changes to PDF styling, production/efficiency/shift/timeline calculations, summary values, UI, backend APIs, database schema or production data; each report reads only its own machine's records.
-- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
-=======
 ## 24. Atomic Row Locking via `lock_times` in Daily Quality Save & PostgreSQL Connection Pool Hardening
 - **Issue**:
   1. Operators checking row lock checkboxes during an inspection edit required two separate network requests (saving row metrics first, then triggering a separate lock toggle endpoint), risking partial failures.
@@ -280,11 +257,57 @@ This document tracks the recent bug fixes and configuration updates made to the 
   1. **Backend Name Rejection**: Implemented `_reject_bottle_name_job_ids` in `Backend/app/api/production/repacking.py`. Checks incoming `job_id` values against `production.bottle_master.bottle_name` and rejects name values with HTTP 400 (`"job_id cannot be a bottle name ('...'). Use the actual Job ID; the bottle name is resolved from bottle_id."`).
   2. **Combined Bottle Master Lookup**: Added `BottleNameItem` schema and included `bottle_names: List[BottleNameItem]` in `RepackingDataResponse`. `get_repacking_data` queries `production.bottle_master` to return `(bottle_id, bottle_name)` pairs in the single round-trip.
   3. **Frontend Bottle Name Resolution & Clean Rendering**:
-     - Updated `Re-PackingReport.tsx` to resolve bottle names using `bottleNames` lookup from `repackingRepository.getRepackingData`.
+     - Updated `numbering-SQC-QC-Hold.tsx` (formerly `Re-PackingReport.tsx`) to resolve bottle names using `bottleNames` lookup from `repackingRepository.getRepackingData`.
      - `bottleNameFor` never returns raw numeric IDs, rendering an empty cell instead of showing numeric strings like `"65"`.
      - Updated `ExtraRow` interface to store `jobId: string` and `bottleId: number | null` copied directly from the parent row when clicking `(+)`.
      - `jobIdForRow` prioritizes resolving valid Job IDs from daily production runs, omitting `job_id` from updates if legacy data contained an invalid bottle name.
-- **Files Touched**: `Backend/app/api/production/repacking.py`, `Backend/app/schemas/repacking.py`, `src/services/repackingRepository.ts`, `src/components/quality/Re-PackingReport.tsx`
->>>>>>> 8728331f9714831964b0bb6413c1fbf9c058b09c
+- **Files Touched**: `Backend/app/api/production/repacking.py`, `Backend/app/schemas/repacking.py`, `src/services/repackingRepository.ts`, `src/components/quality/numbering-SQC-QC-Hold.tsx`
+
+## 28. Hourly Production Monitor Excel Export Matched to PDF Layout & Multi-Machine Export
+- **Issue**:
+  1. The Hourly Production Monitor's Export button previously downloaded a plain `.csv` with an extra Machine column and no company heading, header styling, shift colors, or Day Avg / Summary row, failing to match the official PDF print report layout.
+  2. Export Excel and Print initially generated only the active machine's report instead of covering all four production lines for the selected day.
+- **Fix**:
+  1. **ExcelJS Styled Export**: Lazily loaded ExcelJS to generate fully formatted `.xlsx` workbooks mirroring the PDF report styling.
+  2. **PDF-Identical Layout**: Applied the centered company header, date, day, and machine title merged across table columns. Applied dark navy table headers (`#1E293B`) with white bold text, thin borders, centered numeric columns, left-aligned Bottle Name and Remarks, shift-wise row backgrounds (light blue / light green / light cream), split-group highlights, and bold Day Avg / Summary row.
+  3. **Shared Per-Machine Builder (`buildMachineReportModel`)**: Extracted per-machine timeline, duration, shift indices, day averages, and totals into a reusable helper so each machine's data is isolated and complete.
+  4. **Multi-Machine PDF Generation**: Print handler (`handlePrint`) outputs a multi-page landscape PDF with exactly one machine per page, with explicit `addPage()` breaks and per-machine headers/footers.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
+## 29. Repacking Module Schema Refactor (Removal of `defective_bottles` from Numbering) & Component Rename
+- **Issue**:
+  1. The live PostgreSQL schema for `sqc.repacking_numbering` does not have a `defective_bottles` column (only `cartons` and `defect_id`). However, the SQLAlchemy ORM model (`RepackingNumbering`), Pydantic request/response schemas, API routes, repository interfaces, and test fixtures still referenced `defective_bottles`, causing potential schema mismatch errors or misleading fields.
+  2. The frontend component file `Re-PackingReport.tsx` was named inconsistently with the actual UI views and modular naming conventions.
+- **Fix**:
+  1. **Backend Model & Schema Alignment**: Removed `defective_bottles` from `RepackingNumbering` ORM model in `Backend/app/models/repacking.py`, from `NumberingEntryCreate`, `NumberingEntryUpdate`, and `NumberingEntryResponse` schemas in `Backend/app/schemas/repacking.py`, and from query building in `Backend/app/api/production/repacking.py`.
+  2. **Comprehensive Regression Tests**: Added `Backend/tests/test_numbering_no_defective_bottles.py` (252 lines) verifying that the numbering model, API endpoints, and bulk save operations function correctly without `defective_bottles`.
+  3. **Frontend Interface & Component Rename**: Removed `defective_bottles` from numbering types in `src/services/repackingRepository.ts`. Renamed `src/components/quality/Re-PackingReport.tsx` to `src/components/quality/numbering-SQC-QC-Hold.tsx` and updated imports in `ProductionQualityMonitor.tsx`.
+- **Files Touched**: `Backend/app/models/repacking.py`, `Backend/app/schemas/repacking.py`, `Backend/app/api/production/repacking.py`, `Backend/tests/test_numbering_no_defective_bottles.py`, `src/services/repackingRepository.ts`, `src/components/quality/ProductionQualityMonitor.tsx`, `src/components/quality/numbering-SQC-QC-Hold.tsx`, `DOCUMENTATION.md`
+
+## 30. Dedicated Reports Module Integration & Navigation Structure
+- **Issue**:
+  1. Top-level reporting views lacked a standalone, dedicated application module in the main layout and navigation, requiring users to switch through sub-tabs in Quality Control.
+  2. The application shell did not treat "Reports" as an authenticated, first-class top-level module with slug `#reports` and sidebar navigation.
+- **Fix**:
+  1. **Reports Module Integration**: Created `src/components/reports/ProductionReportModule.tsx` and integrated it into `src/App.tsx` under `BUILT_IN_MODULES` and main layout view rendering.
+  2. **Navigation & Sidebar**: Added "Reports" navigation item with `FileBarChart` icon to `src/components/layout/Sidebar.tsx` and registered it in `STATIC_MODULE_NAMES`.
+  3. **Router Hash & Slug Mapping**: Added `'Reports': 'reports'` and `'reports': 'Reports'` to `MODULE_TO_SLUG` and `SLUG_TO_MODULE` dictionaries in `src/context/ERPContext.tsx`.
+  4. **Auth & Type Definitions**: Added `'Reports'` to `APP_MODULES` in `src/context/AuthContext.tsx` and to the `ActiveModule` union type in `src/types/index.ts`. Removed obsolete placeholder file `ReportsModule.tsx`.
+- **Files Touched**: `src/App.tsx`, `src/components/layout/Sidebar.tsx`, `src/components/reports/ProductionReportModule.tsx`, `src/context/AuthContext.tsx`, `src/context/ERPContext.tsx`, `src/types/index.ts`
+
+## 31. Production Timeline Visibility Toggle & 4-Sheet Excel Export in Quality Control
+- **Issue**:
+  1. The "Production Timeline" column in `ProductionQualityMonitor` occupied substantial screen width on dense 18-column inspection grids, even though operators primarily enter and review data against the "Packing Timeline". Users needed a convenient way to hide or show this column.
+  2. The multi-machine Excel export previously stacked all four machine reports sequentially in a single worksheet, requiring manual scrolling and making cross-machine comparisons cumbersome.
+- **Fix**:
+  1. **Production Timeline Visibility Toggle**:
+     - Added `showProductionTimeline` state (boolean, default `false`) in `ProductionQualityMonitor.tsx`.
+     - Added an interactive toggle button with `Eye` / `EyeOff` icons in the machine tab toolbar (`"Show Production Time"` / `"Hide Production Time"`).
+     - Dynamically rendered or omitted the "Production Timeline" column header (`<th>`), row cells (`<td>`), and adjusted `colSpan` calculations in table footer summary and lock banner rows across all four machine tabs.
+  2. **Separate Worksheets for Each Machine in Excel Export**:
+     - Updated `handleExport` to generate one `.xlsx` workbook containing four dedicated worksheets: `Machine 1`, `Machine 2`, `Machine 3`, and `Machine 4`.
+     - Each worksheet contains its machine's centered header, exact 18- or 17-column layout, shift styling, row formatting, and Day Avg / Summary totals without mixing rows across machines.
+     - Preserved A4 landscape print setup and zero-gridlines view per sheet.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
 
 
