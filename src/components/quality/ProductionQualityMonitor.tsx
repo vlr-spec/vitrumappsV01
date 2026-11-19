@@ -5577,37 +5577,6 @@ export const QualityControlModule: React.FC = () => {
 
         {activeMachine >= 1 && activeMachine <= 4 && (
         <div className="qm-table-card" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1278px' : '1218px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
-        {/* Production Timeline visibility toggle — top-left of the table,
-            directly above the SHIFT column. Shared by all four machine tabs. */}
-        <div className="no-print" style={{ display: 'flex', alignItems: 'center', padding: '6px 0 6px 0' }}>
-          <button
-            type="button"
-            onClick={() => setShowProductionTimeline((v) => !v)}
-            title={showProductionTimeline ? 'Hide Production Timeline column' : 'Show Production Timeline column'}
-            aria-pressed={showProductionTimeline}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '3px',
-              height: '18px',
-              padding: '2px 5px',
-              fontSize: '9px',
-              fontWeight: 600,
-              lineHeight: 1,
-              color: '#ffffff',
-              backgroundColor: '#2563EB',
-              border: 'none',
-              borderRadius: '5px',
-              cursor: 'pointer',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563EB'; }}
-          >
-            {showProductionTimeline ? <EyeOff size={10} strokeWidth={2} /> : <Eye size={10} strokeWidth={2} />}
-            <span>{showProductionTimeline ? 'Hide Production Time' : 'Show Production Time'}</span>
-          </button>
-        </div>
         {/* Table — no scroll container in this chain: the sticky header must
             resolve against .qm-content-scroll (the module's single scrollport),
             so it stays pinned for the whole 24-hour table and only disappears
@@ -5625,7 +5594,35 @@ export const QualityControlModule: React.FC = () => {
             <thead className="qm-sticky-head">
               <tr style={{ backgroundColor: C.headerBg, height: QM_HEAD_ROW1_H }}>
                 <th rowSpan={2} style={{ ...stickyThStyle(0), width: '48px', borderBottom: `2px solid ${C.border}`, padding: '9px 4px' }}>Shift</th>
-                <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>{columnLocked ? '🔒' : ''}</th>
+                <th rowSpan={2} title={columnLocked ? 'Checkbox column is locked — row checkboxes cannot be changed' : 'Lock / unlock row'} style={{ ...stickyThStyle(0), width: '34px', borderBottom: `2px solid ${C.border}`, padding: '9px 2px', backgroundColor: columnLocked ? '#fee2e2' : C.headerBg, color: columnLocked ? '#b91c1c' : undefined }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '2px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowProductionTimeline((v) => !v)}
+                      title={showProductionTimeline ? 'Hide Production Timeline' : 'Show Production Timeline'}
+                      aria-pressed={showProductionTimeline}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '20px',
+                        height: '20px',
+                        padding: 0,
+                        backgroundColor: 'transparent',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: '#64748b',
+                        cursor: 'pointer',
+                        lineHeight: 1,
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#e2e8f0'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                    >
+                      {showProductionTimeline ? <EyeOff size={14} strokeWidth={2} /> : <Eye size={14} strokeWidth={2} />}
+                    </button>
+                    {columnLocked && <span style={{ fontSize: '10px', lineHeight: 1, userSelect: 'none' }}>🔒</span>}
+                  </div>
+                </th>
                 {showProductionTimeline && (
                   <th rowSpan={2} title="Production Timeline" style={{ ...stickyThStyle(0), width: '64px', borderBottom: `2px solid ${C.border}`, padding: '4px 2px', lineHeight: 1.15 }}>Production<br />Timeline</th>
                 )}
