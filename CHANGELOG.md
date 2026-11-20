@@ -14,6 +14,46 @@ All notable changes to the Vitrum Glass Production Planning project are document
 
 ---
 
+### 2026-11-19 — Production Report Module Implementation with SQC/QC Hold (QA-F-10) & Numbering Views
+- **Problem:**
+  - The dedicated Reports Module (`ProductionReportModule.tsx`) was an empty placeholder component without functional reporting sheets, live data integration, or plant-wide export capabilities.
+  - QA staff lacked an automated view for official non-conforming materials registers (QA-F-10) and machine-wise bird swing defect tracking.
+- **Root Cause:**
+  - Reporting views were previously embedded as sub-views in Quality Control and lacked an enterprise-grade report aggregation engine in the standalone Reports workspace.
+- **Fix:**
+  - `src/components/reports/ProductionReportModule.tsx`:
+    - Replaced the placeholder with a full-featured reporting dashboard featuring tabbed selection between **Numbering Report** (17-column pallet sorting register) and **SQC / QC HOLD (QA-F-10)** ("Report of Non Conforming Materials - Material kept aside for Resorting").
+    - Connected live date-filtered data retrieval via `repackingRepository.getRepackingData(dateIso)`.
+    - Implemented multi-machine aggregation grouping entries by Machine (1..4), Job/Bottle name, Shift (Roman numerals I, II, III), Lot #, and Pack Size, automatically tallying packs, loose defective bottles, and total pieces (`qty = pcsPerPack * packs + looseBottles`).
+    - Added automated deduplication for defect reasons, moulds/cavities, machine sections, and remarks.
+    - Added a dedicated **Machinewise Bird Swing Report** sub-table tracking bottle volumes and mould details for bird swing defects.
+    - Added a **QC HOLD** sub-table isolating quarantined production runs.
+    - Added styled Excel export (`.xlsx`) via ExcelJS with official corporate header, QA-F-10 table formatting, light blue header fills (`#DCE6F1`), and summary rows.
+    - Added `@media print` CSS rules tailored for A4 landscape printing, complete with QA sign-off blocks (QA Executive, Plant Quality Head, Plant Commercial Head) and distribution footnotes while hiding interactive toolbar controls.
+- **Files Changed:**
+  - `src/components/reports/ProductionReportModule.tsx`
+- **API or DB Impact:**
+  - None. Client-side report synthesis utilizing existing `repackingRepository.getRepackingData` endpoint.
+
+---
+
+### 2026-11-19 — Production Timeline Header Integration & Toggle Refactor in Quality Control
+- **Problem:**
+  - The standalone "Show Production Time" button above `.qm-table-card` had zero left padding, causing it to hug the rounded card corner and sit awkwardly directly above the "SHIFT" column instead of the Timeline column.
+- **Root Cause:**
+  - The toggle was rendered inside an extra toolbar div directly preceding the table, causing visual clutter and misaligned layout.
+- **Fix:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`:
+    - Removed the awkward top-left button div above the table.
+    - Embedded the `showProductionTimeline` toggle button directly inside the Lock/Checkbox column header (`<th>`) alongside the column lock indicator (`🔒`).
+    - Used a compact `20x20px` button with `Eye` / `EyeOff` icons (`size={14}`) and smooth hover styling (`#e2e8f0`).
+- **Files Changed:**
+  - `src/components/quality/ProductionQualityMonitor.tsx`
+- **API or DB Impact:**
+  - None. UI ergonomics and layout optimization.
+
+---
+
 ### 2026-11-18 — Production Timeline Visibility Toggle & 4-Sheet Excel Export in Quality Control
 - **Problem:**
   - In `ProductionQualityMonitor.tsx`, the "Production Timeline" column was persistently displayed, consuming table width on dense 18-column inspection grids even when operators only required the "Packing Timeline".
