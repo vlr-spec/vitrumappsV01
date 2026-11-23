@@ -310,4 +310,28 @@ This document tracks the recent bug fixes and configuration updates made to the 
      - Preserved A4 landscape print setup and zero-gridlines view per sheet.
 - **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
 
+## 32. Production Timeline Toggle Refactor & Header Integration in Quality Control
+- **Issue**:
+  1. The previous standalone "Show Production Time" button was placed above the table card with `padding: 6px 0 6px 0`, which caused it to hug the rounded top-left card border and awkwardly float directly above the "SHIFT" column header.
+  2. The button wasted vertical space and created an inconsistent alignment above the grid.
+- **Fix**:
+  1. **Header Cell Embedding**: Removed the awkward top-left button div and integrated a compact `20x20px` `Eye` / `EyeOff` icon button directly inside the Lock/Checkbox table header cell (`<th>`) alongside the column lock indicator (`🔒`).
+  2. **Visual Ergonomics**: Styled the icon button with subtle hover feedback (`#e2e8f0`), zero padding, and seamless alignment, preserving the full 24-hour table view without extra vertical banners.
+- **Files Touched**: `src/components/quality/ProductionQualityMonitor.tsx`
+
+## 33. Production Report Module Implementation (QA-F-10 SQC/QC Hold & Numbering Reports)
+- **Issue**:
+  1. The top-level Reports module (`src/components/reports/ProductionReportModule.tsx`) was only a placeholder component and did not render official QA non-conforming materials registers or allow pallet sorting inspection tracking.
+  2. Plant operators and QA managers needed to view aggregated SQC/QC Hold records (QA-F-10 format), track bird swing defect occurrences by machine, log held material, and export or print formal reports.
+- **Fix**:
+  1. **Dual Report Views**: Implemented tabbed views for **Numbering Report** (17-column pallet sorting register shell) and **SQC / QC HOLD (QA-F-10)** ("Report of Non Conforming Materials - Material kept aside for Resorting").
+  2. **Live Data Binding & Aggregation**: Fetches saved daily records via `repackingRepository.getRepackingData(dateIso)`. Automatically aggregates entries by Machine (1..4), Job/Bottle name, Shift (Roman numerals I, II, III), Lot #, and Pack Size, calculating carton sums, defective loose bottles, and total pieces (`pcsPerPack * packs + looseBottles`).
+  3. **Defect & Cavity Deduplication**: Combines and deduplicates defect names, mould/cavity identifiers, section numbers, and QA remarks across grouped entries.
+  4. **Bird Swing & QC Hold Sub-Tables**:
+     - Automatically filters bird swing defects into a dedicated **Machinewise Bird Swing Report** sub-table with total bottle counts and mould specifications.
+     - Automatically aggregates held runs into a **QC HOLD** sub-table with lot numbers, remarks, and defect rationales.
+  5. **Excel Export (`.xlsx`)**: Provides branded ExcelJS export generating formatted QA-F-10 reports with headers, light-blue section fills (`#DCE6F1`), thin borders, and summary totals.
+  6. **Print-Isolated Styles**: Added `@media print` rules targeting A4 landscape output with formal QA sign-off blocks (QA Executive, Plant Quality Head, Plant Commercial Head), distribution footnotes, and automatic toolbar suppression.
+- **Files Touched**: `src/components/reports/ProductionReportModule.tsx`
+
 
