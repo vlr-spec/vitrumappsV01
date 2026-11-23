@@ -5,6 +5,12 @@ import {
   RepackingSqcQcHoldEntry,
   BottleNameItem,
 } from '../../services/repackingRepository';
+import {
+  qualityRepository,
+  hasMeaningfulData,
+  QualityDayHourly,
+} from '../../services/qualityRepository';
+import { useERP } from '../../context/ERPContext';
 
 /**
  * Production Report Module — classic, print-friendly report sheets.
@@ -23,7 +29,6 @@ type MachineFilter = 'all' | MachineNo;
 
 const NUMBERING_BOTTLE_ROWS = [0, 1, 2, 3, 4];
 const NUMBERING_SHIFT_ROWS = ['1st Shift', '2nd Shift', '3rd Shift'];
-const BIRD_SWING_ROWS = [1, 2, 3, 4];
 const MIN_SQC_ROWS = 6;
 const MIN_HOLD_ROWS = 4;
 
@@ -77,9 +82,6 @@ const defectNamesOf = (entry: RepackingSqcQcHoldEntry): string[] => {
     .map((n) => n.trim())
     .filter(Boolean);
 };
-const hasDefect = (entry: RepackingSqcQcHoldEntry, needle: string): boolean =>
-  defectNamesOf(entry).some((name) => name.toLowerCase().includes(needle.toLowerCase()));
-
 // ─── Aggregated report row ──────────────────────────────────────────────────
 interface SqcGroupRow {
   key: string;
@@ -95,12 +97,8 @@ interface SqcGroupRow {
   cav: string;
   sec: string;
   remarks: string;
-}
-
-interface BirdSwingRow {
-  machineNo: MachineNo;
-  totalBottles: number;
-  info: string;
+  /** True for a job/bottle with no cartons or bottles entered (all-zero row). */
+  isZero: boolean;
 }
 
 interface HoldRow {
@@ -229,14 +227,12 @@ const PRM_STYLES = `
 .prm-mc-cell--sqc { background: #dce6f1; }
 .prm-muted-cell { color: #334155; }
 
-/* ── Sub-tables on the SQC sheet ─────────────────────────────────────────── */
+/* ── Sub-table on the SQC sheet ──────────────────────────────────────────── */
 .prm-subtable { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 18px; font-size: 11px; color: #000000; }
 .prm-subtable th, .prm-subtable td { border: 1px solid #000000; padding: 6px 8px; text-align: left; vertical-align: middle; }
 .prm-subtable th { background: #dce6f1; font-weight: 700; }
-.prm-subtable-center { text-align: center !important; }
 .prm-subtable-note td { font-size: 10.5px; }
 .prm-subtable-notes td { height: 30px; }
-.prm-subtable-num { text-align: center !important; font-weight: 700; }
 
 /* ── Signatures / distribution ───────────────────────────────────────────── */
 .prm-signatures { display: flex; justify-content: space-between; gap: 24px; margin-top: 30px; }
@@ -284,7 +280,7 @@ const NumberingTailCells: React.FC = () => (
 // ─── Aggregation helpers ────────────────────────────────────────────────────
 
 const bottleNameFor = (
-  entry: RepackingSqcQcHoldEntry,
+  entry: { bottle_id?: unknown; bottle_name?: unknown },
   lookup: Map<string, string>
 ): string => asText(entry.bottle_name) || lookup.get(String(entry.bottle_id ?? '')) || '';
 
@@ -322,6 +318,7 @@ const aggregateSqc = (
         cav: '',
         sec: '',
         remarks: '',
+        isZero: false,
       };
       rows.push(group);
     }
@@ -341,31 +338,45 @@ const aggregateSqc = (
   for (const rows of byMachine.values()) {
     for (const row of rows) {
       row.qty = row.pcsPerPack * row.packs + row.looseBottles;
+      // A saved entry with no cartons and no bottles is still a real row in the
+      // Quality Module's SQC/QC HOLD list. Keep it, but display it as an
+      // all-zero job row (no shift / lot / pack size / defect details).
+      if (row.packs === 0 && row.qty === 0) {
+        row.isZero = true;
+        row.shift = 0;
+        row.lotNo = '';
+        row.pcsPerPack = 0;
+        row.reason = '';
+        row.cav = '';
+        row.sec = '';
+        row.remarks = '';
+      }
     }
   }
   return byMachine;
 };
 
-const aggregateBirdSwing = (
-  entries: RepackingSqcQcHoldEntry[],
+/**
+ * JOB NAMES present in the Quality Module's SQC/QC HOLD list for one date.
+ * The tab derives its rows from the Hourly Production Report for that date:
+ * any row carrying a bottle_id / job_id (including jobs planned but not yet
+ * produced, i.e. 0 cartons and 0 bottles) counts as content — the same
+ * `hasMeaningfulData` rule the Quality Module uses.
+ */
+const productionJobNamesByMachine = (
+  dayHourly: QualityDayHourly,
   lookup: Map<string, string>
-): Map<MachineNo, BirdSwingRow> => {
-  const result = new Map<MachineNo, BirdSwingRow>();
+): Map<MachineNo, string[]> => {
+  const result = new Map<MachineNo, string[]>();
   for (const m of MACHINE_NUMBERS) {
-    result.set(m, { machineNo: m, totalBottles: 0, info: '' });
-  }
-  for (const entry of entries) {
-    if (!hasDefect(entry, 'bird swing')) continue;
-    const machineNo = asNum(entry.machine_no) as MachineNo;
-    const row = result.get(machineNo);
-    if (!row) continue;
-    row.totalBottles += asNum(entry.cartons) * asNum(entry.pcs_per_pack) + asNum(entry.defective_bottles);
-    const mould = asText(entry.mould);
-    row.info = dedupe([
-      ...(row.info ? row.info.split(', ') : []),
-      bottleNameFor(entry, lookup),
-      mould ? `Mould ${mould}` : '',
-    ]);
+    const names: string[] = [];
+    const byTime = dayHourly[String(m)] ?? {};
+    for (const entry of Object.values(byTime)) {
+      if (!hasMeaningfulData(entry)) continue;
+      const name = bottleNameFor(entry, lookup);
+      if (name) names.push(name);
+    }
+    result.set(m, names.filter((name, i) => names.findIndex((n) => n.toLowerCase() === name.toLowerCase()) === i));
   }
   return result;
 };
@@ -394,31 +405,39 @@ const collectHoldRows = (
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export const ProductionReportModule: React.FC = () => {
+  const { bottles } = useERP();
   const [dateIso, setDateIso] = useState<string>(() => toIso(new Date()));
   const [machineFilter, setMachineFilter] = useState<MachineFilter>('all');
   const [entries, setEntries] = useState<RepackingSqcQcHoldEntry[]>([]);
   const [bottleNames, setBottleNames] = useState<BottleNameItem[]>([]);
+  const [dayHourly, setDayHourly] = useState<QualityDayHourly>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [exporting, setExporting] = useState(false);
 
-  // Same API source the Quality Module's SQC/QC HOLD tab reads from.
+  // Same API sources the Quality Module's SQC/QC HOLD tab reads from:
+  // saved repacking entries + the hourly production rows that supply the
+  // per-machine JOB NAME list (including jobs with nothing entered yet).
   useEffect(() => {
     let active = true;
     setLoading(true);
     setLoadError('');
-    repackingRepository
-      .getRepackingData(dateIso)
-      .then(({ sqc, bottleNames: names }) => {
+    Promise.all([
+      repackingRepository.getRepackingData(dateIso),
+      qualityRepository.load(dateIso),
+    ])
+      .then(([{ sqc, bottleNames: names }, { hourly }]) => {
         if (!active) return;
         setEntries(Array.isArray(sqc) ? sqc : []);
         setBottleNames(Array.isArray(names) ? names : []);
+        setDayHourly(hourly ?? {});
         setLoading(false);
       })
       .catch((err) => {
         if (!active) return;
         console.error('Failed to load SQC/QC HOLD report data:', err);
         setEntries([]);
+        setDayHourly({});
         setLoadError('Could not load saved SQC/QC HOLD entries for this date.');
         setLoading(false);
       });
@@ -427,12 +446,50 @@ export const ProductionReportModule: React.FC = () => {
     };
   }, [dateIso]);
 
-  const bottleLookup = useMemo(
-    () => new Map(bottleNames.map((b) => [String(b.bottle_id), asText(b.bottle_name)])),
-    [bottleNames]
-  );
-  const groupedByMachine = useMemo(() => aggregateSqc(entries, bottleLookup), [entries, bottleLookup]);
-  const birdSwingByMachine = useMemo(() => aggregateBirdSwing(entries, bottleLookup), [entries, bottleLookup]);
+  // Same bottle-name sources the Quality Module uses for the JOB NAME column.
+  const bottleLookup = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const b of bottles) {
+      const id = asText(b.id);
+      if (id) map.set(id, asText(b.name));
+    }
+    for (const b of bottleNames) {
+      map.set(String(b.bottle_id), asText(b.bottle_name));
+    }
+    return map;
+  }, [bottles, bottleNames]);
+
+  const groupedByMachine = useMemo(() => {
+    const byMachine = aggregateSqc(entries, bottleLookup);
+    const jobsByMachine = productionJobNamesByMachine(dayHourly, bottleLookup);
+    for (const machineNo of MACHINE_NUMBERS) {
+      const rows = byMachine.get(machineNo)!;
+      const existing = new Set(rows.map((r) => r.jobName.toLowerCase()));
+      for (const jobName of jobsByMachine.get(machineNo) ?? []) {
+        const key = jobName.toLowerCase();
+        if (existing.has(key)) continue;
+        existing.add(key);
+        rows.push({
+          key: `zero|${machineNo}|${key}`,
+          machineNo,
+          jobName,
+          shift: 0,
+          lotNo: '',
+          pcsPerPack: 0,
+          packs: 0,
+          looseBottles: 0,
+          qty: 0,
+          reason: '',
+          cav: '',
+          sec: '',
+          remarks: '',
+          isZero: true,
+        });
+      }
+    }
+    return byMachine;
+  }, [entries, bottleLookup, dayHourly]);
+
   const holdRows = useMemo(() => collectHoldRows(entries, bottleLookup), [entries, bottleLookup]);
 
   const visibleMachines = useMemo(
@@ -488,20 +545,19 @@ export const ProductionReportModule: React.FC = () => {
       for (const machineNo of visibleMachines) {
         const rows = groupedByMachine.get(machineNo) ?? [];
         rows.forEach((row, idx) => {
-          const packs = row.packs > 0 || row.qty > 0 ? row.packs : 0;
-          const shift = row.packs > 0 || row.qty > 0 ? ROMAN_SHIFT[row.shift] || String(row.shift) : '';
+          const hasData = !row.isZero && (row.packs > 0 || row.qty > 0);
           const sheetRow = sheet.addRow([
             idx === 0 ? `M/c. ${machineNo}` : '',
             row.jobName,
-            shift,
-            row.lotNo,
-            row.pcsPerPack,
-            packs,
-            row.qty,
-            row.reason,
-            row.cav,
-            row.sec,
-            row.remarks,
+            hasData ? ROMAN_SHIFT[row.shift] || String(row.shift) : 0,
+            hasData ? row.lotNo : 0,
+            hasData ? row.pcsPerPack : 0,
+            hasData ? row.packs : 0,
+            hasData ? row.qty : 0,
+            hasData ? row.reason : '',
+            hasData ? row.cav : '',
+            hasData ? row.sec : '',
+            hasData ? row.remarks : '',
           ]);
           sheetRow.eachCell((cell: any) => {
             cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
@@ -510,15 +566,6 @@ export const ProductionReportModule: React.FC = () => {
       }
       const totalRow = sheet.addRow(['', 'Total', '', '', '', '', grandTotalQty]);
       totalRow.font = { bold: true };
-
-      sheet.addRow([]);
-      const birdHeader = sheet.addRow(['Machinewise Bird Swing Report :', '', 'Total Bottles']);
-      birdHeader.font = { bold: true };
-      for (const no of BIRD_SWING_ROWS) {
-        const m = no as MachineNo;
-        const data = visibleMachines.includes(m) ? birdSwingByMachine.get(m) : undefined;
-        sheet.addRow([no, data?.info ?? '', data?.totalBottles ?? 0]);
-      }
 
       sheet.addRow([]);
       const holdHeader = sheet.addRow(['QC HOLD :']);
@@ -693,8 +740,8 @@ export const ProductionReportModule: React.FC = () => {
             <p className="prm-status">Loading saved SQC / QC HOLD entries…</p>
           ) : loadError ? (
             <p className="prm-status prm-status--error">{loadError}</p>
-          ) : entries.length === 0 ? (
-            <p className="prm-status">No saved SQC / QC HOLD entries for {dateLabel}.</p>
+          ) : visibleGroups.length === 0 ? (
+            <p className="prm-status">No SQC / QC HOLD jobs for {dateLabel}.</p>
           ) : null}
 
           <table className="prm-grid prm-grid--sqc">
@@ -726,22 +773,23 @@ export const ProductionReportModule: React.FC = () => {
                   <React.Fragment key={`sqc-mc-${machineNo}`}>
                     {Array.from({ length: blockRows }, (_, idx) => {
                       const group = rows[idx];
-                      const hasData = !!group && (group.packs > 0 || group.qty > 0);
+                      const isZero = group?.isZero === true;
+                      const hasData = !!group && !isZero && (group.packs > 0 || group.qty > 0);
                       return (
                         <tr key={`sqc-mc-${machineNo}-row-${idx}`}>
                           {idx === 0 ? (
                             <td className="prm-mc-cell prm-mc-cell--sqc" rowSpan={blockRows}>M/c. {machineNo}</td>
                           ) : null}
                           <td className="prm-name-cell">{group?.jobName || '\u00a0'}</td>
-                          <td>{hasData ? ROMAN_SHIFT[group.shift] || String(group.shift) : '\u00a0'}</td>
-                          <td>{group?.lotNo || '\u00a0'}</td>
-                          <td>{group && group.pcsPerPack > 0 ? group.pcsPerPack : '\u00a0'}</td>
-                          <td>{group && group.packs > 0 ? group.packs : '\u00a0'}</td>
-                          <td>{group && group.qty > 0 ? group.qty : '\u00a0'}</td>
-                          <td>{group?.reason || '\u00a0'}</td>
-                          <td>{group?.cav || '\u00a0'}</td>
-                          <td>{group?.sec || '\u00a0'}</td>
-                          <td className="prm-name-cell">{group?.remarks || '\u00a0'}</td>
+                          <td>{isZero ? 0 : hasData ? ROMAN_SHIFT[group.shift] || String(group.shift) : '\u00a0'}</td>
+                          <td>{isZero ? 0 : hasData && group.lotNo ? group.lotNo : '\u00a0'}</td>
+                          <td>{isZero ? 0 : hasData && group.pcsPerPack > 0 ? group.pcsPerPack : '\u00a0'}</td>
+                          <td>{isZero ? 0 : hasData && group.packs > 0 ? group.packs : '\u00a0'}</td>
+                          <td>{isZero ? 0 : hasData && group.qty > 0 ? group.qty : '\u00a0'}</td>
+                          <td>{hasData ? group.reason || '\u00a0' : '\u00a0'}</td>
+                          <td>{hasData ? group.cav || '\u00a0' : '\u00a0'}</td>
+                          <td>{hasData ? group.sec || '\u00a0' : '\u00a0'}</td>
+                          <td className="prm-name-cell">{hasData ? group.remarks || '\u00a0' : '\u00a0'}</td>
                         </tr>
                       );
                     })}
@@ -757,31 +805,7 @@ export const ProductionReportModule: React.FC = () => {
             </tbody>
           </table>
 
-          {/* Sub-table 1 — Machinewise Bird Swing Report */}
-          <table className="prm-subtable">
-            <colgroup><col style={{ width: '10%' }} /><col style={{ width: '72%' }} /><col style={{ width: '18%' }} /></colgroup>
-            <thead>
-              <tr>
-                <th colSpan={2}>Machinewise Bird Swing Report :</th>
-                <th className="prm-subtable-center">Total Bottles</th>
-              </tr>
-            </thead>
-            <tbody>
-              {BIRD_SWING_ROWS.map((no) => {
-                const m = no as MachineNo;
-                const data = visibleMachines.includes(m) ? birdSwingByMachine.get(m) : undefined;
-                return (
-                  <tr key={`bird-swing-${no}`}>
-                    <td className="prm-subtable-center">{no}</td>
-                    <td className="prm-name-cell">{data?.info || '\u00a0'}</td>
-                    <td className="prm-subtable-num">{data?.totalBottles || 0}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          {/* Sub-table 2 — QC HOLD */}
+          {/* QC HOLD notes */}
           <table className="prm-subtable">
             <colgroup><col style={{ width: '100%' }} /></colgroup>
             <thead><tr><th>QC HOLD :</th></tr></thead>

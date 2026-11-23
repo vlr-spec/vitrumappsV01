@@ -1460,7 +1460,8 @@ const buildMachineReportModel = (
   let totalCartons = 0;
   let totalCartonsType2 = 0;
   let totalBottles = 0;
-  const effVals: number[] = [];
+  let totalActualUnits = 0;
+  let totalTargetUnits = 0;
   for (const k of orderedKeys) {
     const e = rows[k];
     const ct = parseInt(e?.cartons ?? '');
@@ -1469,12 +1470,19 @@ const buildMachineReportModel = (
     if (!isNaN(ct2)) totalCartonsType2 += ct2;
     const pieces = calcTotalBottlesInNos(e);
     if (pieces !== null) totalBottles += pieces;
-    // A zero-carton row contributes its displayed 0% to the average; every
-    // other row keeps its stored (authoritative) efficiency — unchanged.
-    const eff = ct === 0
-      ? parseFloat(calcEffForEntry(e, gobCount, durationByKey[k] ?? 1))
-      : parseFloat(String(e?.efficiency_percentage ?? ''));
-    if (!isNaN(eff)) effVals.push(eff);
+    // Day Avg / Summary is total actual production units ÷ total As-Per-Speed
+    // target units. A row contributes only when both its actual count and its
+    // speed/duration-based target are valid; a real zero actual still
+    // contributes 0 to the numerator.
+    const durationHours = durationByKey[k] ?? 1;
+    const speed = parseFloat(e?.speed_per_min ?? '');
+    const theoretical = Number.isFinite(speed) && speed > 0 && Number.isFinite(durationHours) && durationHours > 0
+      ? calculateTheoreticalBottles(speed, gobCount, durationHours)
+      : 0;
+    if (Number.isFinite(theoretical) && theoretical > 0 && pieces !== null && Number.isFinite(pieces)) {
+      totalActualUnits += pieces;
+      totalTargetUnits += theoretical;
+    }
   }
 
   return {
@@ -1492,7 +1500,7 @@ const buildMachineReportModel = (
       totalCartons,
       totalCartonsType2,
       totalBottles,
-      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
+      avgEff: totalTargetUnits > 0 ? ((totalActualUnits / totalTargetUnits) * 100).toFixed(1) : '—',
     },
   };
 };
@@ -2073,17 +2081,16 @@ const QualityTimeRow = React.memo<{
   onLayerOutChange,
   layerOutLocked = false,
 }) => {
-  const hasHold = Number(entry?.qc_hold ?? 0) > 0;
   const layerOutDisabled = !canEdit || layerOutLocked;
-  const rowBg = hasHold ? '#fff5f5' : SHIFT_ROW_BG[shiftIdx];
+  const rowBg = SHIFT_ROW_BG[shiftIdx];
   // Split-group highlight: every row carrying a split_group_id (the split
   // segment and its grouped hourly row alike) shares one subtle background. It
   // is driven by the persisted group id, so it survives save/refresh/reload
   // and disappears automatically when the split (and its group) is deleted.
-  // QC-hold red keeps priority as the alert state. Entry ID, Job ID,
-  // calculations, scheduling and all reports are untouched by this.
+  // Entry ID, Job ID, calculations, scheduling and all reports are untouched
+  // by this.
   const isSplitGrouped = !!(entry?.split_group_id ?? '').trim();
-  const baseBg = hasHold ? rowBg : isSplitGrouped ? SPLIT_GROUP_BG : isSplitRow ? '#f8fbff' : rowBg;
+  const baseBg = isSplitGrouped ? SPLIT_GROUP_BG : isSplitRow ? '#f8fbff' : rowBg;
   const rowAvg = calcRowAverage(entry, gobCount);
   // Hover states: row hover only drives the background highlight, while the
   // manual Split button is gated strictly on the Time column hover — no Split
@@ -2157,7 +2164,7 @@ const QualityTimeRow = React.memo<{
     <tr
       key={time}
       style={{ backgroundColor: baseBg }}
-      onMouseEnter={(e) => { setHovered(true); if (!hasHold) e.currentTarget.style.backgroundColor = '#ecf1ff'; }}
+      onMouseEnter={(e) => { setHovered(true); e.currentTarget.style.backgroundColor = '#ecf1ff'; }}
       onMouseLeave={(e) => { setHovered(false); e.currentTarget.style.backgroundColor = baseBg; }}
     >
       {isFirstInShift && (
@@ -3973,6 +3980,11 @@ export const QualityControlModule: React.FC = () => {
               entry_id: target?.entry_id ?? '',
               shift_id: target?.shift_id ?? hourlySlot?.shift_id ?? source.shift_id,
               split_group_id: (target?.split_group_id ?? '').trim(),
+              // QC values belong to the source hour only; a "+" extension is
+              // a new hour and must not inherit them.
+              qc_hold: 0,
+              sqc: '',
+              num: '',
               // New rows are always created unlocked, even when the row they
               // were copied from is locked.
               is_locked: false,
@@ -4015,6 +4027,11 @@ export const QualityControlModule: React.FC = () => {
             entry_id: '',
             shift_id: firstShiftId,
             split_group_id: '',
+            // QC values belong to the source hour only; a "+" extension is
+            // a new hour and must not inherit them.
+            qc_hold: 0,
+            sqc: '',
+            num: '',
             // The continuation row starts unlocked like any other new row.
             is_locked: false,
           },
@@ -4181,7 +4198,8 @@ export const QualityControlModule: React.FC = () => {
     let totalCartons = 0;
     let totalCartonsType2 = 0;
     let totalBottles = 0;
-    const effVals: number[] = [];
+    let totalActualUnits = 0;
+    let totalTargetUnits = 0;
     // SQC / QC HOLD / NUM day totals — a plain sum of the hourly values (not
     // an average). Blank, null or non-numeric values count as zero; a real 0
     // still contributes. Each displayed hourly row is counted exactly once.
@@ -4195,6 +4213,7 @@ export const QualityControlModule: React.FC = () => {
       }
       return total;
     };
+    const gobCount = gobCountFor(activeMachine);
     for (const k of displayKeys) {
       const e = activeRows[k];
       const ct = parseInt(e?.cartons ?? '');
@@ -4203,24 +4222,30 @@ export const QualityControlModule: React.FC = () => {
       if (!isNaN(ct2)) totalCartonsType2 += ct2;
       const pieces = calcTotalBottlesInNos(e);
       if (pieces !== null) totalBottles += pieces;
-      // A zero-carton row displays 0% and must contribute that 0 to the
-      // summary average. Every other row keeps using its stored
-      // (authoritative) efficiency, so their formula is unchanged.
-      const eff = ct === 0
-        ? parseFloat(calcEffFor(e, activeMachine, durationByKey[k] ?? 1))
-        : parseFloat(String(e?.efficiency_percentage ?? ''));
-      if (!isNaN(eff)) effVals.push(eff);
+      // Day Avg / Summary is total actual production units ÷ total
+      // As-Per-Speed target units. A row contributes only when both its actual
+      // count and its speed/duration-based target are valid; a real zero
+      // actual still contributes 0 to the numerator.
+      const durationHours = durationByKey[k] ?? 1;
+      const speed = parseFloat(e?.speed_per_min ?? '');
+      const theoretical = Number.isFinite(speed) && speed > 0 && Number.isFinite(durationHours) && durationHours > 0
+        ? calculateTheoreticalBottles(speed, gobCount, durationHours)
+        : 0;
+      if (Number.isFinite(theoretical) && theoretical > 0 && pieces !== null && Number.isFinite(pieces)) {
+        totalActualUnits += pieces;
+        totalTargetUnits += theoretical;
+      }
     }
     return {
       totalCartons,
       totalCartonsType2,
       totalBottles,
-      avgEff: effVals.length ? (effVals.reduce((s, v) => s + v, 0) / effVals.length).toFixed(1) : '—',
+      avgEff: totalTargetUnits > 0 ? ((totalActualUnits / totalTargetUnits) * 100).toFixed(1) : '—',
       totalSqc: sumNumericField('sqc'),
       totalQcHold: sumNumericField('qc_hold'),
       totalNum: sumNumericField('num'),
     };
-  }, [activeRows, activeMachine, calcEffFor, displayKeys, durationByKey]);
+  }, [activeRows, activeMachine, displayKeys, durationByKey, gobCountFor]);
 
   // ── Save / Export / Print ────────────────────────────────────────────────
   /**
@@ -4561,6 +4586,27 @@ export const QualityControlModule: React.FC = () => {
       ),
     [dateKey, layerOutInputs, gobCountFor],
   );
+
+  // Exact Day Avg / SUMMARY PIECES EFF% of every machine, read from the same
+  // report builder that feeds Excel/Print. The active machine uses its live
+  // on-screen summary value so the Shift Efficiency table matches that row
+  // exactly; other machines come from their own stored day model.
+  const dayAvgSummaryEffByMachine = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const machineNo of [1, 2, 3, 4]) {
+      map[machineNo] = buildMachineReportModel(
+        machineNo,
+        dateKey,
+        productionStore,
+        layerOutInputs,
+        gobCountFor(machineNo),
+      ).stats.avgEff;
+    }
+    if (activeMachine >= 1 && activeMachine <= 4) {
+      map[activeMachine] = stats.avgEff;
+    }
+    return map;
+  }, [activeMachine, dateKey, gobCountFor, layerOutInputs, productionStore, stats.avgEff]);
 
   // Excel export — ONE workbook with FOUR worksheets (Machine 1 … Machine 4),
   // in machine order. Each sheet holds only its own machine's report with the
@@ -5810,7 +5856,12 @@ export const QualityControlModule: React.FC = () => {
         </div>
         )}
 
-        {activeMachine >= 1 && activeMachine <= 4 && <QualityReport date={navDate} />}
+        {activeMachine >= 1 && activeMachine <= 4 && (
+          <QualityReport
+            date={navDate}
+            dayAvgSummaryEffByMachine={dayAvgSummaryEffByMachine}
+          />
+        )}
 
         {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
 

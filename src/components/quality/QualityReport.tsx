@@ -46,6 +46,7 @@ import {
   buildProductionTimeline,
   layerOutInputsFromSavedPeriods,
   LayerOutSlot,
+  ProductionTimeSlot,
 } from '../../utils/layerOutTimeline';
 
 // ─── Hourly HPR slots — mirrors the Quality Module's 24-slot shift mapping ──
@@ -65,6 +66,67 @@ const PRODUCTION_TIMES: { time: string; shift_id: number }[] = [
 ];
 
 const MACHINE_NOS = [1, 2, 3, 4];
+
+/** Last hourly key of each shift — the production-time boundary after it. */
+const SHIFT_END_KEYS = [1, 2, 3].map((shiftId) => {
+  const slots = PRODUCTION_TIMES.filter((pt) => pt.shift_id === shiftId);
+  return slots[slots.length - 1].time;
+});
+
+interface ProductionShiftWindow {
+  startMinutes: number;
+  endMinutes: number;
+}
+
+/**
+ * Production-time windows of the three shifts. The Production Timeline is
+ * continuous across Lehr Out boundaries and midnight, so a bottle's target
+ * minutes must be clipped against these windows instead of the Packing
+ * Timeline labels: the shift-ending row absorbs the Lehr Out difference and a
+ * carry-in row belongs to the previous day's third shift. Without this clip,
+ * Shift-II minutes can leak into Shift-I's target denominator.
+ */
+const buildProductionShiftWindows = (
+  productionSlots: Record<string, ProductionTimeSlot>
+): ProductionShiftWindow[] => {
+  const firstKey = PRODUCTION_TIMES[0]?.time ?? '';
+  let cursor = productionSlots[firstKey]?.startMinutes ?? 0;
+  return SHIFT_END_KEYS.map((key) => {
+    const slot = productionSlots[key];
+    const end = slot && Number.isFinite(slot.endMinutes) && slot.endMinutes > cursor
+      ? slot.endMinutes
+      : cursor + 480;
+    const window = { startMinutes: cursor, endMinutes: end };
+    cursor = end;
+    return window;
+  });
+};
+
+/**
+ * Actual production minutes of one slot inside one shift. Falls back to the
+ * Packing Timeline duration only when the Production Timeline is unavailable;
+ * a real (zero-width) overlap is never replaced with the fallback.
+ */
+const productionMinutesForShift = (
+  productionSlot: ProductionTimeSlot | undefined,
+  window: ProductionShiftWindow,
+  fallbackHours: number
+): number => {
+  const fallback = Number.isFinite(fallbackHours) && fallbackHours > 0 ? fallbackHours * 60 : 0;
+  if (
+    !productionSlot ||
+    !Number.isFinite(productionSlot.startMinutes) ||
+    !Number.isFinite(productionSlot.endMinutes) ||
+    productionSlot.endMinutes <= productionSlot.startMinutes ||
+    !Number.isFinite(window.startMinutes) ||
+    !Number.isFinite(window.endMinutes) ||
+    window.endMinutes <= window.startMinutes
+  ) return fallback;
+
+  const overlap = Math.min(productionSlot.endMinutes, window.endMinutes)
+    - Math.max(productionSlot.startMinutes, window.startMinutes);
+  return overlap > 0 ? overlap : 0;
+};
 
 /** Stable empty day — used while the selected date's window is not loaded yet. */
 const EMPTY_DAY: QualityDayHourly = {};
@@ -114,6 +176,19 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
 };
 
 /**
+ * ACTUAL produced bottles of one entry for the Job-wise Production Summary —
+ * mirrors the backend's _entry_units(): the stored combined "Bottles in Nos."
+ * (TYPE 1 + TYPE 2), with TYPE 1 packing size × cartons only as a legacy
+ * fallback. Never the packed-carton quantity. Used by the local fallback when
+ * the jobs endpoint is unavailable, so it stays consistent with the endpoint.
+ */
+const jobEntryUnits = (e?: QualityHourlyEntry | null): number => {
+  const stored = parseInt(e?.bottles_in_nos ?? '', 10);
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  return hourlyUnits(e);
+};
+
+/**
  * Efficiency % of one hourly production segment — production-UNITS based only.
  *
  *   Efficiency % = (Segment Actual Production Units / Segment Expected Units) × 100
@@ -134,105 +209,6 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
 };
 
 /**
- * Pieces EFF% of one hourly row — the SAME value the Hourly Production
- * Monitor's "Pieces EFF%" column shows for that row, reproduced here without
- * touching the monitor: actual bottles (packing size × cartons) ÷ the row's
- * theoretical As-Per-Speed bottles (speed/min × Machine Gob × real period
- * duration) × 100. Zero cartons is a real value and contributes a 0%; rows
- * without a bottle, packing size, cartons, speed or a valid duration return
- * null so the caller excludes them from the average — exactly the blank-cell
- * rule of the grid column. Values above 100% stay uncapped, like the grid.
- */
-const piecesEffForEntry = (
-  e: QualityHourlyEntry | undefined,
-  gobCount: number,
-  durationHours: number
-): number | null => {
-  if (!e?.bottle_id || !e.packing_size || !e.cartons) return null;
-  const packingSize = parseInt(e.packing_size, 10);
-  const cartons = parseInt(e.cartons, 10);
-  const bottlesN = packingSize * cartons;
-  if (cartons === 0 && packingSize > 0) return 0;
-  if (!Number.isFinite(durationHours) || durationHours <= 0) return null;
-  const theoretical = calculateTheoreticalBottles(
-    parseFloat(e.speed_per_min),
-    gobCount,
-    durationHours
-  );
-  if (
-    !Number.isFinite(bottlesN) || bottlesN <= 0 ||
-    !Number.isFinite(theoretical) || theoretical <= 0
-  ) return null;
-  const efficiency = (bottlesN / theoretical) * 100;
-  if (!Number.isFinite(efficiency)) return null;
-  // The grid column stores its cell as efficiency.toFixed(1) — mirror that
-  // exact value so the shift average is the average of the very entries the
-  // Hourly Production Monitor displays.
-  return parseFloat(efficiency.toFixed(1));
-};
-
-/**
- * Efficiency value contributed by one row to the Hourly Production Monitor's
- * Day Avg / Summary. Non-zero-carton rows use their stored efficiency; a
- * zero-carton row uses the same combined TYPE 1 + TYPE 2 value displayed by
- * the monitor's row efficiency cell.
- */
-const daySummaryEfficiencyForEntry = (
-  e: QualityHourlyEntry,
-  gobCount: number,
-  durationHours: number
-): number | null => {
-  if (!e.bottle_id) return null;
-
-  const cartons = parseInt(e.cartons ?? '', 10);
-  if (cartons !== 0) {
-    const stored = parseFloat(String(e.efficiency_percentage ?? ''));
-    return Number.isNaN(stored) ? null : stored;
-  }
-
-  const packagingBottles = (packSizeRaw?: string, cartonsRaw?: string): number | null => {
-    if (packSizeRaw === undefined && cartonsRaw === undefined) return null;
-    const count = parseInt(cartonsRaw ?? '', 10);
-    if (Number.isFinite(count) && count === 0) return 0;
-    const packSize = parseInt(packSizeRaw ?? '', 10);
-    return Number.isFinite(packSize) && packSize > 0 && Number.isFinite(count) && count >= 0
-      ? packSize * count
-      : null;
-  };
-
-  const type1 = packagingBottles(e.packing_size, e.cartons);
-  const type2 = packagingBottles(e.packing_size_2, e.cartons_2);
-  let actualBottles: number | null = type1 === null && type2 === null
-    ? null
-    : (type1 ?? 0) + (type2 ?? 0);
-
-  if (actualBottles === null && e.bottles_in_nos !== '') {
-    const storedBottles = parseInt(e.bottles_in_nos, 10);
-    if (Number.isFinite(storedBottles)) actualBottles = storedBottles;
-  }
-  if (actualBottles === null) {
-    const stored = parseFloat(String(e.efficiency_percentage ?? ''));
-    if (Number.isNaN(stored)) return null;
-    return stored === 0 ? 0 : parseFloat(stored.toFixed(1));
-  }
-  if (actualBottles === 0) return 0;
-  if (!Number.isFinite(durationHours) || durationHours <= 0) return null;
-
-  const theoretical = calculateTheoreticalBottles(
-    parseFloat(e.speed_per_min),
-    gobCount,
-    durationHours
-  );
-  if (
-    !Number.isFinite(actualBottles) || actualBottles <= 0 ||
-    !Number.isFinite(theoretical) || theoretical <= 0
-  ) return null;
-
-  const efficiency = (actualBottles / theoretical) * 100;
-  return Number.isFinite(efficiency) ? parseFloat(efficiency.toFixed(1)) : null;
-};
-
-/**
  * Weight Efficiency % — draw based only.
  *
  *   Weight Efficiency % = (Actual Total Draw / Total Draw as per Speed) × 100
@@ -249,16 +225,6 @@ const calcWeightEfficiency = (actualDraw: number, asPerSpeedDraw: number): numbe
   if (!Number.isFinite(actual) || !Number.isFinite(expected) || expected <= 0) return null;
   const efficiency = (actual / expected) * 100;
   return Number.isFinite(efficiency) ? efficiency : null;
-};
-
-/**
- * Simple average of the row-level efficiencies, matching the Quality grid's
- * summary calculation. Unlike a weighted actual/expected ratio, every hourly
- * segment contributes once regardless of how many minutes it ran.
- */
-const averageEfficiency = (values: number[]): number | null => {
-  if (values.length === 0) return null;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
 /**
@@ -661,9 +627,8 @@ interface MachineReportRow {
   actualDraw: number;
   shiftEff: (number | null)[];
   overallEff: number | null;
-  /** Per-hour segment efficiencies, averaged exactly like the Quality grid. */
-  shiftEffValues: number[][];
-  overallEffValues: number[];
+  /** As-Per-Speed target units of each shift, used as the efficiency denominator. */
+  shiftAsPerSpeedUnits: number[];
 }
 
 /** One machine + Job ID before name/format resolution — shared by the job
@@ -735,7 +700,7 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
       let end = i;
       while (end < points.length && entryJob(points[end].entry) === jobId) {
         if (!bottleId) bottleId = entryBottle(points[end].entry);
-        units += hourlyUnits(points[end].entry);
+        units += jobEntryUnits(points[end].entry);
         end++;
       }
       const startDate = parseSlotDate(dateKey, points[i].slot.time);
@@ -823,9 +788,11 @@ interface ShiftWiseRow {
   machineNo: number;
   /** Actual bottles of each shift — null when the shift has no records. */
   actualUnits: (number | null)[];
-  /** Efficiency % of each shift — mean of that shift's Pieces EFF% column entries; null when the shift has no valid entries. */
+  /** As-Per-Speed target bottles of each shift, used as the efficiency denominator. */
+  targetUnits: number[];
+  /** Efficiency % of each shift = actual units ÷ As-Per-Speed target units × 100. */
   efficiency: (number | null)[];
-  /** Machine efficiency for the day — the Hourly Production Monitor's Day Avg / Summary value; null when it has none. */
+  /** The machine's exact DAY AVG / SUMMARY PIECES EFF% value, or null when absent. */
   overallEff: number | null;
 }
 
@@ -838,13 +805,20 @@ interface ShiftWiseRow {
  */
 const fmtPctWhole = (n: number | null): string =>
   (n === null ? '—' : `${n.toFixed(1)}%`);
+
+/** Parse the monitor's already-formatted Day Avg / Summary PIECES EFF% value. */
+const parseSummaryEff = (value: string | undefined): number | null => {
+  const text = (value ?? '').trim();
+  if (!text || text === '—') return null;
+  const parsed = parseFloat(text);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 /**
- * Builds the Shift-Wise Efficiency Report
- — a frontend-only
- * view that reads the already-loaded hourly records of the selected date and
- * changes nothing else (no new API call, no database or backend change, no
- * shared mutable state, and no change to the Hourly Production Monitor's own
- * calculations).
+ * Builds the Shift-Wise Efficiency Report — a frontend-only view that reads
+ * the already-loaded hourly records of the selected date and changes nothing
+ * else (no new API call, no database or backend change, no shared mutable
+ * state, and no change to the Hourly Production Monitor's own row cells).
  *
  * Every meaningful hourly HPR/Quality record of the selected date is grouped
  * by machine and by the report's own shift mapping (shiftIdForReportKey —
@@ -856,33 +830,31 @@ const fmtPctWhole = (n: number | null): string =>
  *     Quality Module shows). Never theoretical/As-Per-Speed units and never
  *     draw in tons.
  *
- *   • Shift Efficiency % (Shift 1 / 2 / 3) — the AVERAGE of that shift's
- *     "Pieces EFF%" column entries from the Hourly Production Monitor: each
- *     row's own grid value (actual bottles ÷ As-Per-Speed theoretical bottles
- *     over the row's REAL timeline duration), reproduced by piecesEffForEntry.
- *     Zero-carton rows contribute their grid 0%; rows without a bottle,
- *     packing size, cartons, speed or a valid duration stay blank and are
- *     omitted from the average — exactly the grid's rules. Only that shift's
- *     entries are averaged, so a daily figure is never reused across shifts.
- *     Values above 100% stay uncapped, like the grid.
+ *   • Shift Efficiency % — the shift's summed actual bottles ÷ the shift's
+ *     summed As-Per-Speed target bottles × 100. Targets use Speed/min × Gob ×
+ *     each row's actual PRODUCTION minutes inside that shift, clipped to the
+ *     shift's Production Timeline window so carry-in/Lehr Out minutes never
+ *     leak into another shift's denominator. No efficiency value is averaged.
  *
- *   • Overall EFF% — the machine's "Day Avg / Summary" value, using the same
- *     row values and rules as the Hourly Production Monitor summary. It is
- *     never recalculated from the shift-wise averages.
+ *   • Overall EFF% — the machine's exact PIECES EFF% value from its DAY AVG /
+ *     SUMMARY row in the Hourly Production Monitor, displayed as-is (or '—'
+ *     when that machine has no summary data). Never derived from the shifts.
  *
  * Row durations come from the shared Lehr Out timeline
- * (buildLayerOutTimeline over the rows' saved period_start/period_end —
- * first-row carry-in and Lehr Out adjustments included), exactly the
- * durations the HPM's grid computes its Pieces EFF% cells with; no shift
- * length or duration is hardcoded.
+ * (buildLayerOutTimeline over the rows' saved period_start/period_end), then
+ * the Production Timeline (the same Packing Timeline shifted back by Lehr Out)
+ * is clipped to the three shift windows. Split segments, shift-ending Lehr Out
+ * differences and previous-day carry-in are therefore all counted exactly
+ * once, in the shift where production actually happened.
  *
- * A shift with no records keeps null production, and a shift with no valid
- * Pieces EFF% entry keeps null efficiency, so the caller renders '—' instead
- * of inventing values.
+ * A shift with no records keeps null production, and a column with no valid
+ * positive target keeps null efficiency, so the caller renders '—' instead of
+ * inventing values. Values above 100% stay uncapped.
  */
 const buildShiftWiseRows = (
   dayHourly: QualityDayHourly,
-  machines: { code: string; gobCount: number }[]
+  machines: { code: string; gobCount: number }[],
+  dayAvgSummaryEffByMachine?: Record<number, string>
 ): ShiftWiseRow[] => {
   const out: ShiftWiseRow[] = [];
   for (const machineNo of MACHINE_NOS) {
@@ -910,11 +882,16 @@ const buildShiftWiseRows = (
       }
     }
     const timelineSlots = buildLayerOutTimeline(ordered, perShift, carryInStartMinutes);
+    const shiftIdxByKey: Record<string, number> = {};
+    for (const key of ordered) {
+      shiftIdxByKey[key] = Math.max(0, shiftIdForReportKey(key) - 1);
+    }
+    const productionSlots = buildProductionTimeline(ordered, timelineSlots, shiftIdxByKey, perShift);
+    const shiftWindows = buildProductionShiftWindows(productionSlots);
 
     const hasRecord = [false, false, false];
     const actual = [0, 0, 0];
-    const effValues: number[][] = [[], [], []];
-    const dayAvgValues: number[] = [];
+    const target = [0, 0, 0];
 
     for (const key of ordered) {
       const entry = byTime[key];
@@ -924,38 +901,40 @@ const buildShiftWiseRows = (
       hasRecord[idx] = true;
       actual[idx] += hourlyUnits(entry);
 
-      // Row duration exactly as the HPM grid's durationByKey: the real
-      // minutes of this row's Lehr Out timeline slot (carry-in and
-      // shift-ending adjustments included), so the Pieces EFF% cell we
-      // reproduce below is the very value the monitor displays.
+      // Fallback Packing Timeline duration; the target denominator below uses
+      // the Production Timeline minutes clipped to this shift instead.
       const slot = timelineSlots[key];
       const durationHours = slot
         ? slot.durationMinutes / 60
         : durationHoursForReportKey(ordered, key, timelineSlots);
 
-      // Shift efficiency entry — this row's own "Pieces EFF%" column cell
-      // from the Hourly Production Monitor (zero cartons contributes its
-      // grid 0%; a row without a bottle, packing size, cartons, speed or a
-      // valid duration stays blank and is left out of the average).
-      const piecesEff = piecesEffForEntry(entry, gob, durationHours);
-      if (piecesEff !== null) effValues[idx].push(piecesEff);
-
-      // Use the same row contribution as the HPM Day Avg / Summary row;
-      // this overall value is not derived from shift averages.
-      const summaryEff = daySummaryEfficiencyForEntry(entry, gob, durationHours);
-      if (summaryEff !== null) dayAvgValues.push(summaryEff);
+      // As-Per-Speed target units of this row = Speed/min × Gob × the row's
+      // actual PRODUCTION minutes inside this shift. Clipping to the shift
+      // window keeps carry-in/Lehr Out minutes from leaking into another shift.
+      const shiftMinutes = productionMinutesForShift(
+        productionSlots[key],
+        shiftWindows[idx],
+        durationHours
+      );
+      const theoretical = calculateTheoreticalBottles(
+        parseFloat(entry.speed_per_min),
+        gob,
+        shiftMinutes / 60
+      );
+      if (Number.isFinite(theoretical) && theoretical > 0) target[idx] += theoretical;
     }
 
-    const shiftEff = effValues.map(averageEfficiency);
     out.push({
       machineNo,
       actualUnits: hasRecord.map((seen, i) => (seen ? actual[i] : null)),
-      efficiency: shiftEff,
-      // Overall EFF% — taken on the Day Avg / Summary rule above, directly
-      // from the row efficiencies; never a mean of the shift columns and
-      // never recalculated from production output or bottle counts. A machine
-      // with no applicable entry stays null and renders '—'.
-      overallEff: averageEfficiency(dayAvgValues),
+      targetUnits: target,
+      efficiency: hasRecord.map((seen, i) =>
+        seen ? calcUnitEfficiency(actual[i], target[i]) : null
+      ),
+      // Direct source mapping: use the exact PIECES EFF% already calculated in
+      // this machine's DAY AVG / SUMMARY row of the Hourly Production Monitor.
+      // Never derive this from the three shift columns.
+      overallEff: parseSummaryEff(dayAvgSummaryEffByMachine?.[machineNo]),
     });
   }
   return out;
@@ -967,7 +946,10 @@ const buildShiftWiseRows = (
  * single selected date owned by the Quality Module's Hourly Production Monitor
  * controls, so both sections always show the same day.
  */
-export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
+export const QualityReport: React.FC<{
+  date: Date;
+  dayAvgSummaryEffByMachine?: Record<number, string>;
+}> = ({ date, dayAvgSummaryEffByMachine }) => {
   const { machines, bottles } = useERP();
 
   // ── Packing Names ─────────────────────────────────────────────────────────
@@ -1246,8 +1228,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
       // Production Time — the Packing Timeline shifted back by the applicable
       // Lehr Out minutes (the same builder the Hourly Production Monitor uses).
-      // Used ONLY as the MIN time source below: duration, efficiency and every
-      // production quantity keep reading the Packing Timeline slots above.
+      // It supplies the row MIN and the exact production minutes used by the
+      // shift efficiency denominators. Weight/speed/draw and the displayed
+      // As-Per-Speed totals still use the Packing Timeline values below.
       const shiftIdxByKey: Record<string, number> = {};
       for (const key of orderedKeys) {
         shiftIdxByKey[key] = Math.max(0, shiftIdForReportKey(key) - 1);
@@ -1258,11 +1241,11 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         shiftIdxByKey,
         perShift,
       );
+      const shiftWindows = buildProductionShiftWindows(productionTimeSlotsByKey);
 
       for (const run of splitMachineRuns(machineNo, byTime, timelineSlotsByKey)) {
         const shiftUnits = [0, 0, 0];
-        const shiftEffValues: number[][] = [[], [], []];
-        const overallEffValues: number[] = [];
+        const shiftAsPerSpeedUnits = [0, 0, 0];
         let totalUnits = 0;
         let weightSum = 0;
         let weightHours = 0;
@@ -1278,57 +1261,26 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           const idx = slot.shift_id - 1;
           if (idx < 0 || idx > 2) continue;
 
-          // Segment's As-Per-Speed (theoretical) production — the shared
-          // formula Speed/min × 60 × Machine Gob × Duration/Hours, with this
-          // machine's own gob count and the segment's actual duration (1 for
-          // hourly rows, fractional for split segments). It is used ONLY as the
-          // expected-quantity denominator of this segment's Efficiency % below;
-          // the report's "As Per Speed" Total Units / Total Draw columns are
-          // NOT derived from it (they are computed from the displayed average
-          // Speed, Weight, Machine Gob and MIN further down).
-          const theoretical = calculateTheoreticalBottles(speed, gob, durationHours);
+          // Shift target units = Speed/min × Gob × this bottle's actual
+          // PRODUCTION minutes inside this shift. The Production Timeline slot
+          // is clipped to the shift window, so a shift-ending Lehr Out row or a
+          // previous-day carry-in cannot add another shift's minutes to this
+          // bottle's denominator. Multiple bottles on one machine therefore
+          // contribute disjoint minute slices that sum to the shift's real
+          // production minutes. The report's displayed "As Per Speed" Total
+          // Units / Total Draw columns still use the packing-time values below.
+          const shiftMinutes = productionMinutesForShift(
+            productionTimeSlotsByKey[slot.time],
+            shiftWindows[idx],
+            durationHours
+          );
+          const theoretical = calculateTheoreticalBottles(speed, gob, shiftMinutes / 60);
 
           shiftUnits[idx] += units;
           totalUnits += units;
 
-          // Per-hour segment efficiency — use the stored Pieces EFF% value from the
-          // hourly record (the same value the Hourly Production Monitor displays),
-          // as it is the authoritative source. Fall back to the existing calculation
-          // only when the stored value is not available or invalid.
-          //
-          // An entry must have a bottle assignment and valid positive production speed
-          // to be considered a valid efficiency entry (per HPM rules). Do not use
-          // hasMeaningfulData() directly — check the actual assignment fields separately.
-          const hasValidBottle = entryBottle(entry) !== '';
-          const hasValidSpeed = parseNum(entry.speed_per_min) > 0;
-
-          let pointEff: number | null = null;
-
-          // Priority 1: Use the stored efficiency_percentage (authoritative, matches HPM)
-          if (hasValidBottle) {
-            const storedEff = parseFloat(entry.efficiency_percentage ?? '');
-            if (!Number.isNaN(storedEff) && Number.isFinite(storedEff)) {
-              pointEff = storedEff;
-            }
-          }
-
-          // Priority 2: Calculate from units (fallback when stored value unavailable)
-          // Apply the same zero-cartons rules as the Hourly Production Monitor
-          if (pointEff === null && hasValidBottle) {
-            const packingSize = parseInt(entry.packing_size ?? '', 10);
-            const cartons = parseInt(entry.cartons ?? '', 10);
-            const gridUnits =
-              entryBottle(entry) && packingSize > 0 && cartons > 0 ? packingSize * cartons : 0;
-            // Include zero-percent entries when cartons = 0 but valid bottle, packing size, and speed
-            const validSpeed = parseNum(entry.speed_per_min) > 0;
-            pointEff = entryBottle(entry) && cartons === 0 && packingSize > 0 && validSpeed ? 0 :
-              (gridUnits > 0 ? calcUnitEfficiency(gridUnits, theoretical) : null);
-          }
-
-          // Include valid entries only (never add blank values)
-          if (pointEff !== null) {
-            shiftEffValues[idx].push(pointEff);
-            overallEffValues.push(pointEff);
+          if (Number.isFinite(theoretical) && theoretical > 0) {
+            shiftAsPerSpeedUnits[idx] += theoretical;
           }
 
           if (weight !== null) {
@@ -1359,12 +1311,11 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         // Actual Total Draw = Actual Total Units × Weight / 1,000,000
         const actualDraw = (weight * totalUnits) / 1_000_000;
 
-        // Efficiency % — the simple average of this run's per-hour segment
-        // efficiencies, exactly like the Quality grid's summary. A weighted
-        // actual/expected ratio would let a long segment outweigh a short one
-        // and disagree with the grid; every producing segment contributes once.
-        const shiftEff = shiftEffValues.map(averageEfficiency);
-        const overallEff = averageEfficiency(overallEffValues);
+        // Shift efficiency % = this run's actual units in the shift ÷ its
+        // As-Per-Speed target units in the shift × 100.
+        const shiftEff = shiftAsPerSpeedUnits.map((targetUnits, i) =>
+          calcUnitEfficiency(shiftUnits[i], targetUnits)
+        );
 
         // MIN — actual production runtime in minutes within the production day,
         // calculated from the run's actual start to end time using the
@@ -1420,6 +1371,10 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         const asPerSpeedUnits = displaySpeed * gob * runtimeMinutes;
         const asPerSpeedDraw = (displayWeight * asPerSpeedUnits) / 1_000_000;
 
+        // Overall efficiency % = this bottle row's total actual units ÷ its
+        // As-Per-Speed total units.
+        const overallEff = calcUnitEfficiency(totalUnits, asPerSpeedUnits);
+
         out.push({
           machineNo,
           rowKey: `${machineNo}-${run.runIndex}-${run.runKey}`,
@@ -1435,24 +1390,19 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           actualDraw,
           shiftEff,
           overallEff,
-          shiftEffValues,
-          overallEffValues,
+          shiftAsPerSpeedUnits,
         });
       }
     }
     return out;
   }, [dayHourly, machines, bottles, packingNamesFor, formatPackedName]);
 
-  // Total row — quantities above are straight sums, but Efficiency % is the
-  // simple average of every producing hourly segment's efficiency, exactly as
-  // the Quality grid's summary calculates it. It is never a weighted
-  // actual/expected ratio and never weight/draw. Collecting the per-segment
-  // values (rather than averaging each run's average) keeps a machine with two
-  // jobs weighted by its hours, just like the grid.
+  // Total row — quantities are straight sums. Every efficiency % is the ratio
+  // of summed actual units to summed As-Per-Speed target units for that column;
+  // no stored or per-segment efficiency value is averaged.
   const totals = useMemo(() => {
     const shiftUnits = [0, 0, 0];
-    const shiftEffValues: number[][] = [[], [], []];
-    const overallEffValues: number[] = [];
+    const shiftAsPerSpeedUnits = [0, 0, 0];
     let asPerSpeedUnits = 0;
     let asPerSpeedDraw = 0;
     let actualUnits = 0;
@@ -1467,13 +1417,14 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
       r.shiftUnits.forEach((u, i) => {
         shiftUnits[i] += u;
       });
-      r.shiftEffValues.forEach((values, i) => {
-        shiftEffValues[i].push(...values);
+      r.shiftAsPerSpeedUnits.forEach((targetUnits, i) => {
+        shiftAsPerSpeedUnits[i] += targetUnits;
       });
-      overallEffValues.push(...r.overallEffValues);
     }
-    const shiftEff = shiftEffValues.map(averageEfficiency);
-    const overallEff = averageEfficiency(overallEffValues);
+    const shiftEff = shiftAsPerSpeedUnits.map((targetUnits, i) =>
+      calcUnitEfficiency(shiftUnits[i], targetUnits)
+    );
+    const overallEff = calcUnitEfficiency(actualUnits, asPerSpeedUnits);
     return { shiftUnits, asPerSpeedUnits, asPerSpeedDraw, actualUnits, actualDraw, shiftEff, overallEff, runtimeMinutes };
   }, [rows]);
 
@@ -1488,33 +1439,22 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   // Shift-Wise Production & Efficiency Report — one row per machine, grouped
   // from the SAME already-loaded hourly records (dayHourly) of the selected
   // date but calculated by its own helper: actual bottles plus an independent
-  // efficiency for each machine + shift. It never reads or changes the Daily
-  // report's rows/totals above, the job-wise rows below, the API or the
-  // database, and it re-runs only when the loaded date or machine list changes.
+  // efficiency for each machine + shift. Overall EFF% is passed in directly
+  // from each machine's DAY AVG / SUMMARY PIECES EFF% value. It never reads or
+  // changes the Daily report's rows/totals above, the job-wise rows below, the
+  // API or the database.
   const shiftWiseRows = useMemo<ShiftWiseRow[]>(
-    () => buildShiftWiseRows(dayHourly, machines),
-    [dayHourly, machines]
+    () => buildShiftWiseRows(dayHourly, machines, dayAvgSummaryEffByMachine),
+    [dayHourly, machines, dayAvgSummaryEffByMachine]
   );
   // True once at least one hourly record sits behind the Shift-Wise table —
   // only used for its own "no records" note, never for a calculation.
   const hasShiftWiseData = shiftWiseRows.some((r) => r.actualUnits.some((v) => v !== null));
 
-  // Overall Efficiency per machine — taken from the Shift-Wise Production &
-  // Efficiency Report above (its own Overall EFF% column), which is the single
-  // source of truth. These values are displayed on every Daily row of the
-  // machine and on its machine-wise total row; they are never recalculated
-  // from the Daily rows, production units or draw.
-  const machineOverallEff = useMemo(() => {
-    const map = new Map<number, number | null>();
-    for (const r of shiftWiseRows) map.set(r.machineNo, r.overallEff);
-    return map;
-  }, [shiftWiseRows]);
-
   // Machine-wise totals — aggregated ONLY from the original bottle/job rows of
   // each machine (never from another total row), so the Grand Total below can
-  // keep aggregating the same original rows without double-counting. Shift
-  // efficiencies reuse the existing Daily-row aggregation; Overall Efficiency
-  // comes from the upper report via machineOverallEff.
+  // keep aggregating the same original rows without double-counting. Each
+  // efficiency % is actual units ÷ As-Per-Speed target units for that column.
   const machineTotals = useMemo(() => {
     const map = new Map<number, {
       machineNo: number;
@@ -1529,7 +1469,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
     }>();
     for (const machineNo of MACHINE_NOS) {
       const shiftUnits = [0, 0, 0];
-      const shiftEffValues: number[][] = [[], [], []];
+      const shiftAsPerSpeedUnits = [0, 0, 0];
       let asPerSpeedUnits = 0;
       let asPerSpeedDraw = 0;
       let actualUnits = 0;
@@ -1545,8 +1485,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         r.shiftUnits.forEach((u, i) => {
           shiftUnits[i] += u;
         });
-        r.shiftEffValues.forEach((values, i) => {
-          shiftEffValues[i].push(...values);
+        r.shiftAsPerSpeedUnits.forEach((targetUnits, i) => {
+          shiftAsPerSpeedUnits[i] += targetUnits;
         });
       }
       map.set(machineNo, {
@@ -1557,22 +1497,18 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
         actualUnits,
         actualDraw,
         runtimeMinutes,
-        shiftEff: shiftEffValues.map(averageEfficiency),
-        overallEff: machineOverallEff.get(machineNo) ?? null,
+        shiftEff: shiftAsPerSpeedUnits.map((targetUnits, i) =>
+          calcUnitEfficiency(shiftUnits[i], targetUnits)
+        ),
+        overallEff: calcUnitEfficiency(actualUnits, asPerSpeedUnits),
       });
     }
     return map;
-  }, [rows, machineOverallEff]);
+  }, [rows]);
 
-  // Grand Total Overall EFF% — arithmetic average of the four machine-level
-  // Overall EFF% values from the Shift-Wise report. Production-related Grand
-  // Total values still come from `totals` (original rows only).
-  const grandOverallEff = useMemo(() => {
-    const values = MACHINE_NOS
-      .map((machineNo) => machineOverallEff.get(machineNo))
-      .filter((v): v is number => v !== null && v !== undefined);
-    return averageEfficiency(values);
-  }, [machineOverallEff]);
+  // Grand Total Overall EFF% — total actual units ÷ total As-Per-Speed target
+  // units from the original rows, the same basis as the Grand Total row.
+  const grandOverallEff = totals.overallEff;
 
   // Job-wise production summary — one row per machine + Job ID applicable to
   // the selected production date: the API rows when the job endpoint answered,
@@ -1998,19 +1934,15 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
           </td>
 
           {[0, 1, 2].map((shiftIndex) => {
-            const values = shiftWiseRows
-              .map((r) => r.efficiency[shiftIndex])
-              .filter(
-                (v): v is number =>
-                  typeof v === 'number' &&
-                  Number.isFinite(v)
-              );
-
-            const average =
-              values.length > 0
-                ? values.reduce((sum, v) => sum + v, 0) /
-                  values.length
-                : null;
+            const totalActual = shiftWiseRows.reduce(
+              (sum, r) => sum + (r.actualUnits[shiftIndex] ?? 0),
+              0
+            );
+            const totalTarget = shiftWiseRows.reduce(
+              (sum, r) => sum + r.targetUnits[shiftIndex],
+              0
+            );
+            const eff = calcUnitEfficiency(totalActual, totalTarget);
 
             return (
               <td
@@ -2022,9 +1954,7 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
                   borderTop: '2px solid #93c5fd',
                 }}
               >
-                {average === null
-                  ? '—'
-                  : `${average.toFixed(1)}%`}
+                {fmtPctWhole(eff)}
               </td>
             );
           })}
@@ -2037,25 +1967,20 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
               borderTop: '2px solid #93c5fd',
             }}
           >
-            {(() => {
-              const values = shiftWiseRows
-                .map((r) => r.overallEff)
-                .filter(
-                  (v): v is number =>
-                    typeof v === 'number' &&
-                    Number.isFinite(v)
-                );
-
-              if (values.length === 0) {
-                return '—';
-              }
-
-              const average =
-                values.reduce((sum, v) => sum + v, 0) /
-                values.length;
-
-              return `${average.toFixed(1)}%`;
-            })()}
+            {fmtPctWhole(
+              calcUnitEfficiency(
+                shiftWiseRows.reduce(
+                  (sum, r) =>
+                    sum + r.actualUnits.reduce((s, v) => s + (v ?? 0), 0),
+                  0
+                ),
+                shiftWiseRows.reduce(
+                  (sum, r) =>
+                    sum + r.targetUnits.reduce((s, v) => s + v, 0),
+                  0
+                )
+              )
+            )}
           </td>
         </tr>
       </tbody>
@@ -2238,12 +2163,9 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
             </thead>
             <tbody>
               {rows.flatMap((r, idx) => {
-                // Row-wise Overall Efficiency — average of this bottle row's
-                // available Shift I/II/III efficiencies only. Missing shifts
-                // ('—' / no production) are ignored, never counted as 0%.
-                const rowOverallEff = averageEfficiency(
-                  r.shiftEff.filter((v): v is number => v !== null)
-                );
+                // Row-wise Overall Efficiency — this bottle row's total actual
+                // units ÷ its As-Per-Speed total units.
+                const rowOverallEff = r.overallEff;
                 const row = (
                   <tr
                     key={r.rowKey}
@@ -2329,8 +2251,8 @@ export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
 
               {/* Grand Total — production columns still come from the existing
                   Daily report totals (original rows only, never the machine-wise
-                  total rows); Overall EFF% is the average of the four
-                  machine-level Overall EFF% values from the upper report. */}
+                  total rows); each Efficiency % is that column's summed actual
+                  units ÷ summed As-Per-Speed target units. */}
               {!totalsHidden && (
                 <>
                 <tr

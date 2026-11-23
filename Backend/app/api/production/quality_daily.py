@@ -466,15 +466,23 @@ def _period_start_stamp(
 
 
 def _entry_units(entry: HourlyProduction) -> int:
-    """Actual bottles of one hourly row — identical to the frontend's
-    hourlyUnits(): packing size x cartons when both are positive, otherwise the
-    stored bottles-in-nos value. Never a planned or speed-based quantity."""
+    """ACTUAL produced bottles of one hourly row.
+
+    The authoritative value is ``hourly_production.bottles_in_nos`` — the
+    Quality Monitor's combined TYPE 1 + TYPE 2 "Bottles in Nos." total — so
+    "Production to Date" is a produced-units figure, never the packed-quantity
+    (TYPE 1 packing size x cartons) basis. TYPE 1 packing size x cartons is
+    kept ONLY as a fallback for legacy rows saved without a stored combined
+    total. Never a planned, speed-based or carton-only quantity.
+    """
+    bottles = entry.bottles_in_nos or 0
+    if bottles > 0:
+        return int(bottles)
     packing = entry.packing_size or 0
     cartons = entry.cartons or 0
     if packing > 0 and cartons > 0:
         return int(packing) * int(cartons)
-    bottles = entry.bottles_in_nos or 0
-    return int(bottles) if bottles > 0 else 0
+    return 0
 
 
 def _format_job_remarks(entries: List[Tuple[HourlyProduction, date]], for_date: Optional[date] = None) -> Optional[str]:
@@ -755,13 +763,18 @@ def get_daily_jobs(
     produced on the selected day; history/meta are only a fallback when the
     day rows carry no bottle.
 
-    Each row's production is that job's ACTUAL bottles accumulated from the
-    job's true start (its earliest known hourly row) through the selected
-    report date — earlier days of a still-running job keep adding up instead
-    of resetting at midnight, and a job (or bottle) change on the date splits
-    the total at the change: the previous segment stops at the change time,
-    the new segment starts from it, and the two are never combined. A segment
-    with zero actual production in its whole run is not listed at all.
+    Each row's ``production_units`` is the job's cumulative ACTUAL produced
+    bottles (``bottles_in_nos`` — TYPE 1 + TYPE 2 combined, not the packed
+    TYPE 1 carton quantity) through the selected report date. Earlier days of
+    a still-running job keep adding up instead of resetting at midnight.
+
+    Date/Time of Starting are display/reference only — they never filter,
+    cut off or prorate a shift's quantity. Every shift entry of the job is
+    summed in full. On a mid-shift job-change day the outgoing job's "Previous
+    Job Details" rows keep their own Job ID, so they are included in the
+    outgoing job's total and excluded from the new job's total. When one Job
+    ID covers several bottles, rows are separated by bottle ID so no bottle is
+    counted twice. A row with zero actual production is not listed.
 
     ``job_start_time`` is the start of the PERIOD the segment's first entry
     covers — the previous displayed key of that machine's production-timeline
@@ -884,41 +897,14 @@ def get_daily_jobs(
         if b2 is not None:
             bottles_per_job.setdefault((m2, j2), set()).add(b2)
 
-    # Cumulative-production windows, one per candidate segment. Candidates
-    # follow each machine's timeline, so a job's bottle segments are listed in
-    # the order the changes happened: the first segment runs from the job's
-    # true start, every later segment from its own first day row, and each
-    # segment ends where the next one begins — two segments (or the previous
-    # job and the new job on a change day) never double-count a bottle.
-    seg_order: Dict[Tuple[int, str], List[Optional[int]]] = {}
-    seg_day_start: Dict[Tuple[int, str, Optional[int]], Optional[datetime]] = {}
-    job_true_start: Dict[Tuple[int, str], Optional[datetime]] = {}
-    for machine_no, jid, bkey in candidates:
-        seg_order.setdefault((machine_no, jid), []).append(bkey)
-        first_phys = None
-        for day_entry in day_rows_by_jb.get((machine_no, jid, bkey), []):
-            phys = _physical_dt(query_date, day_entry.production_time)
-            if phys is not None and (first_phys is None or phys < first_phys):
-                first_phys = phys
-        seg_day_start[(machine_no, jid, bkey)] = first_phys
-    for (machine_no, jid), hist_rows in rows_by_job.items():
-        true_start = None
-        for entry, production_date in hist_rows:
-            phys = _physical_dt(production_date, entry.production_time)
-            if phys is not None and (true_start is None or phys < true_start):
-                true_start = phys
-        job_true_start[(machine_no, jid)] = true_start
-
     # 4. One row per candidate (machine, job, day-bottle). Production is the
-    #    segment's ACTUAL bottles accumulated from its window start (the job's
-    #    true start for the first segment, the segment's own start after a
-    #    bottle change) through the selected report date — a still-running job
-    #    keeps accumulating from its original start instead of resetting at
-    #    midnight; the bottle shown is the one produced that day, while
+    #    job/bottle's cumulative ACTUAL bottles through the selected report
+    #    date — a still-running job keeps accumulating instead of resetting at
+    #    midnight. The bottle shown is the one produced that day, while
     #    start/end come from the job's full history (each bottle segment's own
-    #    rows when one job id covers several bottles) so a previous job on a
-    #    job-change day still shows its true bottle, start date and time. A
-    #    segment with zero actual production in its whole run is not listed.
+    #    rows when one job id covers several bottles) for display only, so a
+    #    previous job on a job-change day still shows its true bottle, start
+    #    date and time. A row with zero actual production is not listed.
     split_cache: Dict[Tuple[datetime.date, int], List[dtime]] = {}
     built: List[Tuple[datetime, QualityJobRowSchema]] = []
     for machine_no, jid, bkey in candidates:
@@ -1002,41 +988,28 @@ def get_daily_jobs(
         # report date or a rounded hour.
         start_stamp = _period_start_stamp(db, start_stamp, machine_no, split_cache)
 
-        # Cumulative production over this segment's window of the job's full
-        # history through the selected date: the job's rows from its true
-        # start for the first segment, from this segment's own start after a
-        # bottle change, ending where the next segment begins. A job still
-        # running keeps accumulating from its original start instead of
-        # resetting at midnight; a job (or bottle) change on the date splits
-        # the total at the change time, so the previous segment and the new
-        # one are never combined.
-        segs = seg_order.get((machine_no, jid)) or [bkey]
-        try:
-            seg_idx = segs.index(bkey)
-        except ValueError:
-            seg_idx = 0
-        lower = (
-            job_true_start.get((machine_no, jid))
-            if seg_idx == 0
-            else seg_day_start.get((machine_no, jid, bkey))
-        )
-        upper = (
-            seg_day_start.get((machine_no, jid, segs[seg_idx + 1]))
-            if seg_idx + 1 < len(segs)
-            else None
-        )
+        # Cumulative production for this row's (machine, job, bottle) through
+        # the selected report date. Earlier days of a still-running job keep
+        # adding up instead of resetting at midnight.
+        #
+        # Date/Time of Starting are display/reference only: they are NEVER used
+        # to filter, cut off or prorate quantities. Every shift entry of the
+        # job is summed in full, including a mid-shift job-change day: the
+        # outgoing job's "Previous Job Details" rows carry that job's own ID,
+        # so their units land in this job's total and are naturally excluded
+        # from the new job (which has its own ID). Rows are split by bottle ID
+        # alone when one job id covers several bottles, so no bottle is counted
+        # twice.
         units = 0
-        for entry, production_date in entries:
-            phys = _physical_dt(production_date, entry.production_time)
-            if phys is None:
-                continue
-            if lower is not None and phys < lower:
-                continue
-            if upper is not None and phys >= upper:
+        for entry, _production_date in entries:
+            if bkey is None:
+                if entry.bottle_id is not None:
+                    continue
+            elif entry.bottle_id is None or int(entry.bottle_id) != bkey:
                 continue
             units += _entry_units(entry)
         if units <= 0:
-            # No actual production anywhere in this segment's run — not a
+            # No actual production anywhere in this job/bottle's run — not a
             # summary row.
             continue
 

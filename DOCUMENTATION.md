@@ -596,7 +596,7 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 - `GET /api/production/quality/daily/jobs/`
   - **Guard**: Read access to `Quality Control`
   - **Query**: `date=YYYY-MM-DD`
-  - **Response**: Job-wise summary of production and quality runs for the selected manufacturing day.
+  - **Response**: Job-wise summary of production and quality runs for the selected manufacturing day. `production_units` is each job's cumulative ACTUAL produced bottles (stored `bottles_in_nos`, TYPE 1 + TYPE 2 combined) from the job's run through the selected date — not the packed TYPE 1 carton quantity. Multi-day runs accumulate; Date/Time of Starting are display-only and never filter or prorate a shift's entries. On a mid-shift job change, the outgoing job's "Previous Job Details" units stay with that job and are excluded from the new job.
 - `POST /api/production/quality/daily/`
   - **Guard**: Edit access to `Quality Control`
   - **Body**: Complete daily report payload with shift supervisor assignments and hourly machine records. Supports optional `period_start` and `period_end` strings per hourly row (including pre-9 AM carry-in split segments), which are persisted via microsecond timestamp encoding. Auto-computes authoritative prior-day carry-in for 9:00 AM entries, preserves Job ID continuity across midnight, and accepts both TYPE 1 and TYPE 2 packaging attributes. Supports optional `lock_times` mapping (`Dict[str, List[str]]`) to atomically lock specific machine hourly rows in the same transaction as the daily save.

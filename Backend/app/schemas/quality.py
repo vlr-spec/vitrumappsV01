@@ -188,5 +188,9 @@ class QualityJobRowSchema(BaseModel):
     # each remark's text preserved exactly as entered. None/blank when the job
     # has no remarks.
     remarks: Optional[str] = None
+    # Cumulative ACTUAL produced bottles (stored bottles_in_nos — TYPE 1 +
+    # TYPE 2 combined) through the selected report date. Never the packed
+    # TYPE 1 carton quantity, and never filtered/prorated by the display-only
+    # Date/Time of Starting.
     production_units: int = 0
 

@@ -191,8 +191,10 @@ export interface QualitySaveResult {
  * One machine + Job ID row of the job-wise production summary
  * (GET /api/production/quality/daily/jobs/?date=). The backend derives the
  * start from the job's earliest hourly row inside its 9 AM production day and
- * sums the ACTUAL bottles of that Job ID from its start through the selected
- * report date — never planned or speed-based quantities.
+ * sums the ACTUAL produced bottles (stored bottles_in_nos — TYPE 1 + TYPE 2
+ * combined) of that Job ID through the selected report date — never the
+ * packed TYPE 1 carton quantity, nor planned/speed-based quantities. Date and
+ * Time of Starting are display-only and never filter the summed entries.
  */
 export interface QualityJobRow {
   machine_no: number;

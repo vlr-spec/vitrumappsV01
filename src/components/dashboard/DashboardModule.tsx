@@ -98,6 +98,19 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
   return Number.isFinite(stored) && stored > 0 ? stored : 0;
 };
 
+/**
+ * ACTUAL produced bottles of one entry for the Job-wise Production Summary —
+ * mirrors the backend's _entry_units(): the stored combined "Bottles in Nos."
+ * (TYPE 1 + TYPE 2), with TYPE 1 packing size × cartons only as a legacy
+ * fallback. Never the packed-carton quantity. Used by the local fallback when
+ * the jobs endpoint is unavailable, so it stays consistent with the endpoint.
+ */
+const jobEntryUnits = (e?: QualityHourlyEntry | null): number => {
+  const stored = parseInt(e?.bottles_in_nos ?? '', 10);
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  return hourlyUnits(e);
+};
+
 const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number | null => {
   const actual = Number(actualUnits);
   const expected = Number(expectedUnits);
@@ -471,7 +484,7 @@ const deriveJobSourcesFromDay = (dayHourly: QualityDayHourly, dateKey: string): 
       let end = i;
       while (end < points.length && entryJob(points[end].entry) === jobId) {
         if (!bottleId) bottleId = entryBottle(points[end].entry);
-        units += hourlyUnits(points[end].entry);
+        units += jobEntryUnits(points[end].entry);
         end++;
       }
       const startDate = parseSlotDate(dateKey, points[i].slot.time);
