@@ -1551,21 +1551,23 @@ const activeJobEntryTime = (rows: Record<string, QualityHourlyEntry | undefined>
 };
 
 // ── Hourly Production bottle dropdown ───────────────────────────────────────
-// One selectable bottle. `value` is the bottle id that is actually stored and
-// saved (the configured/parent bottle, so configuration mappings and saved
-// production data keep working unchanged); `label` is the name shown to the
-// operator. A parent with several mapped children lists ONE option showing
-// ONLY the child (packing) names joined with " / " — the parent's bottle_name
-// is never displayed (no duplicate bottle options); a bottle without children
-// shows its own name. `key` and `value` are both the parent id by design.
+// One selectable bottle per mapped child: each child is its own option, with
+// its own id as the saved `value` and its own name as the visible `label`. A
+// bottle with no mapped children keeps a single option showing its own id/name.
+// The configured parent id/name is kept on every child option so search still
+// matches the parent (and so the parent link is available wherever the bottle's
+// configuration needs resolving). The mapping itself is never altered here.
 interface BottleOption {
+  /** Unique option key — the option bottle's own id (child id when mapped). */
   key: string;
+  /** Bottle id saved into the hourly row (the selected child's own id when mapped). */
   value: string;
+  /** Name shown in the dropdown and the hourly row (the selected child's own name). */
   label: string;
-  /** The configured/parent bottle name — used by the search filter only. */
-  bottleName: string;
-  /** All mapped child names joined with " / " — the "Packing Name(s)"; empty when unmapped. */
-  packingName: string;
+  /** Configured/parent bottle id, retained so a child still resolves to its parent config. */
+  parentBottleId: string;
+  /** Configured/parent bottle name — matched by the search filter for child options. */
+  parentBottleName: string;
 }
 
 /**
@@ -1617,12 +1619,13 @@ const BottleSearchSelect: React.FC<{
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
-    // Searchable by both packing name and bottle name (the label already
-    // contains both, but match the parts explicitly too).
+    // Each option is one child bottle: match its own name/id AND its parent's
+    // name/id, so typing part of a parent still surfaces every child option.
     return options.filter((o) =>
       o.label.toLowerCase().includes(q) ||
-      o.bottleName.toLowerCase().includes(q) ||
-      o.packingName.toLowerCase().includes(q)
+      o.value.toLowerCase().includes(q) ||
+      o.parentBottleName.toLowerCase().includes(q) ||
+      o.parentBottleId.toLowerCase().includes(q)
     );
   }, [options, query]);
 
@@ -2007,7 +2010,7 @@ const QualityTimeRow = React.memo<{
   entry?: QualityHourlyEntry;
   gobCount: number;
   hasM: boolean;
-  /** Searchable bottle options (value = configured/parent id, label = child name). */
+  /** Searchable bottle options (one per mapped child; value = that child's id). */
   bottleOptions: BottleOption[];
   allDefectNames: string[];
   defectGroups: DefectGroup[];
@@ -2430,10 +2433,9 @@ const QualityTimeRow = React.memo<{
             ) : (
               // New-job row: the dropdown is how the job's bottle is picked.
               // The pick is confirmed first, so the previous bottle stays
-              // displayed until the user clicks Yes. `value` is the bottle id
-              // actually saved (the configured/parent bottle); the visible
-              // label is the mapped child bottle name, so configuration
-              // mappings and saved data are untouched.
+              // displayed until the user clicks Yes. Each mapped child is its
+              // own option: `value` is that child's bottle id (saved as-is) and
+              // `label` is that child's name (shown in this row).
               <BottleSearchSelect
                 value={entry?.bottle_id ?? ''}
                 options={bottleOptions}
@@ -2646,12 +2648,12 @@ export const QualityControlModule: React.FC = () => {
   const [loadingDefects, setLoadingDefects] = useState<boolean>(true);
 
   // Parent → child bottle map, read from the existing parent/child mapping API
-  // (production.bottle_master.group_id). It is used ONLY to display a child
-  // bottle's name in the Hourly Production dropdown in place of its parent's
-  // name; the parent bottle id stays the value that is saved, so configuration
-  // mappings, machine-specific configurations, production calculations and
-  // already-saved rows are all untouched. Fetched once per module mount; on
-  // failure the dropdown simply falls back to the parent's own name.
+  // (production.bottle_master.group_id). It supplies one dropdown option per
+  // mapped child (id saved, name shown) and keeps each option's parent id/name
+  // for search. The mapping/group_id data itself is never written here; the
+  // parent bottles still come from the machine's existing configuration.
+  // Fetched once per module mount; on failure the dropdown simply offers the
+  // parent's own name as before.
   const [childrenByParent, setChildrenByParent] = useState<Map<string, { id: string; name: string }[]>>(
     () => new Map()
   );
@@ -3054,45 +3056,48 @@ export const QualityControlModule: React.FC = () => {
     [getBottlesForMachine, sectionKey]
   );
 
-  // Dropdown options for the Hourly Production grid (all four machines). One
-  // option per configured bottle — never duplicated when a bottle has several
-  // mapped children. A parent with children shows ONLY the child (packing)
-  // names joined with " / " — the parent's bottle_name is NOT displayed:
-  // e.g. parent "100 ml Brute" with children "130 ml 25 mm NECK" and
-  // "140 ml 28 mm NECK" is shown as
-  // "130 ml 25 mm NECK / 140 ml 28 mm NECK"; a bottle without
-  // children shows its own name. The option VALUE stays
-  // the configured/parent bottle id, so the job identity that is saved, the
-  // configuration mapping and every production calculation are unchanged —
-  // only the visible label differs.
+  // Dropdown options for the Hourly Production grid (all four machines). Every
+  // mapped child becomes its OWN option: selecting "Child bottle 1" saves that
+  // child's bottle_id and shows that child's name in the hourly row. A bottle
+  // with no mapped children keeps a single option with its own id/name. The
+  // parent id/name ride along on each child option for search (and for any
+  // configuration lookup that still needs the parent), so the parent-child
+  // mapping, group_id and parent configuration rules stay exactly as they are.
   const bottleOptions = useMemo<BottleOption[]>(() => {
-    const opts: BottleOption[] = machineBottles.map((bottle) => {
+    const opts: BottleOption[] = [];
+    const usedIds = new Set<string>();
+    const addOption = (option: BottleOption) => {
+      if (usedIds.has(option.value)) return;
+      usedIds.add(option.value);
+      opts.push(option);
+    };
+    for (const bottle of machineBottles) {
       const children = childrenByParent.get(bottle.id) ?? [];
-      const names = [...new Set(
-        children
-          .map((child) => String(child.name ?? '').trim())
-          .filter((n) => n.length > 0)
-      )].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-      if (names.length === 0) {
-        return {
+      if (children.length === 0) {
+        addOption({
           key: bottle.id,
           value: bottle.id,
           label: bottle.name,
-          bottleName: bottle.name,
-          packingName: '',
-        };
+          parentBottleId: bottle.id,
+          parentBottleName: bottle.name,
+        });
+        continue;
       }
-      const packingJoined = names.join(' / ');
-      return {
-        key: bottle.id,
-        value: bottle.id,
-        label: packingJoined,
-        bottleName: bottle.name,
-        packingName: packingJoined,
-      };
-    });
+      for (const child of children) {
+        const childId = String(child.id ?? '').trim();
+        if (!childId) continue;
+        addOption({
+          key: childId,
+          value: childId,
+          label: String(child.name ?? '').trim() || childId,
+          parentBottleId: bottle.id,
+          parentBottleName: bottle.name,
+        });
+      }
+    }
     return opts.sort((a, b) =>
-      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' })
+      a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }) ||
+      a.value.localeCompare(b.value)
     );
   }, [machineBottles, childrenByParent]);
 
@@ -3828,21 +3833,23 @@ export const QualityControlModule: React.FC = () => {
   // Bottle name shown as plain text next to a picked bottle. Resolved from the
   // full Bottle Master list (a bottle id is machine independent), so an entry
   // whose bottle is no longer configured on this machine still shows its name.
-  // A saved entry stores the configured/parent bottle id, so the mapped child
-  // bottle name is shown instead of the parent name — the same rule the
-  // dropdown uses, which keeps existing saved rows displaying child names.
-  // A parent with several children shows the alphabetically-first child name
-  // (matching the sorted dropdown); the saved value is still the parent id.
+  // A picked child saves its own bottle_id, so every child id resolves to that
+  // child's own name. Rows saved before child-level selection stored the parent
+  // id; those keep showing the alphabetically-first child name, exactly as
+  // before, so existing saved data is unaffected.
   const bottleNameById = useMemo(() => {
     const byId = new Map<string, string>();
     for (const b of bottles) byId.set(b.id, b.name);
     for (const [parentId, children] of childrenByParent) {
-      if (children.length > 0) {
-        const first = [...children].sort((a, b) =>
-          String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
-        )[0];
-        byId.set(parentId, first.name);
+      for (const child of children) {
+        const id = String(child.id ?? '').trim();
+        const name = String(child.name ?? '').trim();
+        if (id && name) byId.set(id, name);
       }
+      const first = [...children].sort((a, b) =>
+        String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { sensitivity: 'base' })
+      )[0];
+      if (first) byId.set(parentId, first.name);
     }
     return byId;
   }, [bottles, childrenByParent]);
