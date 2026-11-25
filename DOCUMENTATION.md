@@ -579,11 +579,12 @@ Tables are mapped across three PostgreSQL schemas using SQLAlchemy models. When 
 #### Quality Defects Router (`/api/production/quality/defects`)
 - `GET /api/production/quality/defects/`
   - **Guard**: Read access to `Quality Control`
-  - **Query**: `active_only` (`true`|`false`)
+  - **Query**: `active_only` (`true`|`false`, default `true`)
   - **Response**: `[ { "defect_id", "defect_type", "defect_sr", "defect_name", "is_active" }, ... ]`
+  - All rows from the defect master for the selected active state, with no `defect_type` filter. Ordered by category priority (`Critical` → `Major` → `Minor` → `Other` → future categories), then ascending `defect_sr`.
 - `POST /api/production/quality/defects/`
   - **Guard**: Edit access to `Quality Control`
-  - **Body**: `{ "defect_type": "Critical"|"Major"|"Minor", "defect_sr", "defect_name" }`
+  - **Body**: `{ "defect_type": <category string, e.g. "Critical"|"Major"|"Minor"|"Other">, "defect_sr", "defect_name" }`
 - `PUT /api/production/quality/defects/{defect_id}`
   - **Guard**: Edit access to `Quality Control`
   - **Body**: Update fields.

@@ -6,12 +6,13 @@ import {
   RepackingSqcQcHoldEntry,
   BottleNameItem,
 } from '../../services/repackingRepository';
-import {
-  qualityRepository,
-  hasMeaningfulData,
-  QualityDayHourly,
-} from '../../services/qualityRepository';
+import { qualityRepository } from '../../services/qualityRepository';
 import { useERP } from '../../context/ERPContext';
+import {
+  groupDefectsByType,
+  styleForDefectCategory,
+  type DefectGroup,
+} from '../../utils/defectCategories';
 
 /**
  * Production Report Module — classic, print-friendly report sheets.
@@ -34,16 +35,41 @@ const RESORTING_LOG_STORAGE_KEY = 'vitrum-sqc-qc-resorting-log-v2';
 
 const ROMAN_SHIFT: Record<number, string> = { 1: 'I', 2: 'II', 3: 'III' };
 
+/** Status filter shared by every SQC / QC HOLD table on the report tab. */
+type StatusFilter = 'pending' | 'completed' | 'all';
+const STATUS_FILTER_LABEL: Record<StatusFilter, string> = {
+  pending: 'Pending',
+  completed: 'Completed',
+  all: 'All',
+};
+const STATUS_FILTER_CAPTION: Record<StatusFilter, string> = {
+  pending: 'Showing Pending entries across all dates',
+  completed: 'Showing Completed entries across all dates',
+  all: 'Showing All entries across all dates',
+};
+/** Independent pagination for each of the four SQC / QC HOLD tables. */
+const PAGE_SIZE = 20;
+type PageKey = 'sqcLog' | 'qcLog' | 'sqc' | 'qc';
+type PageState = Record<PageKey, number>;
+const INITIAL_PAGE_STATE: PageState = { sqcLog: 1, qcLog: 1, sqc: 1, qc: 1 };
+const matchesStatus = (balance: number, status: StatusFilter): boolean =>
+  status === 'all' || (status === 'pending' ? balance > 0 : balance === 0);
+const pageSlice = <T,>(rows: T[], page: number): T[] =>
+  rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+const pageTotal = (rowCount: number): number => Math.max(1, Math.ceil(rowCount / PAGE_SIZE));
+
 /**
- * Both QA-F-10 matrices share one 13-column grid definition. M/c. is a fixed
- * 54px; every other width is a fraction of the remaining space so every
- * vertical border lines up. The two detail columns (Reason/Cav. # against
+ * Both QA-F-10 matrices share one 14-column grid definition. M/c. is a fixed
+ * 54px and Date is a fixed 78px; every other width is a fraction of the
+ * remaining space so every vertical border lines up. The two detail columns (Reason/Cav. # against
  * Mould/Defects) and the three progress columns (OK Qty / Rejected / Balance)
  * occupy the same slots in both sheets, with Remarks last.
  */
 const MC_COL_WIDTH = 54;
+/** Date is always visible now because rows span multiple report dates. */
+const DATE_COL_WIDTH = 78;
 const colWidth = (fraction: number): string =>
-  `calc((100% - ${MC_COL_WIDTH}px) * ${fraction})`;
+  `calc((100% - ${MC_COL_WIDTH + DATE_COL_WIDTH}px) * ${fraction})`;
 const SHARED_COL_WIDTHS = [
   colWidth(0.14), // Bottle Name
   colWidth(0.05), // Shift
@@ -71,15 +97,6 @@ const shiftIso = (iso: string, days: number): string => {
   d.setDate(d.getDate() + days);
   return toIso(d);
 };
-/** Whole-day date arithmetic in UTC, so the 30-day lookback never drifts with
- *  daylight-saving changes or the browser's local timezone. */
-const addDaysUtc = (iso: string, days: number): string => {
-  if (!isValidIso(iso)) return iso;
-  const [y, m, d] = iso.split('-').map(Number);
-  const utc = new Date(Date.UTC(y, m - 1, d));
-  utc.setUTCDate(utc.getUTCDate() + days);
-  return `${utc.getUTCFullYear()}-${pad2(utc.getUTCMonth() + 1)}-${pad2(utc.getUTCDate())}`;
-};
 /** YYYY-MM-DD → DD.MM.YYYY (the format printed in the QA-F-10 header). */
 const toDisplayDate = (iso: string): string => {
   const [y, m, d] = iso.split('-');
@@ -93,6 +110,9 @@ const asNum = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 const asText = (v: unknown): string => (v == null ? '' : String(v).trim());
+/** Entry date for the new Date column; blank when a legacy row has no date. */
+const formatEntryDate = (iso: string): string =>
+  isValidIso(iso) ? toDisplayDate(iso) : asText(iso);
 const dedupe = (values: string[]): string => {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -153,6 +173,8 @@ interface SqcGroupRow {
   /** The report date the source entry was saved on (the batch's origin date). */
   productionDate: string;
   machineNo: MachineNo;
+  /** Actual production Job ID; keeps mid-shift job changes separate. */
+  jobId: string;
   jobName: string;
   shift: number;
   lotNo: string;
@@ -174,6 +196,8 @@ interface QcHoldGroupRow {
   /** The report date the source entry was saved on (the batch's origin date). */
   productionDate: string;
   machineNo: MachineNo;
+  /** Actual production Job ID; keeps mid-shift job changes separate. */
+  jobId: string;
   jobName: string;
   shift: number;
   /** String so a genuine lot `0` is preserved. */
@@ -199,6 +223,23 @@ interface ReportBottleRow {
   sqcGroup: SqcGroupRow;
   qcGroup: QcHoldGroupRow | undefined;
 }
+
+/**
+ * Page the combined machine rows as one list, not 20 rows per machine. The
+ * machine maps are rebuilt from the slice so rowSpans and spacers stay correct.
+ */
+const pageRowsByMachine = (
+  byMachine: Map<MachineNo, ReportBottleRow[]>,
+  page: number
+): Map<MachineNo, ReportBottleRow[]> => {
+  const allRows = MACHINE_NUMBERS.flatMap((m) => byMachine.get(m) ?? []);
+  const slice = pageSlice(allRows, page);
+  const out = new Map<MachineNo, ReportBottleRow[]>();
+  for (const m of MACHINE_NUMBERS) {
+    out.set(m, slice.filter((row) => row.sqcGroup.machineNo === m));
+  }
+  return out;
+};
 
 // ─── Resorting log — UI-only state, saved to localStorage (never to the DB) ──
 interface ResortingEntry {
@@ -242,9 +283,10 @@ const sqcBatchSourceKey = (
   machineNo: MachineNo,
   jobName: string,
   shift: number,
-  lotNo: string
+  lotNo: string,
+  jobId = ''
 ): string =>
-  `sqc|${originDate}|${machineNo}|${jobName}|${shift}|${lotNo}`;
+  `sqc|${originDate}|${machineNo}|${jobName}|${shift}|${lotNo}${jobId ? `|${jobId}` : ''}`;
 const qcBatchSourceKey = (
   originDate: string,
   machineNo: MachineNo,
@@ -252,9 +294,10 @@ const qcBatchSourceKey = (
   shift: number,
   lotNo: string,
   mould: string,
-  defects: string
+  defects: string,
+  jobId = ''
 ): string =>
-  `qc|${originDate}|${machineNo}|${jobName}|${shift}|${lotNo}|${mould}|${defects}`;
+  `qc|${originDate}|${machineNo}|${jobName}|${shift}|${lotNo}|${mould}|${defects}${jobId ? `|${jobId}` : ''}`;
 
 /** Sorting progress lives on one entry per batch, edited from the QA-F-10 row. */
 const setBatchProgress = (
@@ -385,6 +428,17 @@ const PRM_STYLES = `
 
 .prm-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
 .prm-control-group { display: flex; align-items: center; gap: 8px; }
+.prm-status-filter { margin-left: 4px; }
+.prm-status-options { display: flex; gap: 3px; padding: 3px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 9px; }
+.prm-status-option {
+  height: 27px; padding: 0 12px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: #475569; font: inherit; font-size: 12px; font-weight: 700;
+  cursor: pointer; white-space: nowrap;
+}
+.prm-status-option:hover { background: #e2e8f0; color: #1d4ed8; }
+.prm-status-option--active, .prm-status-option--active:hover {
+  background: #2563eb; border-color: #2563eb; color: #ffffff;
+}
 .prm-field-label { font-size: 11.5px; font-weight: 600; color: #475569; white-space: nowrap; }
 .prm-input, .prm-select {
   height: 32px; padding: 0 9px; border: 1px solid #cbd5e1; border-radius: 7px;
@@ -458,7 +512,7 @@ const PRM_STYLES = `
 .prm-muted-cell { color: #000000; }
 
 /* SQC / QC HOLD sheet — text-xs (12px), bold, pure black for every header and
-   data cell. Tight px-1.5 / py-1.5 padding keeps all 11 columns inside the 60%
+   data cell. Tight px-1.5 / py-1.5 padding keeps all 14 columns inside the 60%
    left pane without horizontal overflow. */
 .prm-grid--sqc { font-size: 12px; line-height: 1.2; color: #000000; }
 .prm-grid--sqc th, .prm-grid--sqc td {
@@ -535,16 +589,22 @@ const PRM_STYLES = `
 .prm-log th { background: #dce6f1; }
 .prm-log-title { padding: 8px 5px !important; font-size: 12px; letter-spacing: 0.3px; }
 .prm-log-name { text-align: left !important; padding-left: 7px !important; }
-/* Bottle name is a link back to the source report date. CSS fallbacks keep it
-   looking like plain text while letting the hover state win over .prm-log td. */
-.prm-log-name-button {
-  background: transparent; border: 0; padding: 0; font: inherit;
-  font-weight: 700; color: #000000; cursor: pointer; text-align: left;
-}
-.prm-log-name-button:hover { color: #1d4ed8; text-decoration: underline; }
 .prm-log-caption { margin-bottom: 8px; font-size: 11px; font-weight: 700; color: #000000; }
 .prm-log-stack { display: flex; flex-direction: column; gap: 14px; }
 .prm-log-section { min-width: 0; }
+
+/* ── Pagination (screen only; print always includes every filtered row) ──── */
+.prm-pager {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end;
+  gap: 6px 12px; margin-top: 6px; font-size: 11px; color: #475569;
+}
+.prm-pager button {
+  height: 26px; padding: 0 9px; border: 1px solid #cbd5e1; border-radius: 6px;
+  background: #ffffff; color: #1d4ed8; font: inherit; font-weight: 700; cursor: pointer;
+}
+.prm-pager button:hover:not(:disabled) { background: #eff6ff; }
+.prm-pager button:disabled { opacity: 0.45; cursor: not-allowed; }
+.prm-pager-count { color: #64748b; font-weight: 600; white-space: nowrap; }
 
 /* ── Signatures / distribution ───────────────────────────────────────────── */
 .prm-signatures { display: flex; justify-content: space-between; gap: 24px; margin-top: 30px; }
@@ -555,7 +615,7 @@ const PRM_STYLES = `
 @media print {
   @page { size: A4 landscape; margin: 8mm; }
   .prm-root { padding: 0 !important; max-width: none !important; margin: 0 !important; }
-  .prm-toolbar, .prm-radio, .prm-status { display: none !important; }
+  .prm-toolbar, .prm-radio, .prm-status, .prm-defect-legend, .prm-pager { display: none !important; }
   .prm-view--numbering { display: none !important; }
   .prm-view--sqc { display: block !important; }
   .prm-sheet { border: 0 !important; border-radius: 0 !important; box-shadow: none !important; padding: 0 !important; }
@@ -616,7 +676,8 @@ const aggregateSqc = (
     const pcsPerPack = asNum(entry.pcs_per_pack);
     // Date is part of the key: the 30-day lookback must keep each day's hold
     // separate instead of collapsing repeats of the same bottle into one.
-    const key = `${productionDate}|${machineNo}|${jobName.toLowerCase()}|${shift}|${lotNo.toLowerCase()}|${pcsPerPack}`;
+    const jobId = asText(entry.job_id);
+    const key = `${productionDate}|${machineNo}|${jobId.toLowerCase()}|${jobName.toLowerCase()}|${shift}|${lotNo.toLowerCase()}|${pcsPerPack}`;
 
     const rows = byMachine.get(machineNo)!;
     let group = rows.find((r) => r.key === key);
@@ -625,6 +686,7 @@ const aggregateSqc = (
         key,
         productionDate,
         machineNo,
+        jobId,
         jobName,
         shift,
         lotNo,
@@ -679,6 +741,45 @@ const blankOr = (value: string | number | null | undefined): string =>
   value === null || value === undefined || value === '' ? '' : String(value);
 
 /**
+ * Displays the same defect text used for aggregation/export, but colours each
+ * name with the category from the live defect master. `Other` (and any future
+ * category) gets the neutral tag style automatically; unknown names stay plain.
+ */
+const DefectTags: React.FC<{
+  value: string;
+  categoryByName: Map<string, string>;
+}> = ({ value, categoryByName }) => {
+  const names = value.split(',').map((n) => asText(n)).filter(Boolean);
+  if (names.length === 0) return null;
+  return (
+    <>
+      {names.map((name, idx) => {
+        const category = categoryByName.get(name.toLowerCase());
+        const s = styleForDefectCategory(category);
+        return (
+          <React.Fragment key={`${name}-${idx}`}>
+            {idx > 0 ? ', ' : null}
+            <span
+              title={category || undefined}
+              style={{
+                display: 'inline-block',
+                padding: '0 3px',
+                borderRadius: '3px',
+                backgroundColor: s.bg,
+                color: s.color,
+                border: `1px solid ${s.border}`,
+              }}
+            >
+              {name}
+            </span>
+          </React.Fragment>
+        );
+      })}
+    </>
+  );
+};
+
+/**
  * Group QC HOLD entries (Lot No. 0 with tracking details only). SQC rows with
  * a positive lot can never enter this dataset, so no entry is double-routed.
  */
@@ -700,13 +801,15 @@ const aggregateQcHolds = (
     const defects = dedupe(defectNamesOf(entry));
     const checker = asText(entry.checker_name) || asText(entry.qa_shift_ex_name);
     const remarks = asText(entry.remarks);
-    const key = `${productionDate}|${machineNo}|${jobName.toLowerCase()}|${shift}|${pcsPerPack}|${mould}|${defects.toLowerCase()}|${checker.toLowerCase()}|${remarks.toLowerCase()}`;
+    const jobId = asText(entry.job_id);
+    const key = `${productionDate}|${machineNo}|${jobId.toLowerCase()}|${jobName.toLowerCase()}|${shift}|${pcsPerPack}|${mould}|${defects.toLowerCase()}|${checker.toLowerCase()}|${remarks.toLowerCase()}`;
     let group = rows.find((row) => row.key === key);
     if (!group) {
       group = {
         key,
         productionDate,
         machineNo,
+        jobId,
         jobName,
         shift,
         lotNo,
@@ -726,126 +829,75 @@ const aggregateQcHolds = (
   return rows.filter((row) => row.qty > 0 || row.packs > 0 || !!row.defects);
 };
 
-/**
- * JOB NAMES present in the Quality Module's SQC/QC HOLD list for one date.
- * The tab derives its rows from the Hourly Production Report for that date:
- * any row carrying a bottle_id / job_id (including jobs planned but not yet
- * produced, i.e. 0 cartons and 0 bottles) counts as content — the same
- * `hasMeaningfulData` rule the Quality Module uses.
- */
-const productionJobNamesByMachine = (
-  dayHourly: QualityDayHourly,
-  lookup: Map<string, string>
-): Map<MachineNo, string[]> => {
-  const result = new Map<MachineNo, string[]>();
-  for (const m of MACHINE_NUMBERS) {
-    const names: string[] = [];
-    const byTime = dayHourly[String(m)] ?? {};
-    for (const entry of Object.values(byTime)) {
-      if (!hasMeaningfulData(entry)) continue;
-      const name = bottleNameFor(entry, lookup);
-      if (name) names.push(name);
-    }
-    result.set(m, names.filter((name, i) => names.findIndex((n) => n.toLowerCase() === name.toLowerCase()) === i));
-  }
-  return result;
-};
-
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export const ProductionReportModule: React.FC = () => {
   const { bottles } = useERP();
   const [dateIso, setDateIso] = useState<string>(() => toIso(new Date()));
   const [machineFilter, setMachineFilter] = useState<MachineFilter>('all');
-  /** Strictly the selected report date — drives both left QA-F-10 tables. */
+  /** Numbering tab still uses the CSS-only radio pair; this mirrors it for the
+   *  toolbar so date/machine controls can be hidden on the SQC tab only. */
+  const [reportMode, setReportMode] = useState<'numbering' | 'sqc'>('sqc');
+  /** Sole visibility control for every SQC / QC HOLD table. */
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending');
+  const [pages, setPages] = useState<PageState>(INITIAL_PAGE_STATE);
+  const [printAll, setPrintAll] = useState(false);
+  /** All saved SQC / QC HOLD entries across every production date. */
   const [entries, setEntries] = useState<RepackingSqcQcHoldEntry[]>([]);
-  /** selected report date − 30 days … selected report date — drives the logs. */
-  const [logEntries, setLogEntries] = useState<RepackingSqcQcHoldEntry[]>([]);
-  const [logBottleNames, setLogBottleNames] = useState<BottleNameItem[]>([]);
-  const [loadedLogDateIso, setLoadedLogDateIso] = useState('');
   const [bottleNames, setBottleNames] = useState<BottleNameItem[]>([]);
-  const [dayHourly, setDayHourly] = useState<QualityDayHourly>({});
+  const [allDataLoaded, setAllDataLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [exporting, setExporting] = useState(false);
   // Resorting log is local UI state, restored from localStorage on mount.
   const [resortingBatches, setResortingBatches] = useState<ResortingBatch[]>(loadStoredBatches);
+  /** Active defect master, grouped by database category for report breakdowns. */
+  const [defectGroups, setDefectGroups] = useState<DefectGroup[]>([]);
 
-  // Same API sources the Quality Module's SQC/QC HOLD tab reads from:
-  // saved repacking entries + the hourly production rows that supply the
-  // per-machine JOB NAME list (including jobs with nothing entered yet).
-  // The left sheets stay on the selected date; the right logs use a separate
-  // 30-day lookback through the SAME existing per-date fetcher (no backend or
-  // schema changes — the repository already caches each date it fetches).
+  useEffect(() => {
+    let active = true;
+    qualityRepository.getDefects(true)
+      .then((defects) => {
+        if (active) setDefectGroups(groupDefectsByType(defects));
+      })
+      .catch(() => {
+        // A master-list failure must not hide already-saved defect names.
+        if (active) setDefectGroups([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // The SQC / QC HOLD report is date-independent: one fetch returns every saved
+  // entry on every date. The Status Filter is now the only visibility control,
+  // so changing the Numbering tab's report date can never hide history here.
   useEffect(() => {
     let active = true;
     setLoading(true);
     setLoadError('');
-    setLoadedLogDateIso('');
+    setAllDataLoaded(false);
 
-    // One request for the selected date, shared by the left sheets and the
-    // log window so the same day is never fetched twice.
-    const selectedData = repackingRepository.getRepackingData(dateIso);
-    const selected = Promise.all([selectedData, qualityRepository.load(dateIso)]);
-    const lookbackDates: string[] = [];
-    for (let offset = 30; offset >= 0; offset -= 1) {
-      const day = addDaysUtc(dateIso, -offset);
-      if (day !== dateIso) lookbackDates.push(day);
-    }
-    // A slow/failed day must not hide the other 30 days or the left sheets.
-    const lookback = Promise.allSettled([
-      selectedData,
-      ...lookbackDates.map((day) => repackingRepository.getRepackingData(day)),
-    ]);
-
-    selected
-      .then(([{ sqc, bottleNames: names }, { hourly }]) => {
+    repackingRepository.getAllRepackingData()
+      .then(({ sqc, bottleNames: names }) => {
         if (!active) return;
         setEntries(Array.isArray(sqc) ? sqc : []);
         setBottleNames(Array.isArray(names) ? names : []);
-        setDayHourly(hourly ?? {});
+        setAllDataLoaded(true);
         setLoading(false);
       })
       .catch((err) => {
         if (!active) return;
         console.error('Failed to load SQC/QC HOLD report data:', err);
         setEntries([]);
-        setDayHourly({});
-        setLoadError('Could not load saved SQC/QC HOLD entries for this date.');
+        setLoadError('Could not load saved SQC / QC HOLD entries.');
         setLoading(false);
       });
-
-    lookback.then((results) => {
-      if (!active) return;
-      const allEntries: RepackingSqcQcHoldEntry[] = [];
-      const allNames: BottleNameItem[] = [];
-      const seenEntries = new Set<string>();
-      const seenNames = new Set<string>();
-      for (const result of results) {
-        if (result.status !== 'fulfilled') continue;
-        for (const row of result.value.sqc ?? []) {
-          const key = row.entry_id ||
-            `${row.production_date}|${row.machine_no}|${row.job_id}|${row.lot_no}|${row.shift}|${row.entry_time}`;
-          if (seenEntries.has(key)) continue;
-          seenEntries.add(key);
-          allEntries.push(row);
-        }
-        for (const name of result.value.bottleNames ?? []) {
-          const key = String(name.bottle_id);
-          if (seenNames.has(key)) continue;
-          seenNames.add(key);
-          allNames.push(name);
-        }
-      }
-      setLogEntries(allEntries);
-      setLogBottleNames(allNames);
-      setLoadedLogDateIso(dateIso);
-    });
 
     return () => {
       active = false;
     };
-  }, [dateIso]);
+  }, []);
 
   // Same bottle-name sources the Quality Module uses for the JOB NAME column.
   const bottleLookup = useMemo(() => {
@@ -860,75 +912,47 @@ export const ProductionReportModule: React.FC = () => {
     return map;
   }, [bottles, bottleNames]);
 
-  const groupedByMachine = useMemo(() => {
-    const byMachine = aggregateSqc(entries, bottleLookup);
-    const jobsByMachine = productionJobNamesByMachine(dayHourly, bottleLookup);
-    for (const machineNo of MACHINE_NUMBERS) {
-      const rows = byMachine.get(machineNo)!;
-      const existing = new Set(rows.map((r) => r.jobName.toLowerCase()));
-      for (const jobName of jobsByMachine.get(machineNo) ?? []) {
-        const key = jobName.toLowerCase();
-        if (existing.has(key)) continue;
-        existing.add(key);
-        rows.push({
-          key: `zero|${machineNo}|${key}`,
-          productionDate: dateIso,
-          machineNo,
-          jobName,
-          shift: 0,
-          lotNo: '',
-          pcsPerPack: 0,
-          packs: 0,
-          looseBottles: 0,
-          qty: 0,
-          reason: '',
-          cav: '',
-          sec: '',
-          remarks: '',
-          isZero: true,
-        });
-      }
-    }
-    return byMachine;
-  }, [entries, bottleLookup, dayHourly]);
+  // Date-independent saved entries only. Previously this added zero-quantity
+  // rows from the selected date's hourly production log; those are date-bound
+  // and would make the visible rows change with the report date.
+  const groupedByMachine = useMemo(
+    () => aggregateSqc(entries, bottleLookup),
+    [entries, bottleLookup]
+  );
 
   const qcHoldRows = useMemo(
     () => aggregateQcHolds(entries, bottleLookup),
     [entries, bottleLookup]
   );
-  const visibleQcHoldRows = useMemo(
-    () => qcHoldRows.filter((row) =>
-      machineFilter === 'all' || row.machineNo === machineFilter
-    ),
-    [qcHoldRows, machineFilter]
-  );
 
-  // ── 30-day lookback data for the two right-side resorting logs only ─────────
-  // Bottle names from every fetched date, so older holds keep their job names.
-  const logBottleLookup = useMemo(() => {
+  // Category lookup and counts come from the DB master, not from a fixed list:
+  // categories with no logged defects still appear with a zero count.
+  const defectCategoryByName = useMemo(() => {
     const map = new Map<string, string>();
-    for (const b of bottles) {
-      const id = asText(b.id);
-      if (id) map.set(id, asText(b.name));
-    }
-    for (const b of logBottleNames) {
-      map.set(String(b.bottle_id), asText(b.bottle_name));
+    for (const group of defectGroups) {
+      for (const name of group.items) map.set(name.toLowerCase(), group.group);
     }
     return map;
-  }, [bottles, logBottleNames]);
+  }, [defectGroups]);
 
-  // Same classification rules as the left sheets: Lot # > 0 → SQC,
+  const defectBreakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const group of defectGroups) counts.set(group.group, 0);
+    for (const entry of entries) {
+      for (const name of defectNamesOf(entry)) {
+        const category = defectCategoryByName.get(name.toLowerCase());
+        if (category) counts.set(category, (counts.get(category) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].map(([group, count]) => ({ group, count }));
+  }, [entries, defectGroups, defectCategoryByName]);
+
+  // ── Every-date data for the two resorting logs ────────────────────────────
+  // Same classification rules as the right-side sheets: Lot # > 0 → SQC,
   // Lot # "0" with tracking details → QC HOLD. Grouping includes the source
-  // date, so a bottle held on several days yields one batch per day.
-  const logSqcRowsByMachine = useMemo(
-    () => aggregateSqc(logEntries, logBottleLookup),
-    [logEntries, logBottleLookup]
-  );
-  const logQcHoldRows = useMemo(
-    () => aggregateQcHolds(logEntries, logBottleLookup),
-    [logEntries, logBottleLookup]
-  );
-  const lookbackStartIso = useMemo(() => addDaysUtc(dateIso, -30), [dateIso]);
+  // date and Job ID, so repeated holds on different days/jobs stay separate.
+  const logSqcRowsByMachine = groupedByMachine;
+  const logQcHoldRows = qcHoldRows;
 
   /**
    * Row-for-row definition shared by the two right-hand matrices. Every machine
@@ -944,20 +968,35 @@ export const ProductionReportModule: React.FC = () => {
       const rows: ReportBottleRow[] = sqcGroups.map((sqcGroup) => {
         const name = sqcGroup.jobName.toLowerCase();
         const qcGroup =
-          holds.find((row) => row.jobName.toLowerCase() === name && row.shift === sqcGroup.shift) ??
-          holds.find((row) => row.jobName.toLowerCase() === name);
+          holds.find((row) =>
+            row.productionDate === sqcGroup.productionDate &&
+            row.jobId === sqcGroup.jobId &&
+            row.jobName.toLowerCase() === name &&
+            row.shift === sqcGroup.shift
+          ) ??
+          holds.find((row) =>
+            row.productionDate === sqcGroup.productionDate &&
+            row.jobId === sqcGroup.jobId &&
+            row.jobName.toLowerCase() === name
+          );
         return { key: sqcGroup.key, jobName: sqcGroup.jobName, sqcGroup, qcGroup };
       });
       for (const hold of holds) {
         const name = hold.jobName.toLowerCase();
-        if (rows.some((row) => row.jobName.toLowerCase() === name)) continue;
+        if (rows.some((row) =>
+          row.sqcGroup.productionDate === hold.productionDate &&
+          row.sqcGroup.jobId === hold.jobId &&
+          row.jobName.toLowerCase() === name
+        )) continue;
+        const key = `qc-only|${machineNo}|${hold.productionDate}|${hold.jobId}|${name}`;
         rows.push({
-          key: `qc-only|${machineNo}|${name}`,
+          key,
           jobName: hold.jobName,
           sqcGroup: {
-            key: `qc-only|${machineNo}|${name}`,
+            key,
             productionDate: hold.productionDate,
             machineNo,
+            jobId: hold.jobId,
             jobName: hold.jobName,
             shift: hold.shift,
             lotNo: '',
@@ -979,21 +1018,20 @@ export const ProductionReportModule: React.FC = () => {
     return byMachine;
   }, [groupedByMachine, qcHoldRows]);
 
-  // Seed one batch per hold in the 30-day window. sourceKey includes the
-  // SOURCE production date, so revisiting any date never duplicates a batch,
-  // and saved OK/Rejected progress is reused via `known`.
+  // Seed one batch per hold across all dates. sourceKey carries the origin
+  // date and Job ID, so repeated jobs on different dates never overwrite each
+  // other and saved OK/Rejected progress is reused via `known`.
   useEffect(() => {
-    if (loading || loadError || loadedLogDateIso !== dateIso) return;
+    if (loading || loadError || !allDataLoaded) return;
     setResortingBatches((prev) => {
       const known = new Set(prev.map((batch) => batch.sourceKey));
       const additions: ResortingBatch[] = [];
       for (const [machineNo, groups] of logSqcRowsByMachine) {
         for (const group of groups) {
           if (group.isZero || group.qty <= 0) continue;
-          const originDate = group.productionDate || dateIso;
-          if (originDate < lookbackStartIso || originDate > dateIso) continue;
+          const originDate = group.productionDate || '';
           const sourceKey = sqcBatchSourceKey(
-            originDate, machineNo, group.jobName, group.shift, group.lotNo
+            originDate, machineNo, group.jobName, group.shift, group.lotNo, group.jobId
           );
           if (known.has(sourceKey)) continue;
           known.add(sourceKey);
@@ -1013,11 +1051,10 @@ export const ProductionReportModule: React.FC = () => {
         // Both logs use the calculated Qty: (Cartons × Pack Size) + Loose Bottles.
         const holdQty = group.qty;
         if (holdQty <= 0) continue;
-        const originDate = group.productionDate || dateIso;
-        if (originDate < lookbackStartIso || originDate > dateIso) continue;
+        const originDate = group.productionDate || '';
         const sourceKey = qcBatchSourceKey(
           originDate, group.machineNo, group.jobName, group.shift,
-          group.lotNo, group.mould, group.defects
+          group.lotNo, group.mould, group.defects, group.jobId
         );
         if (known.has(sourceKey)) continue;
         known.add(sourceKey);
@@ -1034,23 +1071,18 @@ export const ProductionReportModule: React.FC = () => {
       }
       return additions.length > 0 ? [...prev, ...additions] : prev;
     });
-  }, [dateIso, loadedLogDateIso, lookbackStartIso, logSqcRowsByMachine, logQcHoldRows, loading, loadError]);
+  }, [allDataLoaded, logSqcRowsByMachine, logQcHoldRows, loading, loadError]);
 
-  // Left-side pending queue: one row per unresolved batch in the 30-day window.
-  // QA-F-10 rows own all sorting progress, so Pending Qty here is simply the
-  // batch hold minus everything already sorted against it.
+  // Every hold across all dates; the Status Filter is applied below. Completed
+  // batches stay visible instead of being dropped from the resorting logs.
   const resortingRows = useMemo<ResortingLogRow[]>(() => {
     const rows: ResortingLogRow[] = [];
     for (const batch of resortingBatches) {
-      // Only the last 30 days are in scope; later dates are still pending
-      // work and may resurface when that date becomes the report date.
-      if (batch.originDate < lookbackStartIso || batch.originDate > dateIso) continue;
       const entry = batch.entries[0];
       if (!entry) continue;
       const okQty = Math.max(0, asNum(entry.okQty));
       const rejected = Math.max(0, asNum(entry.rejected));
       const balance = Math.max(0, batch.initialHold - okQty - rejected);
-      if (balance <= 0) continue;
       const displayDate = isValidIso(batch.originDate)
         ? batch.originDate
         : isValidIso(entry.date) ? entry.date : '';
@@ -1067,37 +1099,28 @@ export const ProductionReportModule: React.FC = () => {
     return rows.sort((a, b) =>
       a.date.localeCompare(b.date) || a.bottleName.localeCompare(b.bottleName)
     );
-  }, [resortingBatches, dateIso, lookbackStartIso]);
+  }, [resortingBatches]);
 
   const sqcLogRows = useMemo(
-    () => resortingRows.filter((row) => row.kind === 'sqc'),
-    [resortingRows]
+    () => resortingRows.filter((row) =>
+      row.kind === 'sqc' && matchesStatus(row.balance, statusFilter)
+    ),
+    [resortingRows, statusFilter]
   );
   const qcLogRows = useMemo(
-    () => resortingRows.filter((row) => row.kind === 'qc'),
-    [resortingRows]
+    () => resortingRows.filter((row) =>
+      row.kind === 'qc' && matchesStatus(row.balance, statusFilter)
+    ),
+    [resortingRows, statusFilter]
   );
 
-  const visibleMachines = useMemo(
-    () => (machineFilter === 'all' ? [...MACHINE_NUMBERS] : [machineFilter]),
-    [machineFilter]
-  );
-  const visibleGroups = useMemo(
-    () => visibleMachines.flatMap((m) => groupedByMachine.get(m) ?? []),
-    [visibleMachines, groupedByMachine]
-  );
-  const grandTotalQty = useMemo(
-    () => visibleGroups.reduce((sum, row) => sum + row.qty, 0),
-    [visibleGroups]
-  );
-  const qcTotalQty = useMemo(
-    () => visibleQcHoldRows.reduce((sum, row) => sum + row.qty, 0),
-    [visibleQcHoldRows]
-  );
-  const dateLabel = isValidIso(dateIso) ? toDisplayDate(dateIso) : 'DD.MM.YYYY';
+  // Machine filter belongs to the Numbering toolbar only; every SQC table now
+  // shows all machines and is filtered solely by the Status Filter.
+  const allMachines = useMemo(() => [...MACHINE_NUMBERS] as MachineNo[], []);
+  const statusLabel = STATUS_FILTER_LABEL[statusFilter];
+  const statusCaption = STATUS_FILTER_CAPTION[statusFilter];
 
-  // Inline QA-F-10 inputs and the left pending queue share the same saved batch
-  // entries. Each batch has one progress entry, edited only from its report row.
+  // Inline QA-F-10 inputs and the resorting logs share the same saved batches.
   const reportBatchBySourceKey = useMemo(
     () => new Map(resortingBatches.map((batch) => [batch.sourceKey, batch])),
     [resortingBatches]
@@ -1108,51 +1131,181 @@ export const ProductionReportModule: React.FC = () => {
     const rejected = entry?.rejected ?? 0;
     return { okQty, rejected, balance: Math.max(0, qty - okQty - rejected) };
   };
-  const reportTotals = (() => {
+
+  /** Balance of one SQC row, using the same batch key as the inline inputs. */
+  const sqcRowBalance = (sqc: SqcGroupRow): number => {
+    if (sqc.isZero || sqc.qty <= 0) return 0;
+    return reportProgressFor(
+      sqcBatchSourceKey(
+        sqc.productionDate || '', sqc.machineNo, sqc.jobName,
+        sqc.shift, sqc.lotNo, sqc.jobId
+      ),
+      sqc.qty
+    ).balance;
+  };
+  /** Balance of one QC HOLD row, using the same batch key as the inline inputs. */
+  const qcRowBalance = (hold: QcHoldGroupRow): number => {
+    if (hold.qty <= 0) return 0;
+    return reportProgressFor(
+      qcBatchSourceKey(
+        hold.productionDate || '', hold.machineNo, hold.jobName, hold.shift,
+        hold.lotNo, hold.mould, hold.defects, hold.jobId
+      ),
+      hold.qty
+    ).balance;
+  };
+
+  const sqcReportRowsByMachine = useMemo(() => {
+    const out = new Map<MachineNo, ReportBottleRow[]>();
+    for (const machineNo of MACHINE_NUMBERS) {
+      out.set(machineNo, (reportRowsByMachine.get(machineNo) ?? []).filter((row) =>
+        matchesStatus(sqcRowBalance(row.sqcGroup), statusFilter)
+      ));
+    }
+    return out;
+    // sqcRowBalance reads reportBatchBySourceKey, which is in the deps.
+  }, [reportRowsByMachine, reportBatchBySourceKey, statusFilter]);
+
+  const qcReportRowsByMachine = useMemo(() => {
+    const out = new Map<MachineNo, ReportBottleRow[]>();
+    for (const machineNo of MACHINE_NUMBERS) {
+      out.set(machineNo, (reportRowsByMachine.get(machineNo) ?? []).filter((row) =>
+        !!row.qcGroup && matchesStatus(qcRowBalance(row.qcGroup), statusFilter)
+      ));
+    }
+    return out;
+  }, [reportRowsByMachine, reportBatchBySourceKey, statusFilter]);
+
+  const sqcRowCount = useMemo(
+    () => [...sqcReportRowsByMachine.values()].reduce((sum, rows) => sum + rows.length, 0),
+    [sqcReportRowsByMachine]
+  );
+  const qcRowCount = useMemo(
+    () => [...qcReportRowsByMachine.values()].reduce((sum, rows) => sum + rows.length, 0),
+    [qcReportRowsByMachine]
+  );
+
+  const grandTotalQty = useMemo(
+    () => allMachines.reduce((sum, m) =>
+      sum + (sqcReportRowsByMachine.get(m) ?? []).reduce((s, row) => s + row.sqcGroup.qty, 0), 0),
+    [allMachines, sqcReportRowsByMachine]
+  );
+  const qcTotalQty = useMemo(
+    () => allMachines.reduce((sum, m) =>
+      sum + (qcReportRowsByMachine.get(m) ?? []).reduce((s, row) => s + (row.qcGroup?.qty ?? 0), 0), 0),
+    [allMachines, qcReportRowsByMachine]
+  );
+  const reportTotals = useMemo(() => {
     const totals = {
       sqcOk: 0, sqcRejected: 0, sqcBalance: 0,
       qcOk: 0, qcRejected: 0, qcBalance: 0,
     };
-    for (const machineNo of visibleMachines) {
-      for (const row of reportRowsByMachine.get(machineNo) ?? []) {
+    for (const machineNo of allMachines) {
+      for (const row of sqcReportRowsByMachine.get(machineNo) ?? []) {
         const sqc = row.sqcGroup;
-        if (!sqc.isZero && sqc.qty > 0) {
-          const progress = reportProgressFor(
-            sqcBatchSourceKey(
-              sqc.productionDate || dateIso,
-              sqc.machineNo,
-              sqc.jobName,
-              sqc.shift,
-              sqc.lotNo
-            ),
-            sqc.qty
-          );
-          totals.sqcOk += progress.okQty;
-          totals.sqcRejected += progress.rejected;
-          totals.sqcBalance += progress.balance;
-        }
+        if (sqc.isZero || sqc.qty <= 0) continue;
+        const progress = reportProgressFor(
+          sqcBatchSourceKey(
+            sqc.productionDate || '', sqc.machineNo, sqc.jobName,
+            sqc.shift, sqc.lotNo, sqc.jobId
+          ),
+          sqc.qty
+        );
+        totals.sqcOk += progress.okQty;
+        totals.sqcRejected += progress.rejected;
+        totals.sqcBalance += progress.balance;
+      }
+      for (const row of qcReportRowsByMachine.get(machineNo) ?? []) {
         const hold = row.qcGroup;
-        if (hold && hold.qty > 0) {
-          const progress = reportProgressFor(
-            qcBatchSourceKey(
-              hold.productionDate || dateIso,
-              hold.machineNo,
-              hold.jobName,
-              hold.shift,
-              hold.lotNo,
-              hold.mould,
-              hold.defects
-            ),
-            hold.qty
-          );
-          totals.qcOk += progress.okQty;
-          totals.qcRejected += progress.rejected;
-          totals.qcBalance += progress.balance;
-        }
+        if (!hold || hold.qty <= 0) continue;
+        const progress = reportProgressFor(
+          qcBatchSourceKey(
+            hold.productionDate || '', hold.machineNo, hold.jobName, hold.shift,
+            hold.lotNo, hold.mould, hold.defects, hold.jobId
+          ),
+          hold.qty
+        );
+        totals.qcOk += progress.okQty;
+        totals.qcRejected += progress.rejected;
+        totals.qcBalance += progress.balance;
       }
     }
     return totals;
-  })();
+  }, [allMachines, sqcReportRowsByMachine, qcReportRowsByMachine, reportBatchBySourceKey]);
+
+  // Screen pagination. `printAll` expands every table so Print PDF includes all
+  // filtered rows; Excel always uses the un-paged arrays directly.
+  const pagedSqcLogRows = printAll ? sqcLogRows : pageSlice(sqcLogRows, pages.sqcLog);
+  const pagedQcLogRows = printAll ? qcLogRows : pageSlice(qcLogRows, pages.qcLog);
+  const pagedSqcReportRowsByMachine = useMemo(
+    () => (printAll ? sqcReportRowsByMachine : pageRowsByMachine(sqcReportRowsByMachine, pages.sqc)),
+    [sqcReportRowsByMachine, pages.sqc, printAll]
+  );
+  const pagedQcReportRowsByMachine = useMemo(
+    () => (printAll ? qcReportRowsByMachine : pageRowsByMachine(qcReportRowsByMachine, pages.qc)),
+    [qcReportRowsByMachine, pages.qc, printAll]
+  );
+
+  // Keep pages in range when loaded data changes underneath an open view.
+  useEffect(() => {
+    setPages((prev) => {
+      const next: PageState = {
+        sqcLog: Math.min(prev.sqcLog, pageTotal(sqcLogRows.length)),
+        qcLog: Math.min(prev.qcLog, pageTotal(qcLogRows.length)),
+        sqc: Math.min(prev.sqc, pageTotal(sqcRowCount)),
+        qc: Math.min(prev.qc, pageTotal(qcRowCount)),
+      };
+      return (next.sqcLog === prev.sqcLog && next.qcLog === prev.qcLog &&
+        next.sqc === prev.sqc && next.qc === prev.qc) ? prev : next;
+    });
+  }, [sqcLogRows.length, qcLogRows.length, sqcRowCount, qcRowCount]);
+
+  /** Status is the only visibility control; changing it restarts every table. */
+  const handleStatusFilterChange = (value: StatusFilter) => {
+    setStatusFilter(value);
+    setPages(INITIAL_PAGE_STATE);
+  };
+
+  /** Expand all four tables before printing so Print PDF ignores pagination. */
+  const handlePrint = () => {
+    if (printAll) {
+      window.print();
+      return;
+    }
+    setPrintAll(true);
+    requestAnimationFrame(() => {
+      window.print();
+      setPrintAll(false);
+    });
+  };
+
+  const renderPager = (key: PageKey, rowCount: number) => {
+    if (rowCount <= PAGE_SIZE) return null;
+    const page = pages[key];
+    const total = pageTotal(rowCount);
+    const start = (page - 1) * PAGE_SIZE + 1;
+    const end = Math.min(page * PAGE_SIZE, rowCount);
+    return (
+      <div className="prm-pager" aria-label={`${key} pagination`}>
+        <button
+          type="button"
+          disabled={page <= 1}
+          onClick={() => setPages((prev) => ({ ...prev, [key]: Math.max(1, prev[key] - 1) }))}
+        >
+          &lt; Prev
+        </button>
+        <span>Page {page} of {total}</span>
+        <button
+          type="button"
+          disabled={page >= total}
+          onClick={() => setPages((prev) => ({ ...prev, [key]: Math.min(total, prev[key] + 1) }))}
+        >
+          Next &gt;
+        </button>
+        <span className="prm-pager-count">Showing {start}–{end} of {rowCount}</span>
+      </div>
+    );
+  };
 
   const updateReportProgress = (
     kind: 'sqc' | 'qc',
@@ -1180,7 +1333,7 @@ export const ProductionReportModule: React.FC = () => {
           item.id === batch.id ? setBatchProgress(item, hold, nextOk, nextRejected) : item
         );
       }
-      const start = originDate || dateIso;
+      const start = originDate || '';
       return [...prev, {
         id: logId('batch'),
         kind,
@@ -1240,14 +1393,16 @@ export const ProductionReportModule: React.FC = () => {
       };
       const excelText = (value: string | number | null | undefined): string =>
         value === null || value === undefined ? '' : String(value);
+      const excelNumber = (value: number): number | '' => (value > 0 ? value : '');
 
+      // Logs are exported in full — never the current page only.
       const addLogTable = (sheet: any, title: string, rows: ResortingLogRow[]) => {
         sheet.addRow([]);
         const caption = sheet.addRow([title]);
         caption.font = { bold: true, size: 12, name: 'Times New Roman', color: { argb: 'FF000000' } };
         styleHeader(sheet.addRow(['Date', 'Bottle Name', 'Pending Qty']));
         if (rows.length === 0) {
-          sheet.addRow(['', 'No pending balances to resort.']);
+          sheet.addRow(['', 'No balances for the selected status.']);
           return;
         }
         for (const row of rows) {
@@ -1255,28 +1410,26 @@ export const ProductionReportModule: React.FC = () => {
         }
       };
 
-      const excelNumber = (value: number): number | '' => (value > 0 ? value : '');
-
       // ── Sheet 1: SQC report + SQC resorting log ──────────────────────────
       const sqcSheet = workbook.addWorksheet('SQC');
-      sqcSheet.mergeCells('A1:L1');
+      sqcSheet.mergeCells('A1:M1');
       sqcSheet.getCell('A1').value = 'REPORT OF NON CONFORMING MATERIALS (SQC)';
       sqcSheet.getCell('A1').font = { bold: true, size: 14, name: 'Times New Roman' };
       sqcSheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
-      sqcSheet.getCell('M1').value = 'QA-F-10';
-      sqcSheet.getCell('M1').font = { ...tableFont };
+      sqcSheet.getCell('N1').value = 'QA-F-10';
+      sqcSheet.getCell('N1').font = { ...tableFont };
 
-      sqcSheet.mergeCells('A2:L2');
-      sqcSheet.getCell('A2').value = 'Material kept aside for Resorting. ( SQC).';
-      sqcSheet.getCell('M2').value = dateLabel;
-      sqcSheet.getCell('M2').font = { ...tableFont };
+      sqcSheet.mergeCells('A2:M2');
+      sqcSheet.getCell('A2').value = `Material kept aside for Resorting. ( SQC). ${statusCaption}`;
+      sqcSheet.getCell('N2').value = statusLabel;
+      sqcSheet.getCell('N2').font = { ...tableFont };
 
       styleHeader(sqcSheet.addRow([
-        'M/c.', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack', 'Packs', 'Qty',
+        'M/c.', 'Date', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack', 'Packs', 'Qty',
         'Reason', 'Cav.', 'OK Qty', 'Rejected', 'Balance', 'Remarks',
       ]));
-      for (const machineNo of visibleMachines) {
-        const rows = reportRowsByMachine.get(machineNo) ?? [];
+      for (const machineNo of allMachines) {
+        const rows = sqcReportRowsByMachine.get(machineNo) ?? [];
         if (rows.length === 0) continue;
         rows.forEach(({ sqcGroup: row }, idx) => {
           const hasData = !row.isZero && (row.packs > 0 || row.qty > 0);
@@ -1284,17 +1437,15 @@ export const ProductionReportModule: React.FC = () => {
           const progress = isActive
             ? reportProgressFor(
                 sqcBatchSourceKey(
-                  row.productionDate || dateIso,
-                  row.machineNo,
-                  row.jobName,
-                  row.shift,
-                  row.lotNo
+                  row.productionDate || '', row.machineNo, row.jobName,
+                  row.shift, row.lotNo, row.jobId
                 ),
                 row.qty
               )
             : { okQty: 0, rejected: 0, balance: 0 };
           styleData(sqcSheet.addRow([
             idx === 0 ? `M/c. ${machineNo}` : '',
+            formatEntryDate(row.productionDate),
             row.jobName,
             hasData && row.shift ? ROMAN_SHIFT[row.shift] || String(row.shift) : '',
             hasData ? excelText(row.lotNo) : '',
@@ -1312,10 +1463,10 @@ export const ProductionReportModule: React.FC = () => {
         const spacer = sqcSheet.addRow([]);
         spacer.height = 9;
         spacer.getCell(1).border = { left: { style: 'thin' }, right: { style: 'thin' } };
-        spacer.getCell(13).border = { left: { style: 'thin' }, right: { style: 'thin' } };
+        spacer.getCell(14).border = { left: { style: 'thin' }, right: { style: 'thin' } };
       }
       styleData(sqcSheet.addRow([
-        '', 'Total', '', '', '', '', excelNumber(grandTotalQty),
+        '', '', 'Total', '', '', '', '', excelNumber(grandTotalQty),
         '', '',
         excelNumber(reportTotals.sqcOk),
         excelNumber(reportTotals.sqcRejected),
@@ -1324,61 +1475,56 @@ export const ProductionReportModule: React.FC = () => {
       ]));
       addLogTable(sqcSheet, 'SQC - RESORTING LOG', sqcLogRows);
       sqcSheet.columns = [
-        { width: 8 }, { width: 22 }, { width: 8 }, { width: 11 }, { width: 11 },
-        { width: 9 }, { width: 10 }, { width: 24 }, { width: 11 },
+        { width: 8 }, { width: 12 }, { width: 22 }, { width: 8 }, { width: 11 },
+        { width: 11 }, { width: 9 }, { width: 10 }, { width: 24 }, { width: 11 },
         { width: 10 }, { width: 10 }, { width: 10 }, { width: 22 },
       ];
 
       // ── Sheet 2: QC HOLD report + QC resorting log ───────────────────────
       const qcSheet = workbook.addWorksheet('QC HOLD');
-      // Same title / code and subtitle / date metadata layout as the on-screen sheet.
-      qcSheet.mergeCells('A1:L1');
+      qcSheet.mergeCells('A1:M1');
       qcSheet.getCell('A1').value = 'REPORT OF QC HOLD MATERIALS (QC HOLD)';
       qcSheet.getCell('A1').font = { bold: true, size: 14, name: 'Times New Roman' };
       qcSheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
-      qcSheet.getCell('M1').value = 'QA-F-10';
-      qcSheet.getCell('M1').font = { ...tableFont };
+      qcSheet.getCell('N1').value = 'QA-F-10';
+      qcSheet.getCell('N1').font = { ...tableFont };
 
-      qcSheet.mergeCells('A2:L2');
-      qcSheet.getCell('A2').value = 'Material kept aside for QC Hold. (QC HOLD).';
+      qcSheet.mergeCells('A2:M2');
+      qcSheet.getCell('A2').value = `Material kept aside for QC Hold. (QC HOLD). ${statusCaption}`;
       qcSheet.getCell('A2').font = { ...tableFont };
-      qcSheet.getCell('M2').value = dateLabel;
-      qcSheet.getCell('M2').font = { ...tableFont };
+      qcSheet.getCell('N2').value = statusLabel;
+      qcSheet.getCell('N2').font = { ...tableFont };
 
       styleHeader(qcSheet.addRow([
-        'M/c.', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack', 'Packs', 'Qty',
+        'M/c.', 'Date', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack', 'Packs', 'Qty',
         'Mould', 'Defects', 'OK Qty', 'Rejected', 'Balance', 'Remarks',
       ]));
-      for (const machineNo of visibleMachines) {
-        // Identical machine-to-bottle rows as the SQC sheet above.
-        const rows = reportRowsByMachine.get(machineNo) ?? [];
+      for (const machineNo of allMachines) {
+        const rows = qcReportRowsByMachine.get(machineNo) ?? [];
         if (rows.length === 0) continue;
-        rows.forEach(({ jobName, qcGroup: hold }, idx) => {
-          const isActive = !!hold && hold.qty > 0;
-          const progress = isActive && hold
+        rows.forEach(({ qcGroup: hold }, idx) => {
+          if (!hold) return;
+          const isActive = hold.qty > 0;
+          const progress = isActive
             ? reportProgressFor(
                 qcBatchSourceKey(
-                  hold.productionDate || dateIso,
-                  hold.machineNo,
-                  hold.jobName,
-                  hold.shift,
-                  hold.lotNo,
-                  hold.mould,
-                  hold.defects
+                  hold.productionDate || '', hold.machineNo, hold.jobName, hold.shift,
+                  hold.lotNo, hold.mould, hold.defects, hold.jobId
                 ),
                 hold.qty
               )
             : { okQty: 0, rejected: 0, balance: 0 };
           styleData(qcSheet.addRow([
             idx === 0 ? `M/c. ${machineNo}` : '',
-            jobName,
-            hold?.shift ? ROMAN_SHIFT[hold.shift] || String(hold.shift) : '',
-            hold ? excelText(hold.lotNo) : '',
-            hold && hold.pcsPerPack > 0 ? hold.pcsPerPack : '',
-            hold && hold.packs > 0 ? hold.packs : '',
-            hold ? excelNumber(hold.qty) : '',
-            hold ? excelText(hold.mould) : '',
-            hold ? excelText(hold.defects) : '',
+            formatEntryDate(hold.productionDate),
+            hold.jobName,
+            hold.shift ? ROMAN_SHIFT[hold.shift] || String(hold.shift) : '',
+            excelText(hold.lotNo),
+            hold.pcsPerPack > 0 ? hold.pcsPerPack : '',
+            hold.packs > 0 ? hold.packs : '',
+            excelNumber(hold.qty),
+            excelText(hold.mould),
+            excelText(hold.defects),
             isActive ? excelNumber(progress.okQty) : '',
             isActive ? excelNumber(progress.rejected) : '',
             isActive ? excelNumber(progress.balance) : '',
@@ -1388,10 +1534,10 @@ export const ProductionReportModule: React.FC = () => {
         const spacer = qcSheet.addRow([]);
         spacer.height = 9;
         spacer.getCell(1).border = { left: { style: 'thin' }, right: { style: 'thin' } };
-        spacer.getCell(13).border = { left: { style: 'thin' }, right: { style: 'thin' } };
+        spacer.getCell(14).border = { left: { style: 'thin' }, right: { style: 'thin' } };
       }
       styleData(qcSheet.addRow([
-        '', 'Total', '', '', '', '', excelNumber(qcTotalQty),
+        '', '', 'Total', '', '', '', '', excelNumber(qcTotalQty),
         '', '',
         excelNumber(reportTotals.qcOk),
         excelNumber(reportTotals.qcRejected),
@@ -1400,7 +1546,7 @@ export const ProductionReportModule: React.FC = () => {
       ]));
       // Note is a bordered row attached directly to the bottom of the table.
       const qcNoteRowNumber = qcSheet.rowCount + 1;
-      qcSheet.mergeCells(`A${qcNoteRowNumber}:M${qcNoteRowNumber}`);
+      qcSheet.mergeCells(`A${qcNoteRowNumber}:N${qcNoteRowNumber}`);
       const qcNoteCell = qcSheet.getCell(`A${qcNoteRowNumber}`);
       qcNoteCell.value = 'Note : Amber colour of the bottle is within specification.';
       qcNoteCell.font = { ...tableFont };
@@ -1410,8 +1556,8 @@ export const ProductionReportModule: React.FC = () => {
       };
       addLogTable(qcSheet, 'QC HOLD - RESORTING LOG', qcLogRows);
       qcSheet.columns = [
-        { width: 8 }, { width: 22 }, { width: 8 }, { width: 11 }, { width: 11 },
-        { width: 9 }, { width: 10 }, { width: 10 }, { width: 22 },
+        { width: 8 }, { width: 12 }, { width: 22 }, { width: 8 }, { width: 11 },
+        { width: 11 }, { width: 9 }, { width: 10 }, { width: 10 }, { width: 22 },
         { width: 10 }, { width: 10 }, { width: 10 }, { width: 22 },
       ];
       const buffer = await workbook.xlsx.writeBuffer();
@@ -1421,7 +1567,7 @@ export const ProductionReportModule: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `SQC_QC_Hold_Report_${dateLabel}.xlsx`;
+      a.download = `SQC_QC_Hold_Report_${statusFilter}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1433,13 +1579,11 @@ export const ProductionReportModule: React.FC = () => {
     }
   };
 
-  const renderResortingLog = (kind: 'sqc' | 'qc', title: string, emptyText: string) => {
-    const rows = kind === 'sqc' ? sqcLogRows : qcLogRows;
+  const renderResortingLog = (kind: 'sqc' | 'qc', title: string) => {
+    const rows = kind === 'sqc' ? pagedSqcLogRows : pagedQcLogRows;
+    const rowCount = kind === 'sqc' ? sqcLogRows.length : qcLogRows.length;
     const displayDate = (row: ResortingLogRow): string =>
-      isValidIso(row.date) ? toDisplayDate(row.date) : row.date || 'its source date';
-    const openReportDate = (row: ResortingLogRow) => {
-      if (isValidIso(row.date)) setDateIso(row.date);
-    };
+      isValidIso(row.date) ? toDisplayDate(row.date) : row.date || '—';
 
     return (
       <section className="prm-log-section" aria-label={title}>
@@ -1455,28 +1599,19 @@ export const ProductionReportModule: React.FC = () => {
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={3}>{emptyText}</td></tr>
+              <tr><td colSpan={3}>No balances for the selected status.</td></tr>
             ) : (
               rows.map((row) => (
                 <tr key={row.id}>
                   <td>{displayDate(row)}</td>
-                  <td className="prm-log-name">
-                    <button
-                      type="button"
-                      className="prm-log-name-button cursor-pointer font-bold text-black hover:text-blue-700 hover:underline"
-                      title={`Click to view report details on ${displayDate(row)}`}
-                      aria-label={`View ${row.bottleName} report details on ${displayDate(row)}`}
-                      onClick={() => openReportDate(row)}
-                    >
-                      {row.bottleName}
-                    </button>
-                  </td>
+                  <td className="prm-log-name">{row.bottleName}</td>
                   <td>{row.balance}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
+        {renderPager(kind === 'sqc' ? 'sqcLog' : 'qcLog', rowCount)}
       </section>
     );
   };
@@ -1486,8 +1621,22 @@ export const ProductionReportModule: React.FC = () => {
       <style>{PRM_STYLES}</style>
       <Toaster position="bottom-right" richColors />
 
-      <input className="prm-radio" type="radio" name="prm-report-view" id="prm-tab-numbering" />
-      <input className="prm-radio" type="radio" name="prm-report-view" id="prm-tab-sqc" defaultChecked />
+      <input
+        className="prm-radio"
+        type="radio"
+        name="prm-report-view"
+        id="prm-tab-numbering"
+        checked={reportMode === 'numbering'}
+        onChange={() => setReportMode('numbering')}
+      />
+      <input
+        className="prm-radio"
+        type="radio"
+        name="prm-report-view"
+        id="prm-tab-sqc"
+        checked={reportMode === 'sqc'}
+        onChange={() => setReportMode('sqc')}
+      />
 
       {/* ── Top control & filter bar ─────────────────────────────────────── */}
       <div className="prm-toolbar">
@@ -1500,45 +1649,66 @@ export const ProductionReportModule: React.FC = () => {
           </label>
         </div>
 
-        <div className="prm-controls">
-          <div className="prm-control-group">
-            <label className="prm-field-label" htmlFor="prm-report-date">Report Date</label>
-            <input
-              className="prm-input"
-              id="prm-report-date"
-              type="date"
-              value={dateIso}
-              onChange={(e) => {
-                if (isValidIso(e.target.value)) setDateIso(e.target.value);
-              }}
-            />
-          </div>
-          <div className="prm-control-group">
-            <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, -1))}>
-              &lt; Previous Day
-            </button>
-            <button className="prm-day-btn" type="button" onClick={() => setDateIso(toIso(new Date()))}>
-              Today
-            </button>
-            <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, 1))}>
-              Next Day &gt;
-            </button>
-          </div>
-          <div className="prm-control-group">
-            <label className="prm-field-label" htmlFor="prm-machine">Machine</label>
-            <select
-              className="prm-select"
-              id="prm-machine"
-              value={machineFilter}
-              onChange={(e) => setMachineFilter(e.target.value as MachineFilter)}
-            >
-              <option value="all">All Machines</option>
-              {MACHINE_NUMBERS.map((m) => (
-                <option key={m} value={m}>Machine {m}</option>
+        {reportMode === 'sqc' && (
+          <div className="prm-control-group prm-status-filter">
+            <span className="prm-field-label" id="prm-status-filter-label">Status Filter</span>
+            <div className="prm-status-options" role="group" aria-labelledby="prm-status-filter-label">
+              {(['pending', 'completed', 'all'] as StatusFilter[]).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`prm-status-option${statusFilter === value ? ' prm-status-option--active' : ''}`}
+                  aria-pressed={statusFilter === value}
+                  onClick={() => handleStatusFilterChange(value)}
+                >
+                  {STATUS_FILTER_LABEL[value]}
+                </button>
               ))}
-            </select>
+            </div>
           </div>
-        </div>
+        )}
+
+        {reportMode === 'numbering' && (
+          <div className="prm-controls">
+            <div className="prm-control-group">
+              <label className="prm-field-label" htmlFor="prm-report-date">Report Date</label>
+              <input
+                className="prm-input"
+                id="prm-report-date"
+                type="date"
+                value={dateIso}
+                onChange={(e) => {
+                  if (isValidIso(e.target.value)) setDateIso(e.target.value);
+                }}
+              />
+            </div>
+            <div className="prm-control-group">
+              <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, -1))}>
+                &lt; Previous Day
+              </button>
+              <button className="prm-day-btn" type="button" onClick={() => setDateIso(toIso(new Date()))}>
+                Today
+              </button>
+              <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, 1))}>
+                Next Day &gt;
+              </button>
+            </div>
+            <div className="prm-control-group">
+              <label className="prm-field-label" htmlFor="prm-machine">Machine</label>
+              <select
+                className="prm-select"
+                id="prm-machine"
+                value={machineFilter}
+                onChange={(e) => setMachineFilter(e.target.value as MachineFilter)}
+              >
+                <option value="all">All Machines</option>
+                {MACHINE_NUMBERS.map((m) => (
+                  <option key={m} value={m}>Machine {m}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
         <div className="prm-actions">
           <button
@@ -1551,7 +1721,7 @@ export const ProductionReportModule: React.FC = () => {
           <button className="prm-action-btn prm-action-btn--primary" type="button" onClick={handleExport} disabled={exporting}>
             <Download /> {exporting ? 'Exporting…' : 'Export Excel'}
           </button>
-          <button className="prm-action-btn prm-action-btn--outline" type="button" onClick={() => window.print()}>
+          <button className="prm-action-btn prm-action-btn--outline" type="button" onClick={handlePrint}>
             <Printer /> Print PDF
           </button>
         </div>
@@ -1626,31 +1796,28 @@ export const ProductionReportModule: React.FC = () => {
       {/* ── Layout 2 : SQC + QC HOLD matrices and their resorting logs ────── */}
       <div className="prm-view prm-view--sqc">
         <div className="prm-sheet">
+          <div className="prm-sheet-caption">
+            <span>{statusCaption}</span>
+            <span className="prm-sheet-caption-date">Status : {statusLabel}</span>
+          </div>
+
           {loading ? (
             <p className="prm-status">Loading saved SQC / QC HOLD entries…</p>
           ) : loadError ? (
             <p className="prm-status prm-status--error">{loadError}</p>
-          ) : visibleGroups.length === 0 && visibleQcHoldRows.length === 0 ? (
-            <p className="prm-status">No SQC / QC HOLD jobs for {dateLabel}.</p>
+          ) : sqcRowCount === 0 && qcRowCount === 0 && sqcLogRows.length === 0 && qcLogRows.length === 0 ? (
+            <p className="prm-status">No SQC / QC HOLD entries for the selected status.</p>
           ) : null}
 
           <div className="prm-report-split flex flex-col lg:flex-row gap-4 items-start">
             {/* ── Left 40% : two independent, carry-forward resorting logs ── */}
             <div className="prm-report-right w-full lg:w-[40%] min-w-0">
               <div className="prm-log-caption">
-                Sorted against the report as on {dateLabel} · only pending balances carry forward
+                {statusCaption} · balances carry forward across all dates
               </div>
               <div className="prm-log-stack">
-                {renderResortingLog(
-                  'sqc',
-                  'SQC - RESORTING LOG',
-                  'No pending SQC balances to resort for this date.'
-                )}
-                {renderResortingLog(
-                  'qc',
-                  'QC HOLD - RESORTING LOG',
-                  'No pending QC HOLD balances to resort for this date.'
-                )}
+                {renderResortingLog('sqc', 'SQC - RESORTING LOG')}
+                {renderResortingLog('qc', 'QC HOLD - RESORTING LOG')}
               </div>
             </div>
 
@@ -1660,6 +1827,7 @@ export const ProductionReportModule: React.FC = () => {
               <table className="prm-grid prm-grid--sqc table-fixed w-full text-xs">
                 <colgroup>
                   <col style={{ width: MC_COL_WIDTH, minWidth: MC_COL_WIDTH, maxWidth: MC_COL_WIDTH }} />
+                  <col style={{ width: DATE_COL_WIDTH, minWidth: DATE_COL_WIDTH, maxWidth: DATE_COL_WIDTH }} />
                   {SHARED_COL_WIDTHS.map((width, i) => (
                     <col key={`sqc-shared-${i}`} style={{ width }} />
                   ))}
@@ -1673,22 +1841,24 @@ export const ProductionReportModule: React.FC = () => {
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="prm-grid-title" colSpan={12}>REPORT OF NON CONFORMING MATERIALS (SQC)</th>
+                    <th className="prm-grid-title" colSpan={14}>REPORT OF NON CONFORMING MATERIALS (SQC)</th>
                     <th className="prm-grid-code">QA-F-10</th>
                   </tr>
                   <tr>
-                    <th className="prm-grid-subtitle" colSpan={12}>Material kept aside for Resorting. ( SQC).</th>
-                    <th>{dateLabel}</th>
+                    <th className="prm-grid-subtitle" colSpan={14}>
+                      Material kept aside for Resorting. ( SQC). {statusCaption}
+                    </th>
+                    <th>{statusLabel}</th>
                   </tr>
                   <tr className="prm-grid-group">
-                    <th className={MC_CELL_CLASS}>M/c.</th><th>Bottle Name</th><th>Shift</th><th>Lot</th>
+                    <th className={MC_CELL_CLASS}>M/c.</th><th>Date</th><th>Bottle Name</th><th>Shift</th><th>Lot</th>
                     <th>Pcs / Pack</th><th>Packs</th><th>Qty</th><th>Reason</th><th>Cav.</th>
                     <th>OK Qty</th><th>Rejected</th><th>Balance</th><th>Remarks</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleMachines.map((machineNo) => {
-                    const rows = reportRowsByMachine.get(machineNo) ?? [];
+                  {allMachines.map((machineNo) => {
+                    const rows = pagedSqcReportRowsByMachine.get(machineNo) ?? [];
                     if (rows.length === 0) return null;
                     return (
                       <React.Fragment key={`sqc-mc-${machineNo}`}>
@@ -1696,11 +1866,11 @@ export const ProductionReportModule: React.FC = () => {
                           const group = row.sqcGroup;
                           const hasData = !group.isZero && (group.packs > 0 || group.qty > 0);
                           const active = hasData && group.qty > 0;
-                          const originDate = group.productionDate || dateIso;
+                          const originDate = group.productionDate || '';
                           const sourceKey = active
                             ? sqcBatchSourceKey(
                                 originDate, group.machineNo, group.jobName,
-                                group.shift, group.lotNo
+                                group.shift, group.lotNo, group.jobId
                               )
                             : '';
                           const progress = active
@@ -1711,13 +1881,18 @@ export const ProductionReportModule: React.FC = () => {
                               {idx === 0 ? (
                                 <td className={MC_CELL_CLASS} rowSpan={rows.length}>M/c. {machineNo}</td>
                               ) : null}
+                              <td>{formatEntryDate(group.productionDate)}</td>
                               <td className="prm-name-cell">{group.jobName || ''}</td>
                               <td>{hasData && group.shift ? ROMAN_SHIFT[group.shift] || String(group.shift) : ''}</td>
                               <td>{hasData ? blankOr(group.lotNo) : ''}</td>
                               <td>{hasData && group.pcsPerPack > 0 ? group.pcsPerPack : ''}</td>
                               <td>{hasData && group.packs > 0 ? group.packs : ''}</td>
                               <td>{hasData && group.qty > 0 ? group.qty : ''}</td>
-                              <td>{hasData ? group.reason || '' : ''}</td>
+                              <td>
+                                {hasData
+                                  ? <DefectTags value={group.reason} categoryByName={defectCategoryByName} />
+                                  : ''}
+                              </td>
                               <td>{hasData ? group.cav || '' : ''}</td>
                               <td className="prm-progress-cell">
                                 {active ? (
@@ -1753,13 +1928,13 @@ export const ProductionReportModule: React.FC = () => {
                           );
                         })}
                         <tr className="prm-mc-spacer" key={`sqc-mc-${machineNo}-spacer`}>
-                          <td colSpan={13}>&nbsp;</td>
+                          <td colSpan={14}>&nbsp;</td>
                         </tr>
                       </React.Fragment>
                     );
                   })}
                   <tr className="prm-total-row">
-                    <td className="prm-name-cell" colSpan={2}>Total</td>
+                    <td className="prm-name-cell" colSpan={3}>Total</td>
                     <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
                     <td>{grandTotalQty > 0 ? grandTotalQty : ''}</td>
                     <td colSpan={2}>&nbsp;</td>
@@ -1770,12 +1945,46 @@ export const ProductionReportModule: React.FC = () => {
                   </tr>
                 </tbody>
               </table>
+              {renderPager('sqc', sqcRowCount)}
+
+              {/* Live category breakdown: driven entirely by active master rows,
+                  so `Other` and future categories appear automatically. */}
+              {defectBreakdown.length > 0 && (
+                <div
+                  className="prm-defect-legend"
+                  style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px', margin: '0 0 6px' }}
+                >
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#334155' }}>
+                    Defect categories logged:
+                  </span>
+                  {defectBreakdown.map(({ group, count }) => {
+                    const s = styleForDefectCategory(group);
+                    return (
+                      <span
+                        key={group}
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 600,
+                          padding: '1px 5px',
+                          borderRadius: '3px',
+                          backgroundColor: s.bg,
+                          color: s.color,
+                          border: `1px solid ${s.border}`,
+                        }}
+                      >
+                        {group} · {count}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* BOTTOM TABLE — QC HOLD inspection lines. Same grid treatment
                   as the SQC sheet above (steel-blue headers, black borders). */}
               <table className="prm-grid prm-grid--sqc table-fixed w-full text-xs">
                 <colgroup>
                   <col style={{ width: MC_COL_WIDTH, minWidth: MC_COL_WIDTH, maxWidth: MC_COL_WIDTH }} />
+                  <col style={{ width: DATE_COL_WIDTH, minWidth: DATE_COL_WIDTH, maxWidth: DATE_COL_WIDTH }} />
                   {SHARED_COL_WIDTHS.map((width, i) => (
                     <col key={`qc-shared-${i}`} style={{ width }} />
                   ))}
@@ -1789,20 +1998,20 @@ export const ProductionReportModule: React.FC = () => {
                 </colgroup>
                 <thead>
                   <tr>
-                    <th className="prm-grid-title bg-[#dce6f1] text-black font-bold border-black" colSpan={12}>
+                    <th className="prm-grid-title bg-[#dce6f1] text-black font-bold border-black" colSpan={14}>
                       REPORT OF QC HOLD MATERIALS (QC HOLD)
                     </th>
                     <th className="prm-grid-code bg-[#dce6f1] text-black font-bold border-black">QA-F-10</th>
                   </tr>
                   <tr>
-                    <th className="prm-grid-subtitle bg-[#dce6f1] text-black font-bold border-black" colSpan={12}>
-                      Material kept aside for QC Hold. (QC HOLD).
+                    <th className="prm-grid-subtitle bg-[#dce6f1] text-black font-bold border-black" colSpan={14}>
+                      Material kept aside for QC Hold. (QC HOLD). {statusCaption}
                     </th>
-                    <th className="bg-[#dce6f1] text-black font-bold border-black">{dateLabel}</th>
+                    <th className="bg-[#dce6f1] text-black font-bold border-black">{statusLabel}</th>
                   </tr>
                   <tr className="prm-grid-group">
                     {[
-                      'M/c.', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack',
+                      'M/c.', 'Date', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack',
                       'Packs', 'Qty', 'Mould', 'Defects',
                       'OK Qty', 'Rejected', 'Balance', 'Remarks',
                     ].map((label) => (
@@ -1816,20 +2025,20 @@ export const ProductionReportModule: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleMachines.map((machineNo) => {
+                  {allMachines.map((machineNo) => {
                     // Same machine-to-bottle rows, same rowSpan, same spacers as
                     // the SQC sheet above — only the detail cells differ.
-                    const rows = reportRowsByMachine.get(machineNo) ?? [];
+                    const rows = pagedQcReportRowsByMachine.get(machineNo) ?? [];
                     if (rows.length === 0) return null;
                     return (
                       <React.Fragment key={`qc-mc-${machineNo}`}>
                         {rows.map(({ jobName, qcGroup: hold }, idx) => {
                           const active = !!hold && hold.qty > 0;
-                          const originDate = hold?.productionDate || dateIso;
+                          const originDate = hold?.productionDate || '';
                           const sourceKey = active && hold
                             ? qcBatchSourceKey(
                                 originDate, hold.machineNo, hold.jobName, hold.shift,
-                                hold.lotNo, hold.mould, hold.defects
+                                hold.lotNo, hold.mould, hold.defects, hold.jobId
                               )
                             : '';
                           const progress = active && hold
@@ -1840,6 +2049,7 @@ export const ProductionReportModule: React.FC = () => {
                               {idx === 0 ? (
                                 <td className={MC_CELL_CLASS} rowSpan={rows.length}>M/c. {machineNo}</td>
                               ) : null}
+                              <td>{formatEntryDate(hold?.productionDate ?? '')}</td>
                               <td className="prm-name-cell">{jobName}</td>
                               <td>{hold?.shift ? ROMAN_SHIFT[hold.shift] || String(hold.shift) : ''}</td>
                               <td>{hold ? blankOr(hold.lotNo) : ''}</td>
@@ -1847,7 +2057,11 @@ export const ProductionReportModule: React.FC = () => {
                               <td>{hold && hold.packs > 0 ? hold.packs : ''}</td>
                               <td>{hold && hold.qty > 0 ? hold.qty : ''}</td>
                               <td>{hold ? blankOr(hold.mould) : ''}</td>
-                              <td>{hold ? blankOr(hold.defects) : ''}</td>
+                              <td>
+                                {hold
+                                  ? <DefectTags value={blankOr(hold.defects)} categoryByName={defectCategoryByName} />
+                                  : ''}
+                              </td>
                               <td className="prm-progress-cell">
                                 {active && hold ? (
                                   <input
@@ -1882,13 +2096,13 @@ export const ProductionReportModule: React.FC = () => {
                           );
                         })}
                         <tr className="prm-mc-spacer" key={`qc-mc-${machineNo}-spacer`}>
-                          <td colSpan={13}>&nbsp;</td>
+                          <td colSpan={14}>&nbsp;</td>
                         </tr>
                       </React.Fragment>
                     );
                   })}
                   <tr className="prm-total-row">
-                    <td className="prm-name-cell" colSpan={2}>Total</td>
+                    <td className="prm-name-cell" colSpan={3}>Total</td>
                     <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
                     <td>{qcTotalQty > 0 ? qcTotalQty : ''}</td>
                     <td colSpan={2}>&nbsp;</td>
@@ -1898,12 +2112,13 @@ export const ProductionReportModule: React.FC = () => {
                     <td />
                   </tr>
                   <tr className="prm-note-row border border-t-0 border-black">
-                    <td colSpan={13} className="border border-t-0 border-black px-3 py-2 font-bold text-black">
+                    <td colSpan={14} className="border border-t-0 border-black px-3 py-2 font-bold text-black">
                       Note : Amber colour of the bottle is within specification.
                     </td>
                   </tr>
                 </tbody>
               </table>
+              {renderPager('qc', qcRowCount)}
               <div className="prm-signatures">
                 <div className="prm-signature">Q.A. Executive</div>
                 <div className="prm-signature">HOD QA</div>

@@ -641,6 +641,27 @@ def _sqc_select(where_clause: str = "") -> str:
     """
 
 
+# Aliases used by the two SELECT builders above. The alias is an SQL identifier,
+# so it cannot be a bind parameter; callers pass it explicitly and it is checked
+# against this whitelist instead of rewriting entire SQL strings.
+_SELECT_ALIASES = frozenset({"n", "s"})
+
+
+def _where_clause(conditions: List[str], alias: str) -> str:
+    """Build a WHERE clause for one SELECT builder.
+
+    ``conditions`` are templates containing ``{alias}`` (for example
+    ``"{alias}.production_date = :p_date"``). Rendering them with the requested
+    alias keeps each filter on the correct table without a string-wide replace
+    that could also rewrite similarly named columns. Values stay bound via
+    ``text(...)`` parameters as before.
+    """
+    if alias not in _SELECT_ALIASES:
+        raise ValueError(f"Unknown SELECT alias {alias!r}; expected 'n' or 's'")
+    rendered = [condition.format(alias=alias) for condition in conditions]
+    return f"WHERE {' AND '.join(rendered)}" if rendered else ""
+
+
 def _numbering_group_entry_ids(db: Session, entry_id: int) -> List[int]:
     """All ``entry_id``s that belong to the same logical entry as ``entry_id``.
 
@@ -658,7 +679,10 @@ def _numbering_group_entry_ids(db: Session, entry_id: int) -> List[int]:
         return []
 
     results = db.execute(
-        text(_numbering_select("WHERE n.production_date = :p_date AND n.machine_no = :m_no")),
+        text(_numbering_select(_where_clause([
+            "{alias}.production_date = :p_date",
+            "{alias}.machine_no = :m_no",
+        ], "n"))),
         {"p_date": base["production_date"], "m_no": base["machine_no"]},
     ).mappings().all()
 
@@ -680,7 +704,10 @@ def _sqc_group_entry_ids(db: Session, entry_id: int) -> List[int]:
         return []
 
     results = db.execute(
-        text(_sqc_select("WHERE s.production_date = :p_date AND s.machine_no = :m_no")),
+        text(_sqc_select(_where_clause([
+            "{alias}.production_date = :p_date",
+            "{alias}.machine_no = :m_no",
+        ], "s"))),
         {"p_date": base["production_date"], "m_no": base["machine_no"]},
     ).mappings().all()
 
@@ -766,21 +793,26 @@ def get_repacking_data(
     response so the UI can display bottle names for production rows too without
     an extra API call or any bottle-name column in the repacking tables.
     """
-    conditions = []
+    # One set of filter templates rendered once per SELECT builder with its own
+    # alias: `n` for numbering, `s` for SQC/QC HOLD. The same bound params are
+    # used by both queries.
+    condition_templates: List[str] = []
     params = {}
 
     if production_date:
         try:
             parsed_date = datetime.strptime(production_date.strip(), "%Y-%m-%d").date()
-            conditions.append("n.production_date = :p_date")
+            condition_templates.append("{alias}.production_date = :p_date")
             params["p_date"] = parsed_date
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    numbering_results = db.execute(text(_numbering_select(where_clause)), params).mappings().all()
-    sqc_results = db.execute(text(_sqc_select(where_clause)), params).mappings().all()
+    numbering_results = db.execute(
+        text(_numbering_select(_where_clause(condition_templates, "n"))), params
+    ).mappings().all()
+    sqc_results = db.execute(
+        text(_sqc_select(_where_clause(condition_templates, "s"))), params
+    ).mappings().all()
 
     # Display-only lookup straight from production.bottle_master. Keyed by the
     # same bottle_id stored on both repacking tables and on hourly_production,
@@ -818,28 +850,28 @@ def get_numbering_entries(
     _user: AuthUser = Depends(require_module_read(MODULE_QUALITY_CONTROL)),
 ):
     """Fetch numbering entries from sqc.repacking_numbering with optional filters."""
-    conditions = []
+    condition_templates: List[str] = []
     params = {}
 
     if production_date:
         try:
             parsed_date = datetime.strptime(production_date.strip(), "%Y-%m-%d").date()
-            conditions.append("n.production_date = :p_date")
+            condition_templates.append("{alias}.production_date = :p_date")
             params["p_date"] = parsed_date
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
 
     if machine_no is not None:
-        conditions.append("n.machine_no = :machine_no")
+        condition_templates.append("{alias}.machine_no = :machine_no")
         params["machine_no"] = machine_no
 
     if job_id:
-        conditions.append("n.job_id = :job_id")
+        condition_templates.append("{alias}.job_id = :job_id")
         params["job_id"] = job_id.strip()
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    results = db.execute(text(_numbering_select(where_clause)), params).mappings().all()
+    results = db.execute(
+        text(_numbering_select(_where_clause(condition_templates, "n"))), params
+    ).mappings().all()
     return _group_numbering_rows(results)
 
 
@@ -1059,28 +1091,28 @@ def get_sqc_qc_hold_entries(
     _user: AuthUser = Depends(require_module_read(MODULE_QUALITY_CONTROL)),
 ):
     """Fetch SQC/QC HOLD entries from sqc.repacking_sqc_qc_hold with optional filters."""
-    conditions = []
+    condition_templates: List[str] = []
     params = {}
 
     if production_date:
         try:
             parsed_date = datetime.strptime(production_date.strip(), "%Y-%m-%d").date()
-            conditions.append("s.production_date = :p_date")
+            condition_templates.append("{alias}.production_date = :p_date")
             params["p_date"] = parsed_date
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
 
     if machine_no is not None:
-        conditions.append("s.machine_no = :machine_no")
+        condition_templates.append("{alias}.machine_no = :machine_no")
         params["machine_no"] = machine_no
 
     if job_id:
-        conditions.append("s.job_id = :job_id")
+        condition_templates.append("{alias}.job_id = :job_id")
         params["job_id"] = job_id.strip()
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-    results = db.execute(text(_sqc_select(where_clause)), params).mappings().all()
+    results = db.execute(
+        text(_sqc_select(_where_clause(condition_templates, "s"))), params
+    ).mappings().all()
     return _group_sqc_rows(results)
 
 

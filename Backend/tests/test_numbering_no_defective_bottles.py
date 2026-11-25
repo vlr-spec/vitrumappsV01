@@ -15,9 +15,11 @@ from app.api.production.repacking import (
     _NUMBERING_INSERT_FIELDS,
     _SQC_INSERT_FIELDS,
     _numbering_select,
+    _where_clause,
     create_numbering_entry,
     create_sqc_qc_hold_entry,
     get_numbering_entries,
+    get_repacking_data,
     save_numbering_batch,
     update_numbering_entry,
 )
@@ -227,6 +229,54 @@ def test_numbering_batch_save_insert_and_update(db, user):
     assert len(rows) == 1
     assert rows[0].cartons == 12
     assert not hasattr(rows[0], "defective_bottles")
+
+
+def test_where_clause_renders_requested_alias_only():
+    templates = [
+        "{alias}.production_date = :p_date",
+        "{alias}.machine_no = :m_no",
+    ]
+    assert _where_clause(templates, "n") == (
+        "WHERE n.production_date = :p_date AND n.machine_no = :m_no"
+    )
+    assert _where_clause(templates, "s") == (
+        "WHERE s.production_date = :p_date AND s.machine_no = :m_no"
+    )
+    assert _where_clause([], "s") == ""
+    with pytest.raises(ValueError):
+        _where_clause(templates, "s; DROP TABLE x")
+
+
+def test_combined_fetch_filters_both_tables_with_own_aliases(db, user):
+    """get_repacking_data must use `n` for numbering and `s` for SQC/QC HOLD."""
+    create_numbering_entry(_create_payload(), db, user)
+    create_sqc_qc_hold_entry(
+        SqcQcHoldEntryCreate(
+            production_date="2026-11-17",
+            machine_no=3,
+            job_id="JOB-3",
+            bottle_id=1,
+            pack_type="BOX",
+            lot_no="LOT-1",
+            shift=1,
+            entry_time="11:00",
+            pcs_per_pack=12,
+            cartons=3,
+            defective_bottles=7,
+            defect_ids=[1],
+            checker_id="E1",
+        ),
+        db,
+        user,
+    )
+
+    matching = get_repacking_data(production_date="2026-11-17", db=db, _user=user)
+    assert len(matching.numbering) == 1
+    assert len(matching.sqc_qc_hold) == 1
+
+    other_date = get_repacking_data(production_date="2026-11-18", db=db, _user=user)
+    assert list(other_date.numbering) == []
+    assert list(other_date.sqc_qc_hold) == []
 
 
 def test_sqc_qc_hold_still_persists_defective_bottles(db, user):

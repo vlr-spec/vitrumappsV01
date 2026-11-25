@@ -7,6 +7,11 @@ import { planningRepository } from '../../services/planningRepository';
 import { qualityRepository, QualityHourlyEntry, QualityHourlyStore, QualityShiftMap, QualityDayLoad, QualityDayHourly, hasMeaningfulData } from '../../services/qualityRepository';
 import { COMPANY_NAME, getReportHeaderLines } from '../../utils/reportHeader';
 import { calculateTheoreticalBottles } from '../../utils/calculations';
+import {
+  groupDefectsByType,
+  styleForDefectCategory,
+  type DefectGroup,
+} from '../../utils/defectCategories';
 import QualityReport from './QualityReport';
 import AllMachineReport from './AllMachineReport';
 import DailyMcSpeedWeightReport from './DailyMcSpeedWeightReport';
@@ -34,11 +39,9 @@ const DB_MACHINE_MASTER = [
 
 
 
-const GROUP_STYLE: Record<string, { color: string; bg: string; border: string }> = {
-  Critical: { color: '#be123c', bg: '#fff1f2', border: '#fecdd3' },
-  Major: { color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
-  Minor: { color: '#1d4ed8', bg: '#eff6ff', border: '#bfdbfe' },
-};
+// Defect category styles/grouping come from utils/defectCategories so every
+// active database category (including `Other`) is handled identically across
+// the Quality Monitor, Re-Packing forms and Reports.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 24 hourly slots keyed to shift_id
@@ -433,7 +436,7 @@ const EffBadge: React.FC<{ val: string }> = ({ val }) => {
 const DefectDropdown: React.FC<{
   selected: string[];
   onChange: (v: string[]) => void;
-  defectGroups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[];
+  defectGroups: DefectGroup[];
   isLoading?: boolean;
   disabled?: boolean;
 }> = ({ selected, onChange, defectGroups, isLoading = false, disabled = false }) => {
@@ -492,8 +495,8 @@ const DefectDropdown: React.FC<{
         ) : (
           <>
             {visible.map((d) => {
-              const grp = defectGroups.find((g) => g.items.includes(d))?.group ?? 'Minor';
-              const s = GROUP_STYLE[grp] ?? GROUP_STYLE.Minor;
+              const grp = defectGroups.find((g) => g.items.includes(d))?.group;
+              const s = styleForDefectCategory(grp);
               return (
                 <span
                   key={d}
@@ -584,7 +587,7 @@ const DefectDropdown: React.FC<{
               </div>
             )}
             {filtered.map((g) => {
-              const s = GROUP_STYLE[g.group];
+              const s = styleForDefectCategory(g.group);
               return (
                 <div key={g.group}>
                   <div
@@ -1243,8 +1246,6 @@ const layerOutInputsFromSavedPeriods = (
   }
   return { perShift, carryMinutes };
 };
-
-type DefectGroup = { group: 'Critical' | 'Major' | 'Minor'; items: string[] };
 
 const hasMonitorData = (e?: QualityHourlyEntry | null): boolean =>
   hasMeaningfulData(e)
@@ -2769,14 +2770,9 @@ export const QualityControlModule: React.FC = () => {
     let active = true;
     qualityRepository.getDefects(true).then((defects) => {
       if (!active) return;
-      const groups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[] = (['Critical', 'Major', 'Minor'] as const).map((grp) => ({
-        group: grp,
-        items: defects
-          .filter((d) => d.defect_type === grp)
-          .sort((a, b) => a.defect_sr - b.defect_sr)
-          .map((d) => d.defect_name),
-      }));
-      setDefectGroups(groups);
+      // Group whatever active categories the master table returned — `Other`
+      // and any future category need no code change here.
+      setDefectGroups(groupDefectsByType(defects));
       setLoadingDefects(false);
     }).catch((err) => {
       if (active) {

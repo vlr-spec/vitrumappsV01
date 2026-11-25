@@ -6,7 +6,7 @@ from datetime import date, time, datetime
 # --- Defect Master Schemas ---
 
 class DefectMasterBase(BaseModel):
-    defect_type: str = Field(..., description="Critical, Major, or Minor")
+    defect_type: str = Field(..., description="Defect category from the master table (e.g. Critical, Major, Minor, Other, or a future category)")
     defect_sr: int
     defect_name: str
     is_active: bool = True

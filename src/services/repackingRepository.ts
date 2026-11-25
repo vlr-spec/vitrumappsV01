@@ -88,6 +88,9 @@ export interface EmployeeItem {
 
 let employeesCache: EmployeeItem[] | null = null;
 
+/** Cache key for the date-independent combined repacking fetch. */
+const ALL_REPACKING_CACHE_KEY = '__all_dates__';
+
 // Cache for combined repacking data, keyed by production date (YYYY-MM-DD).
 // Avoids re-fetching numbering + SQC/QC HOLD when revisiting the same date
 // (e.g. navigating away and back, or switching layouts on a previously loaded date).
@@ -162,9 +165,49 @@ export const repackingRepository = {
     }
   },
 
+  /**
+   * Fetch all repacking entries across every production date. The combined
+   * endpoint treats an omitted `production_date` as no date filter, so this is
+   * a single request; the two legacy endpoints are used only as a fallback.
+   * Used by date-independent views such as the SQC / QC HOLD report.
+   */
+  async getAllRepackingData(): Promise<{
+    numbering: RepackingNumberingEntry[];
+    sqc: RepackingSqcQcHoldEntry[];
+    bottleNames: BottleNameItem[];
+  }> {
+    const cached = repackingDataCache[ALL_REPACKING_CACHE_KEY];
+    if (cached) return cached;
+
+    try {
+      const data = (await apiFetch('/api/production/repacking/')) as {
+        numbering?: unknown;
+        sqc_qc_hold?: unknown;
+        bottle_names?: unknown;
+      };
+      const result = {
+        numbering: Array.isArray(data?.numbering) ? (data.numbering as RepackingNumberingEntry[]) : [],
+        sqc: Array.isArray(data?.sqc_qc_hold) ? (data.sqc_qc_hold as RepackingSqcQcHoldEntry[]) : [],
+        bottleNames: Array.isArray(data?.bottle_names) ? (data.bottle_names as BottleNameItem[]) : [],
+      };
+      repackingDataCache[ALL_REPACKING_CACHE_KEY] = result;
+      return result;
+    } catch (combinedErr) {
+      const [numbering, sqc] = await Promise.all([
+        this.getNumbering(),
+        this.getSqcQcHold(),
+      ]);
+      const result = { numbering, sqc, bottleNames: [] as BottleNameItem[] };
+      repackingDataCache[ALL_REPACKING_CACHE_KEY] = result;
+      return result;
+    }
+  },
+
   /** Evict the cached repacking data for a date so the next fetch is fresh (call after a save). */
   invalidateRepackingCache(productionDate: string): void {
     delete repackingDataCache[productionDate];
+    // A save on one date also changes the all-dates view, so evict that cache too.
+    delete repackingDataCache[ALL_REPACKING_CACHE_KEY];
   },
 
   // --- Numbering APIs ---

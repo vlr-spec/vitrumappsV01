@@ -70,6 +70,11 @@ import {
   DefectMasterItem,
   hasMeaningfulData,
 } from '../../services/qualityRepository';
+import {
+  groupDefectsByType,
+  styleForDefectCategory,
+  type DefectGroup,
+} from '../../utils/defectCategories';
 
 const C = {
   border: '#e2e8f0',
@@ -339,6 +344,33 @@ interface JobRun {
 }
 
 /**
+ * One distinct job from the hourly production log of a machine on the selected
+ * date. A mid-shift job change creates a second entry even when the bottle is
+ * the same, so nothing is overwritten. `hours` are the canonical hourly keys
+ * where this job was active — they drive the TIME picker and auto-matching.
+ */
+interface ProductionJobOption {
+  /** `job:<jobId>` when a real Job ID exists, otherwise `bottle:<bottleId>`. */
+  key: string;
+  jobId: string;
+  bottleId: string;
+  bottleName: string;
+  hours: string[];
+  packTypes: string[];
+  packSize: string;
+}
+
+/**
+ * Hour-of-day (0-23) of a time label, tolerating legacy 24-hour values and
+ * split labels such as "10:00 - 10:30" (only the first time is considered).
+ */
+const timeHourOf = (label: string): number | null => {
+  const first = String(label ?? '').trim().split(/\s*[-–—]\s*/)[0];
+  const mins = parseReportLabelToMinutes(first);
+  return mins === null ? null : Math.floor(mins / 60);
+};
+
+/**
  * Bottle identity of every point, with the long-standing gap-closing passes so
  * a record with production but no bottle joins the run it physically sits in
  * (previous run, or the next one when it comes first) instead of splitting an
@@ -347,7 +379,11 @@ interface JobRun {
 const runKeysFor = (points: HourPoint[]): string[] => {
   const keys = points.map((p) => {
     const bottle = entryBottle(p.entry);
-    return bottle ? `b:${bottle}` : '';
+    const job = entryJob(p.entry);
+    // Bottle alone is not enough: two consecutive jobs can use the same bottle
+    // (e.g. 10 ml India Dropper -> 10 ml Dropper at 11 AM). Including the real
+    // Job ID in the key starts a new run at every mid-shift job change.
+    return bottle || job ? `b:${bottle}|j:${job}` : '';
   });
   let inherited = '';
   for (let i = 0; i < keys.length; i++) {
@@ -363,11 +399,11 @@ const runKeysFor = (points: HourPoint[]): string[] => {
 };
 
 /**
- * One entry per continuous same-bottle run — same split as the Machine Wise
- * Production and Efficiency report's date-wise job selection: a job that runs
- * all day yields a single run, a mid-day job change starts a new run, and
- * distinct jobs are never merged. Empty hours never break a run because they
- * are not part of the sequence.
+ * One entry per continuous (bottle, Job ID) run — same split as the Machine
+ * Wise Production and Efficiency report's date-wise job selection: a job that
+ * runs all day yields a single run, a mid-shift job change starts a new run,
+ * and distinct jobs are never merged. Empty hours never break a run because
+ * they are not part of the sequence.
  */
 const splitMachineRuns = (
   machineNo: number,
@@ -401,9 +437,9 @@ const splitMachineRuns = (
       while (end < points.length && keys[end] === currentKey) end++;
       let bottleId = '';
       let jobId = '';
-      for (let j = i; j < end && !bottleId; j++) {
-        bottleId = entryBottle(points[j].entry);
-        if (bottleId) jobId = entryJob(points[j].entry);
+      for (let j = i; j < end; j++) {
+        if (!bottleId) bottleId = entryBottle(points[j].entry);
+        if (!jobId) jobId = entryJob(points[j].entry);
       }
       runs.push({
         machineNo,
@@ -583,12 +619,9 @@ const PackTypeCell: React.FC<{
 };
 
 
-// ─── Defect Styles & Dropdown (mirrors Quality Module) ──────────────────────
-const GROUP_STYLE: Record<string, { color: string; bg: string; border: string }> = {
-  Critical: { color: '#be123c', bg: '#fff1f2', border: '#fecdd3' },
-  Major: { color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
-  Minor: { color: '#1d4ed8', bg: '#eff6ff', border: '#bfdbfe' },
-};
+// ─── Defect Dropdown (mirrors Quality Module) ───────────────────────────────
+// Category styles and grouping are shared with the Quality Module/Reports so
+// `Other` and future database categories render without hardcoded item lists.
 
 /**
  * Defects dropdown popover: rendered through a portal to document.body.
@@ -600,7 +633,7 @@ const DefectDropdown: React.FC<{
   onToggle: (open: boolean) => void;
   selected: string[];
   onChange: (v: string[]) => void;
-  defectGroups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[];
+  defectGroups: DefectGroup[];
   isLoading?: boolean;
   disabled?: boolean;
 }> = ({ isOpen, onToggle, selected, onChange, defectGroups, isLoading = false, disabled = false }) => {
@@ -735,8 +768,8 @@ const DefectDropdown: React.FC<{
         ) : (
           <>
             {visible.map((d) => {
-              const grp = defectGroups.find((g) => g.items.includes(d))?.group ?? 'Minor';
-              const s = GROUP_STYLE[grp] ?? GROUP_STYLE.Minor;
+              const grp = defectGroups.find((g) => g.items.includes(d))?.group;
+              const s = styleForDefectCategory(grp);
               return (
                 <span
                   key={d}
@@ -846,7 +879,7 @@ const DefectDropdown: React.FC<{
                 </div>
               )}
               {filtered.map((g) => {
-                const s = GROUP_STYLE[g.group];
+                const s = styleForDefectCategory(g.group);
                 return (
                   <div key={g.group}>
                     <div
@@ -970,7 +1003,7 @@ const CellDefectsDropdown: React.FC<{
   onToggleOpen: (k: string | null) => void;
   value: string;
   onChange: (v: string) => void;
-  defectGroups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[];
+  defectGroups: DefectGroup[];
   isLoading?: boolean;
 }> = ({ cellKey, activeOpenKey, onToggleOpen, value, onChange, defectGroups, isLoading }) => {
   const isOpen = activeOpenKey === cellKey;
@@ -1086,8 +1119,10 @@ const CellTimePicker: React.FC<{
   onToggle: (open: boolean) => void;
   value: string;
   shift: string;
+  /** When a job is selected, only the hours that job actually ran are offered. */
+  allowedHours?: number[];
   onConfirm: (time: string) => void;
-}> = ({ isOpen, onToggle, value, shift, onConfirm }) => {
+}> = ({ isOpen, onToggle, value, shift, allowedHours, onConfirm }) => {
   const triggerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{
@@ -1099,7 +1134,15 @@ const CellTimePicker: React.FC<{
     flip: boolean;
   }>({ left: 0, width: 210, maxHeight: 220, flip: false });
 
-  const allowed = SHIFT_TIME_RANGES[shift ?? '1'] ?? SHIFT_TIME_RANGES['1'];
+  const shiftAllowed = SHIFT_TIME_RANGES[shift ?? '1'] ?? SHIFT_TIME_RANGES['1'];
+  // Intersect the shift's hours with the selected job's active hours. An empty
+  // list means no job restriction (e.g. manual rows with no production data).
+  const allowed = useMemo(
+    () => (allowedHours && allowedHours.length > 0
+      ? shiftAllowed.filter((slot) => allowedHours.includes(slot.hour))
+      : shiftAllowed),
+    [shiftAllowed, allowedHours]
+  );
   const distinctHours = useMemo(() => {
     const seen = new Set<number>();
     return allowed.filter((a) => !seen.has(a.hour) && !!seen.add(a.hour)).map((a) => a.hour);
@@ -1141,7 +1184,7 @@ const CellTimePicker: React.FC<{
     init?.period ?? (defaultHour != null ? periodsFor(defaultHour)[0] ?? null : null)
   );
 
-  const isReady = hour != null && minute != null && period != null;
+  const isReady = allowed.length > 0 && hour != null && minute != null && period != null;
 
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
@@ -1189,14 +1232,21 @@ const CellTimePicker: React.FC<{
     };
   }, [isOpen, value, allowed, updatePosition, onToggle]);
 
-  // Keep AM/PM consistent with the chosen hour within the shift.
+  // Keep the hour and AM/PM consistent with the shift AND the selected job's
+  // active hours. A time that is outside the job's window is replaced by the
+  // first hour that job actually ran.
   useEffect(() => {
-    if (hour === null || period === null) return;
-    if (!allowed.some((a) => a.hour === hour && a.period === period)) {
-      const valid = periodsFor(hour);
-      if (valid.length) setPeriod(valid[0]);
+    if (distinctHours.length === 0) return;
+    if (hour === null || !distinctHours.includes(hour)) {
+      const first = distinctHours[0];
+      setHour(first);
+      setPeriod(periodsFor(first)[0] ?? null);
+      return;
     }
-  }, [hour, period, allowed]);
+    if (period === null || !allowed.some((a) => a.hour === hour && a.period === period)) {
+      setPeriod(periodsFor(hour)[0] ?? null);
+    }
+  }, [hour, period, allowed, distinctHours]);
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -1224,7 +1274,9 @@ const CellTimePicker: React.FC<{
     onToggle(false);
   };
 
-  const rangeLabel = `${allowed[0].hour}:00 ${allowed[0].period} - ${allowed[allowed.length - 1].hour}:00 ${allowed[allowed.length - 1].period}`;
+  const rangeLabel = allowed.length > 0
+    ? `${allowed[0].hour}:00 ${allowed[0].period} - ${allowed[allowed.length - 1].hour}:00 ${allowed[allowed.length - 1].period}`
+    : 'No hours for the selected job';
 
   const pickerSelectStyle: React.CSSProperties = {
     width: 52,
@@ -1601,6 +1653,8 @@ interface ExtraRow {
   id: number;
   /** Bottle name shown in JOB NAME (never persisted as job_id). */
   jobName: string;
+  /** Key of the selected production job (`job:<id>` / `bottle:<id>`). */
+  jobKey: string;
   /** Actual Job ID copied from the row this one was added under. */
   jobId: string;
   /** Bottle ID copied from the row this one was added under. */
@@ -1693,7 +1747,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
   const [hourly, setHourly] = useState<QualityDayHourly>({});
   const [shiftAssignments, setShiftAssignments] = useState<QualityShiftMap>({});
-  const [defectGroups, setDefectGroups] = useState<{ group: 'Critical' | 'Major' | 'Minor'; items: string[] }[]>([]);
+  const [defectGroups, setDefectGroups] = useState<DefectGroup[]>([]);
   const [defectList, setDefectList] = useState<DefectMasterItem[]>([]);
   const [loadingDefects, setLoadingDefects] = useState(true);
   const [dbEmployees, setDbEmployees] = useState<EmployeeItem[]>([]);
@@ -1888,16 +1942,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
       .then((defects) => {
         if (!active) return;
         setDefectList(defects);
-        const groups: { group: 'Critical' | 'Major' | 'Minor'; items: string[] }[] = (
-          ['Critical', 'Major', 'Minor'] as const
-        ).map((grp) => ({
-          group: grp,
-          items: defects
-            .filter((d) => d.defect_type === grp)
-            .sort((a, b) => a.defect_sr - b.defect_sr)
-            .map((d) => d.defect_name),
-        }));
-        setDefectGroups(groups);
+        // All active master categories (including `Other`) are grouped here;
+        // nothing about the category list or its items is hardcoded.
+        setDefectGroups(groupDefectsByType(defects));
         setLoadingDefects(false);
       })
       .catch(() => {
@@ -2059,6 +2106,85 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     (run: JobRun): string => bottleNameFor(run.bottleId, bottleOptions),
     [bottleOptions]
   );
+
+  /**
+   * Every distinct job that ran on each machine on the selected date, with the
+   * hours/shifts it was active and its production pack info. Grouping by real
+   * Job ID (Bottle ID only when a row has no Job ID) keeps both jobs of a
+   * mid-shift change available instead of overwriting the earlier one.
+   */
+  const jobsByMachine = useMemo<Record<number, ProductionJobOption[]>>(() => {
+    const out: Record<number, ProductionJobOption[]> = {};
+    const addTypes = (value: unknown, target: ProductionJobOption): void => {
+      const values = Array.isArray(value) ? value : value != null ? [value] : [];
+      values.forEach((cat) => {
+        const type = String(cat ?? '').trim();
+        if (type && !target.packTypes.includes(type)) target.packTypes.push(type);
+      });
+    };
+
+    for (const machineNo of MACHINE_NOS) {
+      const byTime = dayHourly[String(machineNo)] ?? {};
+      const byKey = new Map<string, ProductionJobOption>();
+      for (const key of getReportOrderedKeys(byTime)) {
+        const entry = byTime[key];
+        if (!hasMeaningfulData(entry)) continue;
+        const jobId = entryJob(entry);
+        const bottleId = entryBottle(entry);
+        const mapKey = jobId ? `job:${jobId}` : bottleId ? `bottle:${bottleId}` : '';
+        if (!mapKey) continue;
+
+        let option = byKey.get(mapKey);
+        if (!option) {
+          const bottleName = bottleNameFor(bottleId, bottleOptions);
+          option = {
+            key: mapKey,
+            jobId,
+            bottleId,
+            bottleName,
+            hours: [],
+            packTypes: [],
+            packSize: '',
+          };
+          byKey.set(mapKey, option);
+        }
+        if (!option.hours.includes(key)) option.hours.push(key);
+        addTypes(entry.packing_category, option);
+        addTypes(entry.packing_category_2, option);
+        if (!option.packSize) {
+          const size =
+            String(entry.packing_size ?? '').trim() || String(entry.packing_size_2 ?? '').trim();
+          if (size) option.packSize = size;
+        }
+      }
+      out[machineNo] = Array.from(byKey.values()).sort((a, b) => {
+        const ta = a.hours.length > 0 ? toReportTimelineMinutes(a.hours[0]) : null;
+        const tb = b.hours.length > 0 ? toReportTimelineMinutes(b.hours[0]) : null;
+        if (ta === null && tb === null) return a.bottleName.localeCompare(b.bottleName);
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        return ta - tb;
+      });
+    }
+    return out;
+  }, [dayHourly, bottleOptions]);
+
+  /** Match a TIME cell value to the hourly production row covering that hour. */
+  const resolveProductionContext = useCallback(
+    (machineNo: number, timeValue: string): (ProductionJobOption & { timeKey: string }) | null => {
+      const hour = timeHourOf(timeValue);
+      if (hour === null) return null;
+      const byTime = dayHourly[String(machineNo)] ?? {};
+      const matchedKey = getReportOrderedKeys(byTime).find(
+        (key) => hasMeaningfulData(byTime[key]) && timeHourOf(key) === hour
+      );
+      if (!matchedKey) return null;
+      const option = (jobsByMachine[machineNo] ?? []).find((o) => o.hours.includes(matchedKey));
+      return option ? { ...option, timeKey: matchedKey } : null;
+    },
+    [dayHourly, jobsByMachine]
+  );
+
   const runShift = (run: JobRun): string => String(run.points[0]?.slot.shift_id ?? 1);
   const runTime = (run: JobRun): string => runIntervalLabel(run);
 
@@ -2113,6 +2239,40 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     return row.dbEntry.bottle_id ?? null;
   }, []);
 
+  /** Selector key (`job:<id>` / `bottle:<id>`) of the row's production job. */
+  const jobKeyForRow = useCallback(
+    (machineNo: number, row: OrderedRow): string => {
+      if (row.kind === 'extra' && row.extra.jobKey) return row.extra.jobKey;
+      const jobId = jobIdForRow(machineNo, row);
+      if (jobId && !isBottleName(jobId)) return `job:${jobId}`;
+      const bottleId = String(bottleIdForRow(row) ?? '').trim();
+      return bottleId ? `bottle:${bottleId}` : '';
+    },
+    [isBottleName, jobIdForRow]
+  );
+
+  /** Only the hours where the row's job actually ran. */
+  const allowedHoursForRow = (machineNo: number, row: OrderedRow, vals: CellValues): number[] => {
+    const key = (vals.jobKey ?? jobKeyForRow(machineNo, row)).trim();
+    const option = (jobsByMachine[machineNo] ?? []).find((o) => o.key === key);
+    if (!option) return [];
+    return option.hours.map(timeHourOf).filter((hour): hour is number => hour !== null);
+  };
+
+  /** Pack size of the row's selected time/job, falling back to the old
+   *  job/machine-wide lookup so existing manual values keep working. */
+  const packSizeForRow = (machineNo: number, row: OrderedRow, vals: CellValues): string => {
+    const context = resolveProductionContext(machineNo, (vals.time ?? '').trim());
+    if (context?.packSize) return context.packSize;
+    const info = machinePackInfo[machineNo];
+    if (!info) return '';
+    const jobId = (vals.jobId ?? '').trim() || jobIdForRow(machineNo, row);
+    if (jobId && info.byJob[`job:${jobId}`]?.packSize) return info.byJob[`job:${jobId}`].packSize;
+    const bottleId = (vals.bottleId ?? '').trim() || String(bottleIdForRow(row) ?? '').trim();
+    if (bottleId && info.byJob[`bottle:${bottleId}`]?.packSize) return info.byJob[`bottle:${bottleId}`].packSize;
+    return info.packSize;
+  };
+
   const rowKeyFor = (machineNo: number, run: JobRun, rowIndex: number): string =>
     `${dateKey}|${machineNo}|${rowIndex}|${run.bottleId || 'job'}|${run.runKey}`;
 
@@ -2125,11 +2285,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
    * Job ID first, then by Bottle ID; never by the bottle name shown in the
    * JOB NAME cell.
    */
-  const packTypesForRow = (machineNo: number, row: OrderedRow): string[] => {
+  const packTypesForRow = (machineNo: number, row: OrderedRow, vals: CellValues): string[] => {
+    // The selected TIME is authoritative: the exact hour's job determines the
+    // pack types, including when two jobs share a bottle in the same shift.
+    const context = resolveProductionContext(machineNo, (vals.time ?? '').trim());
+    if (context && context.packTypes.length > 0) return context.packTypes;
     const info = machinePackInfo[machineNo];
     if (!info) return [];
-    const jobId = jobIdForRow(machineNo, row);
-    const bottleId = String(bottleIdForRow(row) ?? '').trim();
+    const jobId = (vals.jobId ?? '').trim() || jobIdForRow(machineNo, row);
+    const bottleId = (vals.bottleId ?? '').trim() || String(bottleIdForRow(row) ?? '').trim();
     const jobInfo = jobId ? info.byJob[`job:${jobId}`] : undefined;
     if (jobInfo) return jobInfo.packTypes;
     const bottleInfo = bottleId ? info.byJob[`bottle:${bottleId}`] : undefined;
@@ -2143,6 +2307,15 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   const setSqcCell = useCallback((key: string, field: string, value: string) => {
     setSqcValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), [field]: value } }));
   }, []);
+
+  const setCellValues = (
+    target: 'numbering' | 'sqc',
+    key: string,
+    patch: Record<string, string>
+  ) => {
+    const setter = target === 'numbering' ? setNumberingValues : setSqcValues;
+    setter((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), ...patch } }));
+  };
 
   const extraRowsKey = (machineNo: number): string => `${dateKey}|${machineNo}`;
   const extraRowKey = (machineNo: number, extraId: number): string =>
@@ -2158,11 +2331,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     pcsPack: string,
     time: string,
     jobId: string,
-    bottleId: number | null
+    bottleId: number | null,
+    jobKey: string
   ) => {
     const row: ExtraRow = {
       id: (extraIdRef.current += 1),
       jobName,
+      jobKey,
       jobId,
       bottleId,
       shift,
@@ -2176,20 +2351,79 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     setter((prev) => ({ ...prev, [storeKey]: [...(prev[storeKey] ?? []), row] }));
 
     // Also initialize the new row's values in the values state so the UI
-    // correctly displays the inherited packType and pcsPack for the new entry.
+    // correctly displays the inherited job, packType and pcsPack for the new
+    // entry. The user can then pick any job/time from the day's production log.
     const valuesKey = `${dateKey}|${machineNo}|x|${row.id}`;
-    const valuesSetter = target === 'numbering' ? setNumberingValues : setSqcValues;
-    valuesSetter((prev) => ({
-      ...prev,
-      [valuesKey]: {
-        jobName,
-        shift,
-        packType,
-        pcsPack,
-        time: time,
-        // Other fields will fall back to their defaults/baselines when rendered.
-      },
-    }));
+    setCellValues(target, valuesKey, {
+      jobName,
+      jobKey,
+      jobId,
+      bottleId: bottleId != null ? String(bottleId) : '',
+      shift,
+      packType,
+      pcsPack,
+      time,
+    });
+  };
+
+  const updateExtraRow = (
+    target: 'numbering' | 'sqc',
+    machineNo: number,
+    extraId: number,
+    patch: Partial<ExtraRow>
+  ) => {
+    const setter = target === 'numbering' ? setNumberingExtras : setSqcExtras;
+    setter((prev) => {
+      const storeKey = extraRowsKey(machineNo);
+      return {
+        ...prev,
+        [storeKey]: (prev[storeKey] ?? []).map((row) =>
+          row.id === extraId ? { ...row, ...patch } : row
+        ),
+      };
+    });
+  };
+
+  /** A TIME selection resolves the job that was running at that exact hour. */
+  const applyTimeSelection = (
+    target: 'numbering' | 'sqc',
+    key: string,
+    time: string,
+    vals: CellValues,
+    machineNo: number,
+    row: OrderedRow
+  ) => {
+    const patch: Record<string, string> = { time };
+    const context = resolveProductionContext(machineNo, time);
+    if (context) {
+      patch.jobKey = context.key;
+      patch.jobId = context.jobId;
+      patch.bottleId = context.bottleId;
+      patch.jobName = context.bottleName;
+      patch.shift = String(shiftIdForReportKey(context.timeKey));
+      const currentPackType = (vals.packType ?? '').trim();
+      if (context.packTypes.length > 0) {
+        patch.packType = context.packTypes.includes(currentPackType)
+          ? currentPackType
+          : context.packTypes[0];
+      }
+      if (context.packSize) patch.pcsPack = context.packSize;
+    }
+    setCellValues(target, key, patch);
+
+    if (row.kind === 'extra') {
+      const extraPatch: Partial<ExtraRow> = { time };
+      if (patch.jobKey !== undefined) {
+        extraPatch.jobKey = patch.jobKey;
+        extraPatch.jobId = patch.jobId;
+        extraPatch.bottleId = context?.bottleId ? parseInt(context.bottleId, 10) || null : null;
+        extraPatch.jobName = patch.jobName;
+      }
+      if (patch.shift !== undefined) extraPatch.shift = patch.shift;
+      if (patch.packType !== undefined) extraPatch.packType = patch.packType;
+      if (patch.pcsPack !== undefined) extraPatch.pcsPack = patch.pcsPack;
+      updateExtraRow(target, machineNo, row.extra.id, extraPatch);
+    }
   };
 
   const removeExtraRow = (target: 'numbering' | 'sqc', machineNo: number, extraId: number) => {
@@ -2316,6 +2550,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
 
           const defaultBottleId = bottleIdForRow(row);
           const defaultJobId = jobIdForRow(machineNo, row);
+          // The selected job (from the JOB NAME dropdown or the TIME cell) is
+          // authoritative for every field that comes from the hourly timeline.
+          const effectiveJobKey = (currentVals.jobKey ?? jobKeyForRow(machineNo, row)).trim();
+          const selectedJob = (jobsByMachine[machineNo] ?? []).find(
+            (option) => option.key === effectiveJobKey
+          );
           // A legacy row that stored a bottle name in job_id must be repaired
           // on the next save instead of writing that name back again.
           const hasLegacyBottleNameJobId =
@@ -2385,7 +2625,12 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
           }
 
           let bottleId: number | null = defaultBottleId;
-          if (effectiveJobName) {
+          const bottleIdOverride = (currentVals.bottleId ?? '').trim();
+          if (bottleIdOverride) {
+            bottleId = parseInt(bottleIdOverride, 10) || null;
+          } else if (selectedJob?.bottleId) {
+            bottleId = parseInt(selectedJob.bottleId, 10) || null;
+          } else if (effectiveJobName) {
             const bHit = bottleOptions.find(
               (b) => b.name.toLowerCase() === effectiveJobName.toLowerCase() || b.id === effectiveJobName
             );
@@ -2393,9 +2638,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               bottleId = parseInt(bHit.id, 10) || null;
             }
           }
-          // job_id is an actual production Job ID; it is never derived from
-          // the bottle name displayed in the JOB NAME cell.
-          const jobId = defaultJobId;
+          // job_id is an actual production Job ID from the selected job/time;
+          // it is never derived from the bottle name shown in JOB NAME.
+          const jobId = (currentVals.jobId ?? '').trim() || selectedJob?.jobId || defaultJobId;
           // Repair legacy rows only when the real Job ID could be resolved
           // from the production data already loaded for this date.
           const needsJobIdRepair = hasLegacyBottleNameJobId && !!jobId;
@@ -2405,6 +2650,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
               !baseline ||
               needsJobIdRepair ||
               currentVals.jobName !== baseline.jobName ||
+              currentVals.jobKey !== baseline.jobKey ||
+              currentVals.jobId !== baseline.jobId ||
+              currentVals.bottleId !== baseline.bottleId ||
               currentVals.shift !== baseline.shift ||
               currentVals.time !== baseline.time ||
               currentVals.packType !== baseline.packType ||
@@ -2738,26 +2986,33 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         const key = row.rowKey;
                         const isDbRow = row.kind === 'db';
                         const dbEntryId = isDbRow ? String(row.dbEntry.entry_id) : null;
+                        const rowVals = layout === 'numbering'
+                          ? numberingValues[key] ?? {}
+                          : sqcValues[key] ?? {};
                         const jobNameFallback =
                           row.kind === 'extra'
                             ? row.extra.jobName
                             : isDbRow
                             ? (row.dbEntry.bottle_name || '')
                             : runJobName(row.run);
-                        const rowJobId = jobIdForRow(machineNo, row);
-                        const rowBottleId = bottleIdForRow(row);
+                        const rowJobKey = (rowVals.jobKey ?? jobKeyForRow(machineNo, row)).trim();
+                        const rowJobId = (rowVals.jobId ?? jobIdForRow(machineNo, row)).trim();
+                        const rowBottleId = (rowVals.bottleId ?? '').trim()
+                          ? parseInt(rowVals.bottleId, 10) || null
+                          : bottleIdForRow(row);
                         const shiftFallback =
                           row.kind === 'extra'
                             ? row.extra.shift
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type options are every unique pack type this job
-                        // reported in the Hourly Production Report for the selected
-                        // date; Pack Size is reused and saved as selected.
-                        const packInfo =
-                          machinePackInfo[machineNo] ?? { packTypes: [], packSize: '', byJob: {} };
-                        const jobPackTypes = packTypesForRow(machineNo, row);
+                        // The row's job is tracked internally by Job ID; TIME
+                        // options are limited to that job's active hours.
+                        const allowedHours = allowedHoursForRow(machineNo, row, rowVals);
+                        // Pack Type options and Pack Size come from the exact
+                        // production hour/job selected on this row.
+                        const jobPackTypes = packTypesForRow(machineNo, row, rowVals);
+                        const resolvedPackSize = packSizeForRow(machineNo, row, rowVals);
                         // For saved DB rows, display the persisted Pack Type.
                         // New rows start blank — the user must select one.
                         const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
@@ -2778,13 +3033,25 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             <td style={numCellTd(0, NUMBERING_COLUMNS.length, 'left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
-                                  <CellTextInput
-                                    value={cellValue(numberingValues, key, 'jobName', jobNameFallback)}
-                                    onChange={(v) => setNumberingCell(key, 'jobName', v)}
-                                    align="left"
-                                    placeholder="Job / Bottle Name"
-                                    style={NUMBERING_INPUT_STYLE}
-                                  />
+                                  <span
+                                    style={{
+                                      display: 'block',
+                                      width: '100%',
+                                      minHeight: '26px',
+                                      padding: '4px 2px',
+                                      boxSizing: 'border-box',
+                                      textAlign: 'left',
+                                      whiteSpace: 'normal',
+                                      overflow: 'visible',
+                                      wordBreak: 'break-word',
+                                      fontSize: '12px',
+                                      fontWeight: 600,
+                                      lineHeight: 1.2,
+                                      color: jobNameFallback ? C.textMain : '#94a3b8',
+                                    }}
+                                  >
+                                    {jobNameFallback || '—'}
+                                  </span>
                                 </div>
                                 <AddRowButton
                                   title="Add another row for this job"
@@ -2799,7 +3066,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(numberingValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
                                       '',
                                       rowJobId,
-                                      rowBottleId
+                                      rowBottleId,
+                                      rowJobKey
                                     )
                                   }
                                 />
@@ -2832,10 +3100,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                                 onChange={(v) => {
                                   setNumberingCell(key, 'packType', v);
-                                  // Auto-fill Pack Size from Production's pack_size
-                                  // for the selected machine.
-                                  if (v && packInfo.packSize) {
-                                    setNumberingCell(key, 'pcsPack', packInfo.packSize);
+                                  // Auto-fill Pack Size from the selected hour/job.
+                                  if (v && resolvedPackSize) {
+                                    setNumberingCell(key, 'pcsPack', resolvedPackSize);
                                   }
                                 }}
                                 machineNo={machineNo}
@@ -2856,7 +3123,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|num|${key}` : null)}
                                 value={cellValue(numberingValues, key, 'time', '')}
                                 shift={cellValue(numberingValues, key, 'shift', shiftFallback)}
-                                onConfirm={(t) => setNumberingCell(key, 'time', t)}
+                                allowedHours={allowedHours}
+                                onConfirm={(t) =>
+                                  applyTimeSelection('numbering', key, t, rowVals, machineNo, row)
+                                }
                               />
                             </td>
                             <td style={numCellTd(4, NUMBERING_COLUMNS.length)}>
@@ -3040,26 +3310,31 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                         const key = row.rowKey;
                         const isDbRow = row.kind === 'db';
                         const dbEntryId = isDbRow ? String(row.dbEntry.entry_id) : null;
+                        const rowVals = sqcValues[key] ?? {};
                         const jobNameFallback =
                           row.kind === 'extra'
                             ? row.extra.jobName
                             : isDbRow
                             ? (row.dbEntry.bottle_name || '')
                             : runJobName(row.run);
-                        const rowJobId = jobIdForRow(machineNo, row);
-                        const rowBottleId = bottleIdForRow(row);
+                        const rowJobKey = (rowVals.jobKey ?? jobKeyForRow(machineNo, row)).trim();
+                        const rowJobId = (rowVals.jobId ?? jobIdForRow(machineNo, row)).trim();
+                        const rowBottleId = (rowVals.bottleId ?? '').trim()
+                          ? parseInt(rowVals.bottleId, 10) || null
+                          : bottleIdForRow(row);
                         const shiftFallback =
                           row.kind === 'extra'
                             ? row.extra.shift
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // Pack Type options are every unique pack type this job
-                        // reported in the Hourly Production Report for the selected
-                        // date; Pack Size is reused and saved as selected.
-                        const packInfo =
-                          machinePackInfo[machineNo] ?? { packTypes: [], packSize: '', byJob: {} };
-                        const jobPackTypes = packTypesForRow(machineNo, row);
+                        // The row's job is tracked internally by Job ID; TIME
+                        // options are limited to that job's active hours.
+                        const allowedHours = allowedHoursForRow(machineNo, row, rowVals);
+                        // Pack Type options and Pack Size come from the exact
+                        // production hour/job selected on this row.
+                        const jobPackTypes = packTypesForRow(machineNo, row, rowVals);
+                        const resolvedPackSize = packSizeForRow(machineNo, row, rowVals);
                         // For saved DB rows, display the persisted Pack Type.
                         // New rows start blank — the user must select one.
                         const basePackType = isDbRow ? (row.dbEntry.pack_type || '') : '';
@@ -3080,13 +3355,25 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                             <td style={sqcCellTd(0, SQC_COLUMNS.length, 'left')}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', width: '100%' }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
-                                  <CellTextInput
-                                    value={cellValue(sqcValues, key, 'jobName', jobNameFallback)}
-                                    onChange={(v) => setSqcCell(key, 'jobName', v)}
-                                    align="left"
-                                    placeholder="Job / Bottle Name"
-                                    style={SQC_INPUT_STYLE}
-                                  />
+                                  <span
+                                    style={{
+                                      display: 'block',
+                                      width: '100%',
+                                      minHeight: '26px',
+                                      padding: '4px 2px',
+                                      boxSizing: 'border-box',
+                                      textAlign: 'left',
+                                      whiteSpace: 'normal',
+                                      overflow: 'visible',
+                                      wordBreak: 'break-word',
+                                      fontSize: '12px',
+                                      fontWeight: 600,
+                                      lineHeight: 1.2,
+                                      color: jobNameFallback ? C.textMain : '#94a3b8',
+                                    }}
+                                  >
+                                    {jobNameFallback || '—'}
+                                  </span>
                                 </div>
                                 <AddRowButton
                                   title="Add another row for this job"
@@ -3101,7 +3388,8 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                       cellValue(sqcValues, key, 'pcsPack', isDbRow && row.dbEntry.pcs_per_pack != null ? String(row.dbEntry.pcs_per_pack) : basePackSize),
                                       '',
                                       rowJobId,
-                                      rowBottleId
+                                      rowBottleId,
+                                      rowJobKey
                                     )
                                   }
                                 />
@@ -3132,7 +3420,10 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|sqc|${key}` : null)}
                                 value={cellValue(sqcValues, key, 'time', '')}
                                 shift={cellValue(sqcValues, key, 'shift', shiftFallback)}
-                                onConfirm={(t) => setSqcCell(key, 'time', t)}
+                                allowedHours={allowedHours}
+                                onConfirm={(t) =>
+                                  applyTimeSelection('sqc', key, t, rowVals, machineNo, row)
+                                }
                               />
                             </td>
                             <td style={sqcCellTd(3, SQC_COLUMNS.length)}>
@@ -3148,10 +3439,9 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                                 onChange={(v) => {
                                   setSqcCell(key, 'packType', v);
-                                  // Auto-fill Pack Size from Production's pack_size
-                                  // for the selected machine.
-                                  if (v && packInfo.packSize) {
-                                    setSqcCell(key, 'pcsPack', packInfo.packSize);
+                                  // Auto-fill Pack Size from the selected hour/job.
+                                  if (v && resolvedPackSize) {
+                                    setSqcCell(key, 'pcsPack', resolvedPackSize);
                                   }
                                 }}
                                 machineNo={machineNo}

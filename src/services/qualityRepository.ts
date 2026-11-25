@@ -26,6 +26,7 @@
  */
 
 import { apiFetch } from '../utils/api';
+import { sortDefectsByCategory } from '../utils/defectCategories';
 
 export interface QualityHourlyEntry {
   entry_id: string;
@@ -77,7 +78,8 @@ export interface QualityHourlyEntry {
 
 export interface DefectMasterItem {
   defect_id: number;
-  defect_type: 'Critical' | 'Major' | 'Minor';
+  /** Open string: the master table may contain `Other` or future categories. */
+  defect_type: string;
   defect_sr: number;
   defect_name: string;
   is_active: boolean;
@@ -409,14 +411,16 @@ const normalizeDbHourly = (raw: Record<string, Record<string, Record<string, unk
 
 export const qualityRepository = {
   /**
-   * Fetches active defects from GET /api/production/quality/defects/?active_only=true.
-   * The result is cached so master data is never fetched more than once, and
-   * concurrent callers share a single in-flight request.
+   * Fetches ALL active defects (every category, including `Other` and any
+   * future category) from GET /api/production/quality/defects/?active_only=true.
+   * Rows are ordered by category priority then defect_sr. The result is cached
+   * so master data is never fetched more than once, and concurrent callers
+   * share a single in-flight request.
    */
   async getDefects(activeOnly: boolean = true): Promise<DefectMasterItem[]> {
     if (!activeOnly) {
       const res = await apiFetch('/api/production/quality/defects/?active_only=false');
-      return Array.isArray(res) ? (res as DefectMasterItem[]) : [];
+      return Array.isArray(res) ? sortDefectsByCategory(res as DefectMasterItem[]) : [];
     }
     if (defectNamesCache.resolved) return defectNamesCache.resolved;
     if (!defectNamesCache.pending) {
@@ -427,7 +431,7 @@ export const qualityRepository = {
       defectNamesCache.pending = (async () => {
         try {
           const res = await apiFetch('/api/production/quality/defects/?active_only=true');
-          const list = Array.isArray(res) ? (res as DefectMasterItem[]) : [];
+          const list = Array.isArray(res) ? sortDefectsByCategory(res as DefectMasterItem[]) : [];
           defectNamesCache.resolved = list;
           return list;
         } finally {
