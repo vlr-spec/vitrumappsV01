@@ -21,14 +21,23 @@ from app.api.permissions import (
     require_any_module_read,
     MODULE_PRODUCTION_PLANNING,
     MODULE_BOTTLE_MASTER,
+    MODULE_QUALITY_CONTROL,
 )
+
+# Read-only reference data used by Planning, Master Management and Quality
+# Control screens. Writes keep their stricter module-specific guards below.
+REFERENCE_DATA_READ_MODULES = [
+    MODULE_PRODUCTION_PLANNING,
+    MODULE_BOTTLE_MASTER,
+    MODULE_QUALITY_CONTROL,
+]
 from app.api.auth import get_current_user
 from app.models.auth import AuthUser
 
 router = APIRouter(prefix="/products", tags=["Production Products"])
 
 @router.get("/bottles/", response_model=List[BottleMasterResponse])
-def get_all_bottles(db: Session = Depends(get_db), _user: AuthUser = Depends(require_any_module_read([MODULE_PRODUCTION_PLANNING, MODULE_BOTTLE_MASTER]))):
+def get_all_bottles(db: Session = Depends(get_db), _user: AuthUser = Depends(require_any_module_read(REFERENCE_DATA_READ_MODULES))):
     return db.query(BottleMaster).all()
 
 @router.post("/bottles/", response_model=BottleMasterResponse)
@@ -518,7 +527,7 @@ def delete_parent_child_mapping(
 def get_all_configurations(
     machine_no: int | None = None,
     db: Session = Depends(get_db),
-    _user: AuthUser = Depends(require_any_module_read([MODULE_PRODUCTION_PLANNING, MODULE_BOTTLE_MASTER])),
+    _user: AuthUser = Depends(require_any_module_read(REFERENCE_DATA_READ_MODULES)),
 ):
     """List bottle configurations.
 

@@ -28,8 +28,19 @@ export const MODULES = {
   HOLIDAY_MASTER: 'Holiday Master',
 } as const;
 
+/**
+ * Screen names that are not module_master rows but still belong to one.
+ * Reports owns Numbering, SQC/QC HOLD and Resorting Logs, so it follows
+ * Quality Control (module_id = 2) -- there is no separate Reports module.
+ */
+export const SCREEN_MODULE_ALIASES: Record<string, string> = {
+  Reports: MODULES.QUALITY_CONTROL,
+};
+
+const resolveModuleName = (module: string): string => SCREEN_MODULE_ALIASES[module] ?? module;
+
 /** Modules that belong to the application shell (no module_master row). */
-export const APP_MODULES = ['Dashboard', 'Settings', 'Profile', 'Reports'];
+export const APP_MODULES = ['Dashboard', 'Settings', 'Profile'];
 
 export interface AuthUser {
   employee_id: string;
@@ -153,7 +164,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    */
   const hasPermission = (module: string, access: 'read' | 'edit') => {
     if (!user) return false;
-    const perm = user.permissions?.[module];
+    const perm = user.permissions?.[resolveModuleName(module)];
     if (!perm) return false;
     if (access === 'read') return perm.read;
     return perm.read && perm.edit;
@@ -161,17 +172,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const canReadModule = (module: string): boolean => {
     if (!user) return false;
-    if (hasPermission(module, 'read')) return true;
+    const masterModule = resolveModuleName(module);
+    if (hasPermission(masterModule, 'read')) return true;
 
     const modules = user.modules ?? [];
     const byId = new Map<number, ModuleInfo>(modules.map((m) => [m.module_id, m]));
 
     // Readable descendants make an ancestor (parent) module readable too.
     return modules.some((child) => {
-      if (child.module_name === module || !hasPermission(child.module_name, 'read')) return false;
+      if (child.module_name === masterModule || !hasPermission(child.module_name, 'read')) return false;
       let parent = child.parent_module_id != null ? byId.get(child.parent_module_id) : undefined;
       while (parent) {
-        if (parent.module_name === module) return true;
+        if (parent.module_name === masterModule) return true;
         parent = parent.parent_module_id != null ? byId.get(parent.parent_module_id) : undefined;
       }
       return false;

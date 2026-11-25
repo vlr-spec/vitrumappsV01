@@ -3,13 +3,14 @@
 Packaging Master CRUD -- reads and writes the existing ``hpr.packaging_master``
 table (packaging_id, packaging_code UNIQUE, packaging_description).
 
-RBAC: the panel lives inside Master Management and has no ``module_master``
-row of its own, so every route reuses the database-driven permissions of the
-Master Management child modules (Bottle Master / Holiday Master) through the
-existing ``require_any_module_read`` / ``require_any_module_edit``
-dependencies.  Nothing is granted here: read access lists the rows, edit
-access is required for POST/PUT/DELETE, and every decision is read from
-``auth.user_module_permissions`` at request time.
+RBAC: the panel itself lives inside Master Management and has no
+``module_master`` row of its own, so writes reuse the database-driven
+permissions of the Master Management child modules (Bottle Master / Holiday
+Master). Quality Control screens also read packaging codes for their Pack Type
+dropdowns, so the read route additionally accepts Quality Control read through
+``require_any_module_read``. Nothing is granted here: read access lists the
+rows, edit access is required for POST/PUT/DELETE, and every decision is read
+from ``auth.user_module_permissions`` at request time.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -22,6 +23,7 @@ from app.schemas.packaging import PackagingCreate, PackagingUpdate, PackagingRes
 from app.api.permissions import (
     MODULE_BOTTLE_MASTER,
     MODULE_HOLIDAY_MASTER,
+    MODULE_QUALITY_CONTROL,
     require_any_module_edit,
     require_any_module_read,
 )
@@ -30,9 +32,11 @@ from app.models.auth import AuthUser
 
 router = APIRouter(prefix="/packaging", tags=["Packaging Master"])
 
-# Master Management child modules: may read ANY -> may list packaging records,
-# may edit ANY -> may create / update / delete them.
+# Master Management child modules: may edit ANY -> may create / update / delete
+# packaging records. Quality Control only needs the read shared by its Pack Type
+# dropdowns; it must never gain Master Management write access here.
 MASTER_MANAGEMENT_MODULES = [MODULE_BOTTLE_MASTER, MODULE_HOLIDAY_MASTER]
+PACKAGING_READ_MODULES = [*MASTER_MANAGEMENT_MODULES, MODULE_QUALITY_CONTROL]
 
 CODE_MAX_LENGTH = 20
 DESCRIPTION_MAX_LENGTH = 150
@@ -66,7 +70,7 @@ def _validated(packaging_code: str, packaging_description: str) -> tuple[str, st
 @router.get("/", response_model=List[PackagingResponse])
 def get_all_packaging(
     db: Session = Depends(get_db),
-    _user: AuthUser = Depends(require_any_module_read(MASTER_MANAGEMENT_MODULES)),
+    _user: AuthUser = Depends(require_any_module_read(PACKAGING_READ_MODULES)),
 ):
     # packaging_id order keeps the insertion order shown in the panel; the id
     # itself is only used as the internal key for UPDATE/DELETE.

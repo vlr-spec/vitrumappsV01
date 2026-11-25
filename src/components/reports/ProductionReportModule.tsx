@@ -8,6 +8,7 @@ import {
 } from '../../services/repackingRepository';
 import { qualityRepository } from '../../services/qualityRepository';
 import { useERP } from '../../context/ERPContext';
+import { useAuth, MODULES } from '../../context/AuthContext';
 import {
   groupDefectsByType,
   styleForDefectCategory,
@@ -833,6 +834,8 @@ const aggregateQcHolds = (
 
 export const ProductionReportModule: React.FC = () => {
   const { bottles } = useERP();
+  const { hasPermission } = useAuth();
+  const canEdit = hasPermission(MODULES.QUALITY_CONTROL, 'edit');
   const [dateIso, setDateIso] = useState<string>(() => toIso(new Date()));
   const [machineFilter, setMachineFilter] = useState<MachineFilter>('all');
   /** Numbering tab still uses the CSS-only radio pair; this mirrors it for the
@@ -1317,6 +1320,7 @@ export const ProductionReportModule: React.FC = () => {
     field: 'okQty' | 'rejected',
     value: string
   ) => {
+    if (!canEdit) return;
     const existing = reportBatchBySourceKey.get(sourceKey);
     const current = existing?.entries[0];
     const nextOk = field === 'okQty' ? Math.max(0, asNum(value)) : current?.okQty ?? 0;
@@ -1350,6 +1354,7 @@ export const ProductionReportModule: React.FC = () => {
   };
 
   const handleSave = () => {
+    if (!canEdit) return;
     try {
       localStorage.setItem(RESORTING_LOG_STORAGE_KEY, JSON.stringify(resortingBatches));
       const sqcCount = resortingBatches.filter((batch) => batch.kind === 'sqc').length;
@@ -1715,6 +1720,7 @@ export const ProductionReportModule: React.FC = () => {
             className="prm-action-btn prm-action-btn--save bg-green-600 hover:bg-green-700 text-white font-bold px-4 py-2 rounded flex items-center gap-2"
             type="button"
             onClick={handleSave}
+            disabled={!canEdit}
           >
             <Save /> Save
           </button>
@@ -1898,7 +1904,7 @@ export const ProductionReportModule: React.FC = () => {
                                 {active ? (
                                   <input
                                     type="number" min={0} step={1}
-                                    className="prm-grid-progress-input"
+                                    className="prm-grid-progress-input" readOnly={!canEdit}
                                     value={progress.okQty}
                                     aria-label={`SQC OK Qty for ${group.jobName} on ${originDate}`}
                                     onChange={(e) => updateReportProgress(
@@ -1912,7 +1918,7 @@ export const ProductionReportModule: React.FC = () => {
                                 {active ? (
                                   <input
                                     type="number" min={0} step={1}
-                                    className="prm-grid-progress-input"
+                                    className="prm-grid-progress-input" readOnly={!canEdit}
                                     value={progress.rejected}
                                     aria-label={`SQC Rejected for ${group.jobName} on ${originDate}`}
                                     onChange={(e) => updateReportProgress(
@@ -2066,7 +2072,7 @@ export const ProductionReportModule: React.FC = () => {
                                 {active && hold ? (
                                   <input
                                     type="number" min={0} step={1}
-                                    className="prm-grid-progress-input"
+                                    className="prm-grid-progress-input" readOnly={!canEdit}
                                     value={progress.okQty}
                                     aria-label={`QC HOLD OK Qty for ${jobName} on ${originDate}`}
                                     onChange={(e) => updateReportProgress(
@@ -2080,7 +2086,7 @@ export const ProductionReportModule: React.FC = () => {
                                 {active && hold ? (
                                   <input
                                     type="number" min={0} step={1}
-                                    className="prm-grid-progress-input"
+                                    className="prm-grid-progress-input" readOnly={!canEdit}
                                     value={progress.rejected}
                                     aria-label={`QC HOLD Rejected for ${jobName} on ${originDate}`}
                                     onChange={(e) => updateReportProgress(

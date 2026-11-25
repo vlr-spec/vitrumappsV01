@@ -37,7 +37,7 @@ const NAV_ITEMS: MenuNavItem[] = [
   { id: 'Production Planning', label: 'Production Planning', icon: CalendarDays, module: 'Production Planning'},
   { id: 'Master Management', label: 'Master Management', icon: Cpu, module: 'Master Management' },
   { id: 'Quality Control', label: 'Hourly Production', icon: ClipboardCheck, module: 'Quality Control' },
-  { id: 'Reports', label: 'Reports', icon: FileBarChart },
+  { id: 'Reports', label: 'Reports', icon: FileBarChart, module: 'Quality Control' },
   { id: 'Settings', label: 'Settings', icon: Sliders },
   { id: 'Profile', label: 'Profile', icon: User },
 ];

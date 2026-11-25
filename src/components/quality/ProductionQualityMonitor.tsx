@@ -5868,7 +5868,7 @@ export const QualityControlModule: React.FC = () => {
 
         {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
 
-        {activeMachine === 6 && <RePackingReport date={navDate} layout={repLayout} />}
+        {activeMachine === 6 && <RePackingReport date={navDate} layout={repLayout} canEdit={canEdit} />}
 
         {activeMachine === 0 && <AllMachineReport date={navDate} />}
 

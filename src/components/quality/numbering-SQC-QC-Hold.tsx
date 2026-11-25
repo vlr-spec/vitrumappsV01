@@ -501,11 +501,13 @@ const CellTextInput: React.FC<{
   align?: 'left' | 'center';
   placeholder?: string;
   style?: React.CSSProperties;
-}> = ({ value, onChange, align = 'center', placeholder, style }) => (
+  disabled?: boolean;
+}> = ({ value, onChange, align = 'center', placeholder, style, disabled = false }) => (
   <input
     type="text"
     value={value}
     placeholder={placeholder}
+    readOnly={disabled}
     onChange={(e) => onChange(e.target.value)}
     onFocus={(e) => focusCellBorder(e, true)}
     onBlur={(e) => focusCellBorder(e, false)}
@@ -520,7 +522,7 @@ const CellTextInput: React.FC<{
 );
 
 /** Editable numeric cell — same typing-only behaviour as the HRP NumInput. */
-const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => {
+const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties; disabled?: boolean }> = ({ value, onChange, style, disabled = false }) => {
   // ArrowUp / ArrowDown are the native step keys of <input type="number">: the
   // browser silently changes the value (and fires onChange) with no typing at
   // all. A production cell must only ever change by typing, so both keys are
@@ -533,6 +535,7 @@ const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void; sty
       type="number"
       min="0"
       value={value}
+      readOnly={disabled}
       onKeyDown={blockArrowStep}
       onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => focusCellBorder(e, true)}
@@ -552,9 +555,10 @@ const CellNumInput: React.FC<{ value: string; onChange: (v: string) => void; sty
 };
 
 /** Editable shift dropdown — prefilled from the run's production shift. */
-const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties }> = ({ value, onChange, style }) => (
+const CellShiftSelect: React.FC<{ value: string; onChange: (v: string) => void; style?: React.CSSProperties; disabled?: boolean }> = ({ value, onChange, style, disabled = false }) => (
   <select
     value={value}
+    disabled={disabled}
     onChange={(e) => onChange(e.target.value)}
     onFocus={(e) => focusCellBorder(e, true)}
     onBlur={(e) => focusCellBorder(e, false)}
@@ -581,7 +585,8 @@ const PackTypeCell: React.FC<{
   machineNo: number;
   packingTypes: string[];
   style?: React.CSSProperties;
-}> = ({ value, onChange, machineNo, packingTypes, style }) => {
+  disabled?: boolean;
+}> = ({ value, onChange, machineNo, packingTypes, style, disabled = false }) => {
   const options = useMemo(() => {
     const set = new Set(packingTypes);
     if (value && value.trim()) set.add(value.trim());
@@ -589,12 +594,13 @@ const PackTypeCell: React.FC<{
   }, [packingTypes, value]);
 
   if (options.length === 0) {
-    return <CellTextInput value={value} onChange={onChange} style={style} />;
+    return <CellTextInput value={value} onChange={onChange} style={style} disabled={disabled} />;
   }
 
   return (
     <select
       value={value}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => focusCellBorder(e, true)}
       onBlur={(e) => focusCellBorder(e, false)}
@@ -860,6 +866,7 @@ const DefectDropdown: React.FC<{
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search defects..."
+                disabled={disabled}
                 style={{
                   width: '100%',
                   padding: '5px 8px',
@@ -1005,17 +1012,20 @@ const CellDefectsDropdown: React.FC<{
   onChange: (v: string) => void;
   defectGroups: DefectGroup[];
   isLoading?: boolean;
-}> = ({ cellKey, activeOpenKey, onToggleOpen, value, onChange, defectGroups, isLoading }) => {
+  disabled?: boolean;
+}> = ({ cellKey, activeOpenKey, onToggleOpen, value, onChange, defectGroups, isLoading, disabled = false }) => {
   const isOpen = activeOpenKey === cellKey;
   const selected = useMemo(() => {
     return value ? value.split(',').map((s) => s.trim()).filter(Boolean) : [];
   }, [value]);
 
   const handleChange = (items: string[]) => {
+    if (disabled) return;
     onChange(items.join(', '));
   };
 
   const handleToggle = (open: boolean) => {
+    if (disabled) return;
     onToggleOpen(open ? cellKey : null);
   };
 
@@ -1027,6 +1037,7 @@ const CellDefectsDropdown: React.FC<{
       onChange={handleChange}
       defectGroups={defectGroups}
       isLoading={isLoading}
+      disabled={disabled}
     />
   );
 };
@@ -1065,7 +1076,8 @@ const CellEmployeeSelect: React.FC<{
   placeholder?: string;
   align?: 'left' | 'center';
   style?: React.CSSProperties;
-}> = ({ value, onChange, options, placeholder = 'Select', align = 'center', style }) => {
+  disabled?: boolean;
+}> = ({ value, onChange, options, placeholder = 'Select', align = 'center', style, disabled = false }) => {
   const allOptions = useMemo(() => {
     const set = new Set<string>();
     options.forEach((opt) => {
@@ -1079,6 +1091,7 @@ const CellEmployeeSelect: React.FC<{
   return (
     <select
       value={value}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
       onFocus={(e) => focusCellBorder(e, true)}
       onBlur={(e) => focusCellBorder(e, false)}
@@ -1122,7 +1135,8 @@ const CellTimePicker: React.FC<{
   /** When a job is selected, only the hours that job actually ran are offered. */
   allowedHours?: number[];
   onConfirm: (time: string) => void;
-}> = ({ isOpen, onToggle, value, shift, allowedHours, onConfirm }) => {
+  disabled?: boolean;
+}> = ({ isOpen, onToggle, value, shift, allowedHours, onConfirm, disabled = false }) => {
   const triggerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{
@@ -1269,7 +1283,7 @@ const CellTimePicker: React.FC<{
   }, [isOpen, onToggle]);
 
   const handleConfirm = () => {
-    if (!isReady) return;
+    if (disabled || !isReady) return;
     onConfirm(`${hour}:${pad(minute)} ${period}`);
     onToggle(false);
   };
@@ -1297,7 +1311,7 @@ const CellTimePicker: React.FC<{
     <div style={{ position: 'relative', width: '100%' }}>
       <div
         ref={triggerRef}
-        onClick={() => onToggle(!isOpen)}
+        onClick={() => { if (!disabled) onToggle(!isOpen); }}
         title={value || 'Click to select time'}
         style={{
           display: 'flex',
@@ -1389,7 +1403,7 @@ const CellTimePicker: React.FC<{
                     const v = parseInt(e.target.value, 10);
                     setHour(Number.isNaN(v) ? null : v);
                   }}
-                  style={pickerSelectStyle}
+                  style={pickerSelectStyle} disabled={disabled}
                 >
                   {distinctHours.map((h) => (
                     <option key={h} value={h}>
@@ -1403,7 +1417,7 @@ const CellTimePicker: React.FC<{
                     const v = parseInt(e.target.value, 10);
                     setMinute(Number.isNaN(v) ? null : v);
                   }}
-                  style={pickerSelectStyle}
+                  style={pickerSelectStyle} disabled={disabled}
                 >
                   {ALL_MINUTES.map((m) => (
                     <option key={m} value={m}>
@@ -1414,7 +1428,7 @@ const CellTimePicker: React.FC<{
                 <select
                   value={period ?? ''}
                   onChange={(e) => setPeriod(e.target.value as 'AM' | 'PM')}
-                  style={pickerSelectStyle}
+                  style={pickerSelectStyle} disabled={disabled}
                 >
                   {hour === null ? null : periodsFor(hour).map((p) => (
                     <option key={p} value={p}>
@@ -1437,7 +1451,7 @@ const CellTimePicker: React.FC<{
               <button
                 type="button"
                 onClick={handleConfirm}
-                disabled={!isReady}
+                disabled={!isReady || disabled}
                 style={{
                   fontSize: '11.5px',
                   fontWeight: 600,
@@ -1466,10 +1480,11 @@ const CellTimePicker: React.FC<{
  * Hourly Production Monitor's blue add/split pill (blue text, #eff6ff fill,
  * #bfdbfe border, 4px radius, #dbeafe hover).
  */
-const AddRowButton: React.FC<{ onClick: () => void; title: string }> = ({ onClick, title }) => (
+const AddRowButton: React.FC<{ onClick: () => void; title: string; disabled?: boolean }> = ({ onClick, title, disabled = false }) => (
   <button
     type="button"
     onClick={onClick}
+    disabled={disabled}
     title={title}
     style={{
       flexShrink: 0,
@@ -1502,10 +1517,11 @@ const AddRowButton: React.FC<{ onClick: () => void; title: string }> = ({ onClic
  * removes only the added row; production rows loaded from the Hourly
  * Production Monitor data never show it and can never be removed.
  */
-const RemoveRowButton: React.FC<{ onClick: () => void; title: string }> = ({ onClick, title }) => (
+const RemoveRowButton: React.FC<{ onClick: () => void; title: string; disabled?: boolean }> = ({ onClick, title, disabled = false }) => (
   <button
     type="button"
     onClick={onClick}
+    disabled={disabled}
     title={title}
     style={{
       flexShrink: 0,
@@ -1741,7 +1757,7 @@ const buildOrderedRows = (
   return out;
 };
 
-const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = ({ date, layout = 'numbering' }) => {
+const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc'; canEdit: boolean }> = ({ date, layout = 'numbering', canEdit }) => {
   const { bottles } = useERP();
   const machineNos = MACHINE_NOS;
 
@@ -2302,17 +2318,20 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   };
 
   const setNumberingCell = useCallback((key: string, field: string, value: string) => {
+    if (!canEdit) return;
     setNumberingValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), [field]: value } }));
-  }, []);
+  }, [canEdit]);
   const setSqcCell = useCallback((key: string, field: string, value: string) => {
+    if (!canEdit) return;
     setSqcValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), [field]: value } }));
-  }, []);
+  }, [canEdit]);
 
   const setCellValues = (
     target: 'numbering' | 'sqc',
     key: string,
     patch: Record<string, string>
   ) => {
+    if (!canEdit) return;
     const setter = target === 'numbering' ? setNumberingValues : setSqcValues;
     setter((prev) => ({ ...prev, [key]: { ...(prev[key] ?? {}), ...patch } }));
   };
@@ -2334,6 +2353,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     bottleId: number | null,
     jobKey: string
   ) => {
+    if (!canEdit) return;
     const row: ExtraRow = {
       id: (extraIdRef.current += 1),
       jobName,
@@ -2372,6 +2392,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     extraId: number,
     patch: Partial<ExtraRow>
   ) => {
+    if (!canEdit) return;
     const setter = target === 'numbering' ? setNumberingExtras : setSqcExtras;
     setter((prev) => {
       const storeKey = extraRowsKey(machineNo);
@@ -2393,6 +2414,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     machineNo: number,
     row: OrderedRow
   ) => {
+    if (!canEdit) return;
     const patch: Record<string, string> = { time };
     const context = resolveProductionContext(machineNo, time);
     if (context) {
@@ -2427,6 +2449,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   };
 
   const removeExtraRow = (target: 'numbering' | 'sqc', machineNo: number, extraId: number) => {
+    if (!canEdit) return;
     const storeKey = extraRowsKey(machineNo);
     const rowKey = extraRowKey(machineNo, extraId);
     const rowsSetter = target === 'numbering' ? setNumberingExtras : setSqcExtras;
@@ -2456,6 +2479,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
     machineNo: number,
     entryId: string
   ) => {
+    if (!canEdit) return;
     if (!window.confirm('Are you sure you want to delete this saved entry?')) return;
     try {
       const ok =
@@ -2507,6 +2531,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
   };
 
   const handleSaveClick = async () => {
+    if (!canEdit) return;
     if (saveState === 'saving') return;
 
     try {
@@ -2856,7 +2881,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
         <button
           type="button"
           onClick={handleSaveClick}
-          disabled={saveState === 'saving'}
+          disabled={!canEdit || saveState === 'saving'}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -3054,7 +3079,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                   </span>
                                 </div>
                                 <AddRowButton
-                                  title="Add another row for this job"
+                                  title="Add another row for this job" disabled={!canEdit}
                                   onClick={() =>
                                     addExtraRow(
                                       'numbering',
@@ -3073,13 +3098,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 />
                                 {extraId >= 0 && (
                                   <RemoveRowButton
-                                    title="Remove this row"
+                                    title="Remove this row" disabled={!canEdit}
                                     onClick={() => removeExtraRow('numbering', machineNo, extraId)}
                                   />
                                 )}
                                 {isDbRow && dbEntryId && (
                                   <RemoveRowButton
-                                    title="Delete this saved entry"
+                                    title="Delete this saved entry" disabled={!canEdit}
                                     onClick={() => handleDeleteDbRow('numbering', machineNo, dbEntryId)}
                                   />
                                 )}
@@ -3108,6 +3133,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 machineNo={machineNo}
                                 packingTypes={jobPackTypes}
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(2, NUMBERING_COLUMNS.length)}>
@@ -3115,6 +3141,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(numberingValues, key, 'shift', shiftFallback)}
                                 onChange={(v) => setNumberingCell(key, 'shift', v)}
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(3, NUMBERING_COLUMNS.length)}>
@@ -3123,7 +3150,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|num|${key}` : null)}
                                 value={cellValue(numberingValues, key, 'time', '')}
                                 shift={cellValue(numberingValues, key, 'shift', shiftFallback)}
-                                allowedHours={allowedHours}
+                                allowedHours={allowedHours} disabled={!canEdit}
                                 onConfirm={(t) =>
                                   applyTimeSelection('numbering', key, t, rowVals, machineNo, row)
                                 }
@@ -3148,6 +3175,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                                 onChange={(v) => setNumberingCell(key, 'pcsPack', v)}
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(5, NUMBERING_COLUMNS.length)}>
@@ -3155,6 +3183,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(numberingValues, key, 'cartons', isDbRow && row.dbEntry.cartons != null ? String(row.dbEntry.cartons) : '')}
                                 onChange={(v) => setNumberingCell(key, 'cartons', v)}
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
 
@@ -3166,7 +3195,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(numberingValues, key, 'defects', isDbRow ? (row.dbEntry.defect_name || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'defects', v)}
                                 defectGroups={defectGroups}
-                                isLoading={loadingDefects}
+                                isLoading={loadingDefects} disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(7, NUMBERING_COLUMNS.length)}>
@@ -3174,6 +3203,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(numberingValues, key, 'mould', isDbRow ? (row.dbEntry.mould || '') : '')}
                                 onChange={(v) => setNumberingCell(key, 'mould', v)}
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(8, NUMBERING_COLUMNS.length)}>
@@ -3182,6 +3212,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onChange={(v) => setNumberingCell(key, 'sectionNo', v)}
                                 placeholder="F12"
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(9, NUMBERING_COLUMNS.length, 'left')}>
@@ -3192,6 +3223,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 placeholder="Select Checker"
                                 align="left"
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={numCellTd(10, NUMBERING_COLUMNS.length, 'center')}>
@@ -3201,6 +3233,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 placeholder="Remarks"
                                 align="center"
                                 style={NUMBERING_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                           </tr>
@@ -3376,7 +3409,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                   </span>
                                 </div>
                                 <AddRowButton
-                                  title="Add another row for this job"
+                                  title="Add another row for this job" disabled={!canEdit}
                                   onClick={() =>
                                     addExtraRow(
                                       'sqc',
@@ -3395,13 +3428,13 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 />
                                 {extraId >= 0 && (
                                   <RemoveRowButton
-                                    title="Remove this row"
+                                    title="Remove this row" disabled={!canEdit}
                                     onClick={() => removeExtraRow('sqc', machineNo, extraId)}
                                   />
                                 )}
                                 {isDbRow && dbEntryId && (
                                   <RemoveRowButton
-                                    title="Delete this saved entry"
+                                    title="Delete this saved entry" disabled={!canEdit}
                                     onClick={() => handleDeleteDbRow('sqc', machineNo, dbEntryId)}
                                   />
                                 )}
@@ -3412,6 +3445,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'shift', shiftFallback)}
                                 onChange={(v) => setSqcCell(key, 'shift', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(2, SQC_COLUMNS.length)}>
@@ -3420,7 +3454,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|sqc|${key}` : null)}
                                 value={cellValue(sqcValues, key, 'time', '')}
                                 shift={cellValue(sqcValues, key, 'shift', shiftFallback)}
-                                allowedHours={allowedHours}
+                                allowedHours={allowedHours} disabled={!canEdit}
                                 onConfirm={(t) =>
                                   applyTimeSelection('sqc', key, t, rowVals, machineNo, row)
                                 }
@@ -3447,6 +3481,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 machineNo={machineNo}
                                 packingTypes={jobPackTypes}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(4, SQC_COLUMNS.length)}>
@@ -3454,6 +3489,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'lotNo', isDbRow && 'lot_no' in row.dbEntry ? (row.dbEntry.lot_no || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'lotNo', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(5, SQC_COLUMNS.length)}>
@@ -3475,6 +3511,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 )}
                                 onChange={(v) => setSqcCell(key, 'pcsPack', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(6, SQC_COLUMNS.length)}>
@@ -3482,6 +3519,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'cartons', isDbRow && row.dbEntry.cartons != null ? String(row.dbEntry.cartons) : '')}
                                 onChange={(v) => setSqcCell(key, 'cartons', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(7, SQC_COLUMNS.length)}>
@@ -3489,6 +3527,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'noOfBottle', isDbRow && 'defective_bottles' in row.dbEntry && row.dbEntry.defective_bottles != null ? String(row.dbEntry.defective_bottles) : '')}
                                 onChange={(v) => setSqcCell(key, 'noOfBottle', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(8, SQC_COLUMNS.length)}>
@@ -3499,7 +3538,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'defects', isDbRow ? (row.dbEntry.defect_name || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'defects', v)}
                                 defectGroups={defectGroups}
-                                isLoading={loadingDefects}
+                                isLoading={loadingDefects} disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(9, SQC_COLUMNS.length)}>
@@ -3507,6 +3546,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'mould', isDbRow ? (row.dbEntry.mould || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'mould', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(10, SQC_COLUMNS.length)}>
@@ -3514,6 +3554,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 value={cellValue(sqcValues, key, 'section', isDbRow ? (row.dbEntry.section_no || '') : '')}
                                 onChange={(v) => setSqcCell(key, 'section', v)}
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(11, SQC_COLUMNS.length, 'left')}>
@@ -3524,6 +3565,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 placeholder="Select Checker"
                                 align="left"
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                             <td style={sqcCellTd(12, SQC_COLUMNS.length, 'center')}>
@@ -3533,6 +3575,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc' }> = 
                                 placeholder="Remarks"
                                 align="center"
                                 style={SQC_INPUT_STYLE}
+                                disabled={!canEdit}
                               />
                             </td>
                           </tr>

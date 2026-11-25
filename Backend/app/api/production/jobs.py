@@ -14,7 +14,13 @@ from app.models.machine import MachineMaster
 from app.models.product import BottleConfiguration
 from app.models.audit_log import AuditLog
 from app.schemas.job import ProductionJobResponse, ProductionJobCreate, ExtendJobRequest, ProductionJobBulkRequest, ProductionJobBulkDeleteRequest, ProductionJobBulkDeleteResponse
-from app.api.permissions import require_module_read, require_module_edit, MODULE_PRODUCTION_PLANNING
+from app.api.permissions import (
+    require_module_read,
+    require_module_edit,
+    require_any_module_read,
+    MODULE_PRODUCTION_PLANNING,
+    MODULE_QUALITY_CONTROL,
+)
 from app.models.auth import AuthUser
 
 router = APIRouter(prefix="/jobs", tags=["Production Jobs"])
@@ -22,7 +28,9 @@ router = APIRouter(prefix="/jobs", tags=["Production Jobs"])
 @router.get("/", response_model=List[ProductionJobResponse])
 def get_all_jobs(
     db: Session = Depends(get_db),
-    _user: AuthUser = Depends(require_module_read(MODULE_PRODUCTION_PLANNING)),
+    # Production jobs are also the schedule source for the Quality Control
+    # reports, so a Quality Control viewer may read them without Planning read.
+    _user: AuthUser = Depends(require_any_module_read([MODULE_PRODUCTION_PLANNING, MODULE_QUALITY_CONTROL])),
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
     machine_no: Optional[int] = None,
