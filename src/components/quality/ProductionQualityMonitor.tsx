@@ -1472,10 +1472,14 @@ const buildMachineReportModel = (
     const pieces = calcTotalBottlesInNos(e);
     if (pieces !== null) totalBottles += pieces;
     // Day Avg / Summary is total actual production units ÷ total As-Per-Speed
-    // target units. A row contributes only when both its actual count and its
-    // speed/duration-based target are valid; a real zero actual still
-    // contributes 0 to the numerator.
-    const durationHours = durationByKey[k] ?? 1;
+    // target units, on the same PRODUCTION TIME basis as the Machine Wise
+    // Production and Efficiency report: the row's Production Timeline minutes
+    // (Lehr Out adjusted), not its raw Packing/Layer-Out duration. A row
+    // contributes only when both its actual count and its speed/duration-based
+    // target are valid; a real zero actual still contributes 0 to the numerator.
+    const durationHours = productionTimeSlots[k]?.durationMinutes
+      ? productionTimeSlots[k].durationMinutes / 60
+      : durationByKey[k] ?? 1;
     const speed = parseFloat(e?.speed_per_min ?? '');
     const theoretical = Number.isFinite(speed) && speed > 0 && Number.isFinite(durationHours) && durationHours > 0
       ? calculateTheoreticalBottles(speed, gobCount, durationHours)
@@ -4226,10 +4230,14 @@ export const QualityControlModule: React.FC = () => {
       const pieces = calcTotalBottlesInNos(e);
       if (pieces !== null) totalBottles += pieces;
       // Day Avg / Summary is total actual production units ÷ total
-      // As-Per-Speed target units. A row contributes only when both its actual
+      // As-Per-Speed target units, using the same PRODUCTION TIME duration as
+      // the Machine Wise report (Lehr Out adjusted), not the row's raw
+      // Packing/Layer-Out duration. A row contributes only when both its actual
       // count and its speed/duration-based target are valid; a real zero
       // actual still contributes 0 to the numerator.
-      const durationHours = durationByKey[k] ?? 1;
+      const durationHours = productionTimeSlots[k]?.durationMinutes
+        ? productionTimeSlots[k].durationMinutes / 60
+        : durationByKey[k] ?? 1;
       const speed = parseFloat(e?.speed_per_min ?? '');
       const theoretical = Number.isFinite(speed) && speed > 0 && Number.isFinite(durationHours) && durationHours > 0
         ? calculateTheoreticalBottles(speed, gobCount, durationHours)
@@ -4248,7 +4256,7 @@ export const QualityControlModule: React.FC = () => {
       totalQcHold: sumNumericField('qc_hold'),
       totalNum: sumNumericField('num'),
     };
-  }, [activeRows, activeMachine, displayKeys, durationByKey, gobCountFor]);
+  }, [activeRows, activeMachine, displayKeys, durationByKey, productionTimeSlots, gobCountFor]);
 
   // ── Save / Export / Print ────────────────────────────────────────────────
   /**
@@ -4589,27 +4597,6 @@ export const QualityControlModule: React.FC = () => {
       ),
     [dateKey, layerOutInputs, gobCountFor],
   );
-
-  // Exact Day Avg / SUMMARY PIECES EFF% of every machine, read from the same
-  // report builder that feeds Excel/Print. The active machine uses its live
-  // on-screen summary value so the Shift Efficiency table matches that row
-  // exactly; other machines come from their own stored day model.
-  const dayAvgSummaryEffByMachine = useMemo(() => {
-    const map: Record<number, string> = {};
-    for (const machineNo of [1, 2, 3, 4]) {
-      map[machineNo] = buildMachineReportModel(
-        machineNo,
-        dateKey,
-        productionStore,
-        layerOutInputs,
-        gobCountFor(machineNo),
-      ).stats.avgEff;
-    }
-    if (activeMachine >= 1 && activeMachine <= 4) {
-      map[activeMachine] = stats.avgEff;
-    }
-    return map;
-  }, [activeMachine, dateKey, gobCountFor, layerOutInputs, productionStore, stats.avgEff]);
 
   // Excel export — ONE workbook with FOUR worksheets (Machine 1 … Machine 4),
   // in machine order. Each sheet holds only its own machine's report with the
@@ -5860,10 +5847,7 @@ export const QualityControlModule: React.FC = () => {
         )}
 
         {activeMachine >= 1 && activeMachine <= 4 && (
-          <QualityReport
-            date={navDate}
-            dayAvgSummaryEffByMachine={dayAvgSummaryEffByMachine}
-          />
+          <QualityReport date={navDate} />
         )}
 
         {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}

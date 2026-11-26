@@ -238,6 +238,15 @@ const calcUnitEfficiency = (actualUnits: number, expectedUnits: number): number 
 };
 
 /**
+ * Efficiency of a Machine Total summary row — always the direct ratio of its
+ * own aggregated actual units to its own aggregated As-Per-Speed units
+ * (shift columns use that shift's two totals). No target means 0%, never an
+ * average of the underlying hourly/job percentages.
+ */
+const summaryEfficiency = (actualUnits: number, targetUnits: number): number =>
+  targetUnits > 0 ? (actualUnits / targetUnits) * 100 : 0;
+
+/**
  * Weight Efficiency % — draw based only.
  *
  *   Weight Efficiency % = (Actual Total Draw / Total Draw as per Speed) × 100
@@ -821,8 +830,8 @@ interface ShiftWiseRow {
   targetUnits: number[];
   /** Efficiency % of each shift = actual units ÷ As-Per-Speed target units × 100. */
   efficiency: (number | null)[];
-  /** The machine's exact DAY AVG / SUMMARY PIECES EFF% value, or null when absent. */
-  overallEff: number | null;
+  /** Overall EFF% = summed actual units ÷ summed As-Per-Speed units × 100. */
+  overallEff: number;
 }
 
 /**
@@ -842,14 +851,6 @@ const averageActiveEff = (values: (number | null)[]): number | null => {
   return active.length
     ? active.reduce((sum, v) => sum + v, 0) / active.length
     : null;
-};
-
-/** Parse the monitor's already-formatted Day Avg / Summary PIECES EFF% value. */
-const parseSummaryEff = (value: string | undefined): number | null => {
-  const text = (value ?? '').trim();
-  if (!text || text === '—') return null;
-  const parsed = parseFloat(text);
-  return Number.isFinite(parsed) ? parsed : null;
 };
 
 /**
@@ -874,9 +875,10 @@ const parseSummaryEff = (value: string | undefined): number | null => {
  *     shift's Production Timeline window so carry-in/Lehr Out minutes never
  *     leak into another shift's denominator. No efficiency value is averaged.
  *
- *   • Overall EFF% — the machine's exact PIECES EFF% value from its DAY AVG /
- *     SUMMARY row in the Hourly Production Monitor, displayed as-is (or '—'
- *     when that machine has no summary data). Never derived from the shifts.
+ *   • Overall EFF% — this machine's summed actual bottles ÷ its summed
+ *     As-Per-Speed target bottles × 100, the same direct ratio the Machine
+ *     Wise Production and Efficiency total rows use. No stored efficiency is
+ *     copied and no per-shift percentages are averaged.
  *
  * Row durations come from the shared Lehr Out timeline
  * (buildLayerOutTimeline over the rows' saved period_start/period_end), then
@@ -891,8 +893,7 @@ const parseSummaryEff = (value: string | undefined): number | null => {
  */
 const buildShiftWiseRows = (
   dayHourly: QualityDayHourly,
-  machines: { code: string; gobCount: number }[],
-  dayAvgSummaryEffByMachine?: Record<number, string>
+  machines: { code: string; gobCount: number }[]
 ): ShiftWiseRow[] => {
   const out: ShiftWiseRow[] = [];
   for (const machineNo of MACHINE_NOS) {
@@ -969,10 +970,13 @@ const buildShiftWiseRows = (
       efficiency: hasRecord.map((seen, i) =>
         seen ? calcUnitEfficiency(actual[i], target[i]) : null
       ),
-      // Direct source mapping: use the exact PIECES EFF% already calculated in
-      // this machine's DAY AVG / SUMMARY row of the Hourly Production Monitor.
-      // Never derive this from the three shift columns.
-      overallEff: parseSummaryEff(dayAvgSummaryEffByMachine?.[machineNo]),
+      // Overall EFF% is the direct ratio of this machine's own totals, exactly
+      // like the Machine Total row. The shift percentages above remain separate
+      // shift-by-shift figures and are never averaged into this value.
+      overallEff: summaryEfficiency(
+        actual.reduce((sum, value) => sum + value, 0),
+        target.reduce((sum, value) => sum + value, 0)
+      ),
     });
   }
   return out;
@@ -984,10 +988,7 @@ const buildShiftWiseRows = (
  * single selected date owned by the Quality Module's Hourly Production Monitor
  * controls, so both sections always show the same day.
  */
-export const QualityReport: React.FC<{
-  date: Date;
-  dayAvgSummaryEffByMachine?: Record<number, string>;
-}> = ({ date, dayAvgSummaryEffByMachine }) => {
+export const QualityReport: React.FC<{ date: Date }> = ({ date }) => {
   const { machines, bottles } = useERP();
 
   // ── Packing Names ─────────────────────────────────────────────────────────
@@ -1459,17 +1460,31 @@ export const QualityReport: React.FC<{
   // Shift-Wise Production & Efficiency Report — one row per machine, grouped
   // from the SAME already-loaded hourly records (dayHourly) of the selected
   // date but calculated by its own helper: actual bottles plus an independent
-  // efficiency for each machine + shift. Overall EFF% is passed in directly
-  // from each machine's DAY AVG / SUMMARY PIECES EFF% value. It never reads or
-  // changes the Daily report's rows/totals above, the job-wise rows below, the
-  // API or the database.
+  // efficiency for each machine + shift. Overall EFF% is this machine's own
+  // actual ÷ As-Per-Speed ratio, matching the Machine Total rows. It never
+  // reads or changes the Daily report's rows/totals above, the job-wise rows
+  // below, the API or the database.
   const shiftWiseRows = useMemo<ShiftWiseRow[]>(
-    () => buildShiftWiseRows(dayHourly, machines, dayAvgSummaryEffByMachine),
-    [dayHourly, machines, dayAvgSummaryEffByMachine]
+    () => buildShiftWiseRows(dayHourly, machines),
+    [dayHourly, machines]
   );
   // True once at least one hourly record sits behind the Shift-Wise table —
   // only used for its own "no records" note, never for a calculation.
   const hasShiftWiseData = shiftWiseRows.some((r) => r.actualUnits.some((v) => v !== null));
+
+  // Shift Efficiency % total — the same direct actual ÷ As-Per-Speed ratio as
+  // the per-machine Overall EFF% cells, summed across every machine row. Used
+  // by both the Shift Efficiency footer and the Machine Wise Grand Total.
+  const shiftOverallTotalEff = summaryEfficiency(
+    shiftWiseRows.reduce(
+      (sum, r) => sum + r.actualUnits.reduce<number>((s, v) => s + (v ?? 0), 0),
+      0
+    ),
+    shiftWiseRows.reduce(
+      (sum, r) => sum + r.targetUnits.reduce<number>((s, v) => s + v, 0),
+      0
+    )
+  );
 
   // Machine-wise totals — aggregated ONLY from the original bottle/job rows of
   // each machine (never from another total row), so the Grand Total below can
@@ -1518,9 +1533,9 @@ export const QualityReport: React.FC<{
         actualDraw,
         runtimeMinutes,
         shiftEff: shiftAsPerSpeedUnits.map((targetUnits, i) =>
-          calcUnitEfficiency(shiftUnits[i], targetUnits)
+          summaryEfficiency(shiftUnits[i], targetUnits)
         ),
-        overallEff: calcUnitEfficiency(actualUnits, asPerSpeedUnits),
+        overallEff: summaryEfficiency(actualUnits, asPerSpeedUnits),
       });
     }
     return map;
@@ -1908,8 +1923,9 @@ export const QualityReport: React.FC<{
           </tr>
         ))}
 
-        {/* Total row — plain average of the machine rows in each column,
-            over only the machines with a valid value for that column. */}
+        {/* Total row — plain average of the machine rows in each shift column,
+            over only the machines with a valid value for that column. Overall
+            EFF% uses the summed actual ÷ As-Per-Speed ratio of all machines. */}
         <tr
           style={{
             backgroundColor: '#dbeafe',
@@ -1957,9 +1973,7 @@ export const QualityReport: React.FC<{
               borderTop: '2px solid #93c5fd',
             }}
           >
-            {fmtPctWhole(
-              averageActiveEff(shiftWiseRows.map((r) => r.overallEff))
-            )}
+            {fmtPctWhole(shiftOverallTotalEff)}
           </td>
         </tr>
       </tbody>
@@ -2180,15 +2194,6 @@ export const QualityReport: React.FC<{
                 if (!lastOfMachine || totalsHidden) return [row];
 
                 const mt = machineTotals.get(r.machineNo);
-                // UI-only: the Machine 1–4 subtotal efficiency cells mirror the
-                // exact values of this machine's row in the Shift Efficiency % table.
-                // The trailing '%' is stripped so the text matches the other
-                // efficiency cells in this table; no calculation is changed.
-                const shiftEffRow = shiftWiseRows.find(
-                  (sw) => sw.machineNo === r.machineNo
-                );
-                const shiftEffText = (value: number | null) =>
-                  fmtPctWhole(value).replace(/%$/, '');
                 const totalRow = (
                   <tr
                     key={`machine-total-${r.machineNo}`}
@@ -2212,18 +2217,10 @@ export const QualityReport: React.FC<{
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[2] ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.actualUnits ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmt3(mt?.actualDraw ?? 0)}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>
-                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[0]) : fmtEff(mt?.shiftEff[0] ?? null)}
-                    </td>
-                    <td style={{ ...td, fontWeight: 700 }}>
-                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[1]) : fmtEff(mt?.shiftEff[1] ?? null)}
-                    </td>
-                    <td style={{ ...td, fontWeight: 700 }}>
-                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[2]) : fmtEff(mt?.shiftEff[2] ?? null)}
-                    </td>
-                    <td style={{ ...tdLast, fontWeight: 700 }}>
-                      {shiftEffRow ? shiftEffText(shiftEffRow.overallEff) : fmtEff(mt?.overallEff ?? null)}
-                    </td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[0] ?? null)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[1] ?? null)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[2] ?? null)}</td>
+                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(mt?.overallEff ?? null)}</td>
                   </tr>
                 );
                 return [
@@ -2247,9 +2244,9 @@ export const QualityReport: React.FC<{
 
               {/* Grand Total — production columns still come from the existing
                   Daily report totals (original rows only, never the machine-wise
-                  total rows). The Efficiency % cells show the same simple
-                  machine averages as the SHIFT EFFICIENCY % Total row, without
-                  the '%' sign so they match this table's other cells. */}
+                  total rows). The Efficiency % cells mirror the SHIFT EFFICIENCY
+                  % Total row, without the '%' sign so they match this table's
+                  other cells. */}
               {!totalsHidden && (
                 <>
                 <tr
@@ -2281,7 +2278,7 @@ export const QualityReport: React.FC<{
                     {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.efficiency[2])))}
                   </td>
                   <td style={{ ...tdLast, fontWeight: 700 }}>
-                    {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.overallEff)))}
+                    {fmtEff(shiftOverallTotalEff)}
                   </td>
                 </tr>
                 <tr key="grand-total-space" aria-hidden="true">
