@@ -162,15 +162,43 @@ const parseNum = (v?: string | null): number => {
 };
 
 /**
+ * Bottles of one packaging group (TYPE 1 or TYPE 2). null means the group was
+ * never filled in; an empty/null pack size or carton count contributes 0 when
+ * the other field of the group is present. This mirrors the Quality Monitor's
+ * "Bottles in Nos." cell, where Pack Type 2 (e.g. SB, 448 × 85 = 38,080) is
+ * added to Pack Type 1 rather than omitted.
+ */
+const packagingBottles = (
+  packSizeRaw?: string | null,
+  cartonsRaw?: string | null
+): number | null => {
+  if (packSizeRaw === undefined && cartonsRaw === undefined) return null;
+  const cartons = parseInt(cartonsRaw ?? '', 10);
+  if (Number.isFinite(cartons) && cartons === 0) return 0;
+  const packSize = parseInt(packSizeRaw ?? '', 10);
+  if (Number.isFinite(packSize) && packSize > 0 && Number.isFinite(cartons) && cartons >= 0) {
+    return packSize * cartons;
+  }
+  return null;
+};
+
+/**
  * Actual production of one hourly HPR record, in bottles — the same
- * "Bottles in Nos." value the Quality Module shows (packing size × cartons),
- * falling back to the stored bottles_in_nos column.
+ * "Bottles in Nos." value the Quality Module shows:
+ *
+ *   total bottles = (packing_size × cartons) + (packing_size_2 × cartons_2)
+ *
+ * with missing/empty Pack Type 2 fields treated as 0. The stored
+ * bottles_in_nos column is used only when neither packaging group has a
+ * usable entry (legacy rows). Both the Machine Wise report and the
+ * Shift Efficiency % table use this one helper, so their actual production
+ * and every efficiency derived from it stay in sync without overrides.
  */
 const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
   if (!e) return 0;
-  const ps = parseInt(e.packing_size ?? '', 10);
-  const ct = parseInt(e.cartons ?? '', 10);
-  if (ps > 0 && ct > 0) return ps * ct;
+  const type1 = packagingBottles(e.packing_size, e.cartons);
+  const type2 = packagingBottles(e.packing_size_2, e.cartons_2);
+  if (type1 !== null || type2 !== null) return (type1 ?? 0) + (type2 ?? 0);
   const stored = parseInt(e.bottles_in_nos ?? '', 10);
   return Number.isFinite(stored) && stored > 0 ? stored : 0;
 };
@@ -178,9 +206,10 @@ const hourlyUnits = (e?: QualityHourlyEntry | null): number => {
 /**
  * ACTUAL produced bottles of one entry for the Job-wise Production Summary —
  * mirrors the backend's _entry_units(): the stored combined "Bottles in Nos."
- * (TYPE 1 + TYPE 2), with TYPE 1 packing size × cartons only as a legacy
- * fallback. Never the packed-carton quantity. Used by the local fallback when
- * the jobs endpoint is unavailable, so it stays consistent with the endpoint.
+ * (TYPE 1 + TYPE 2), falling back to the same combined pack-size × cartons
+ * calculation. Never the packed-carton quantity. Used by the local fallback
+ * when the jobs endpoint is unavailable, so it stays consistent with the
+ * endpoint.
  */
 const jobEntryUnits = (e?: QualityHourlyEntry | null): number => {
   const stored = parseInt(e?.bottles_in_nos ?? '', 10);
@@ -806,6 +835,15 @@ interface ShiftWiseRow {
 const fmtPctWhole = (n: number | null): string =>
   (n === null ? '—' : `${n.toFixed(1)}%`);
 
+/** Simple arithmetic average of the active (valid, non-null) machines of one
+ *  Shift Efficiency % column — used only by that table's Total footer row. */
+const averageActiveEff = (values: (number | null)[]): number | null => {
+  const active = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  return active.length
+    ? active.reduce((sum, v) => sum + v, 0) / active.length
+    : null;
+};
+
 /** Parse the monitor's already-formatted Day Avg / Summary PIECES EFF% value. */
 const parseSummaryEff = (value: string | undefined): number | null => {
   const text = (value ?? '').trim();
@@ -825,10 +863,10 @@ const parseSummaryEff = (value: string | undefined): number | null => {
  * the same 24-slot mapping the Quality Module uses; manual splits inherit
  * their parent hour's shift), then per machine + shift:
  *
- *   • Actual Production — the ACTUAL bottles produced (packing size × cartons,
- *     falling back to bottles_in_nos — the same "Bottles in Nos." basis the
- *     Quality Module shows). Never theoretical/As-Per-Speed units and never
- *     draw in tons.
+ *   • Actual Production — the ACTUAL bottles produced (TYPE 1 packing size ×
+ *     cartons + TYPE 2 packing size_2 × cartons_2, falling back to
+ *     bottles_in_nos — the same "Bottles in Nos." basis the Quality Module
+ *     shows). Never theoretical/As-Per-Speed units and never draw in tons.
  *
  *   • Shift Efficiency % — the shift's summed actual bottles ÷ the shift's
  *     summed As-Per-Speed target bottles × 100. Targets use Speed/min × Gob ×
@@ -1870,7 +1908,8 @@ export const QualityReport: React.FC<{
           </tr>
         ))}
 
-        {/* Total row */}
+        {/* Total row — plain average of the machine rows in each column,
+            over only the machines with a valid value for that column. */}
         <tr
           style={{
             backgroundColor: '#dbeafe',
@@ -1891,15 +1930,9 @@ export const QualityReport: React.FC<{
           </td>
 
           {[0, 1, 2].map((shiftIndex) => {
-            const totalActual = shiftWiseRows.reduce(
-              (sum, r) => sum + (r.actualUnits[shiftIndex] ?? 0),
-              0
+            const eff = averageActiveEff(
+              shiftWiseRows.map((r) => r.efficiency[shiftIndex])
             );
-            const totalTarget = shiftWiseRows.reduce(
-              (sum, r) => sum + r.targetUnits[shiftIndex],
-              0
-            );
-            const eff = calcUnitEfficiency(totalActual, totalTarget);
 
             return (
               <td
@@ -1925,18 +1958,7 @@ export const QualityReport: React.FC<{
             }}
           >
             {fmtPctWhole(
-              calcUnitEfficiency(
-                shiftWiseRows.reduce(
-                  (sum, r) =>
-                    sum + r.actualUnits.reduce<number>((s, v) => (s ?? 0) + (v ?? 0), 0),
-                  0
-                ),
-                shiftWiseRows.reduce(
-                  (sum, r) =>
-                    sum + r.targetUnits.reduce((s, v) => s + v, 0),
-                  0
-                )
-              )
+              averageActiveEff(shiftWiseRows.map((r) => r.overallEff))
             )}
           </td>
         </tr>
@@ -2225,8 +2247,9 @@ export const QualityReport: React.FC<{
 
               {/* Grand Total — production columns still come from the existing
                   Daily report totals (original rows only, never the machine-wise
-                  total rows); each Efficiency % is that column's summed actual
-                  units ÷ summed As-Per-Speed target units. */}
+                  total rows). The Efficiency % cells show the same simple
+                  machine averages as the SHIFT EFFICIENCY % Total row, without
+                  the '%' sign so they match this table's other cells. */}
               {!totalsHidden && (
                 <>
                 <tr
@@ -2248,10 +2271,18 @@ export const QualityReport: React.FC<{
                   <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.shiftUnits[2])}</td>
                   <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(totals.actualUnits)}</td>
                   <td style={{ ...td, fontWeight: 700 }}>{fmt3(totals.actualDraw)}</td>
-                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[0])}</td>
-                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[1])}</td>
-                  <td style={{ ...td, fontWeight: 700 }}>{fmtEff(totals.shiftEff[2])}</td>
-                  <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(grandOverallEff)}</td>
+                  <td style={{ ...td, fontWeight: 700 }}>
+                    {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.efficiency[0])))}
+                  </td>
+                  <td style={{ ...td, fontWeight: 700 }}>
+                    {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.efficiency[1])))}
+                  </td>
+                  <td style={{ ...td, fontWeight: 700 }}>
+                    {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.efficiency[2])))}
+                  </td>
+                  <td style={{ ...tdLast, fontWeight: 700 }}>
+                    {fmtEff(averageActiveEff(shiftWiseRows.map((r) => r.overallEff)))}
+                  </td>
                 </tr>
                 <tr key="grand-total-space" aria-hidden="true">
                   <td
