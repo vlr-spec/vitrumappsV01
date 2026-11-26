@@ -1034,24 +1034,6 @@ export const QualityReport: React.FC<{
   const [jobLoadedKey, setJobLoadedKey] = useState<string | null>(null);
   const [jobRowsOk, setJobRowsOk] = useState(false);
 
-  // Hovered remark tooltip — follows the cursor and is shown on the LEFT side
-  // of it. `text` is the remark to display; `x`/`y` are the last cursor
-  // viewport coordinates. Null when no remark is hovered. Read-only affordance
-  // only: remark editing behaviour is unchanged.
-  const [remarkTip, setRemarkTip] = useState<{ text: string; x: number; y: number } | null>(null);
-
-  // A scroll under a hovering cursor would leave the fixed tooltip floating at
-  // stale viewport coordinates — dismiss it on any scroll instead.
-  useEffect(() => {
-    if (!remarkTip) return;
-    const hide = () => setRemarkTip(null);
-    window.addEventListener('scroll', hide, true);
-    return () => window.removeEventListener('scroll', hide, true);
-  }, [remarkTip]);
-
-  // Flip the tooltip above the cursor when there is no room below it in the viewport.
-  const remarkTipFlip = remarkTip !== null && remarkTip.y + 240 > window.innerHeight;
-
   // Print area — the only part of the page the Print button sends to the
   // printer.
   const printAreaRef = useRef<HTMLDivElement | null>(null);
@@ -1747,32 +1729,7 @@ export const QualityReport: React.FC<{
           .dppr-sw-card { width: 100%; max-width: 100%; }
           .dppr-sw-scroll .dppr-table { min-width: 400px; }
         }
-        .dppr-remark-text { display: block; white-space: normal; overflow-wrap: break-word; }
-        .dppr-remark-tip {
-          display: none;
-          position: absolute;
-          bottom: calc(100% + 8px);
-          right: 200px;
-          width: 320px;
-          max-width: 60vw;
-          max-height: 200px;
-          overflow-y: auto;
-          white-space: normal;
-          overflow-wrap: break-word;
-          word-break: break-word;
-          text-align: left;
-          background-color: #ffffff;
-          color: #1e293b;
-          border: 1px solid #cbd5e1;
-          border-radius: 8px;
-          box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
-          padding: 12px 14px;
-          font-size: 13px;
-          line-height: 1.55;
-          z-index: 60;
-        }
         @media print {
-          .dppr-remark-tip { display: none !important; }
           .dppr-table tbody tr:hover td { background-color: transparent; }
           .dppr-table tbody tr.dppr-total:hover td { background-color: #f0f4fa; }
           .dppr-table tbody tr.dppr-machine-total:hover td { background-color: #eff6ff; }
@@ -1971,7 +1928,7 @@ export const QualityReport: React.FC<{
               calcUnitEfficiency(
                 shiftWiseRows.reduce(
                   (sum, r) =>
-                    sum + r.actualUnits.reduce((s, v) => s + (v ?? 0), 0),
+                    sum + r.actualUnits.reduce<number>((s, v) => (s ?? 0) + (v ?? 0), 0),
                   0
                 ),
                 shiftWiseRows.reduce(
@@ -2201,6 +2158,15 @@ export const QualityReport: React.FC<{
                 if (!lastOfMachine || totalsHidden) return [row];
 
                 const mt = machineTotals.get(r.machineNo);
+                // UI-only: the Machine 1–4 subtotal efficiency cells mirror the
+                // exact values of this machine's row in the Shift Efficiency % table.
+                // The trailing '%' is stripped so the text matches the other
+                // efficiency cells in this table; no calculation is changed.
+                const shiftEffRow = shiftWiseRows.find(
+                  (sw) => sw.machineNo === r.machineNo
+                );
+                const shiftEffText = (value: number | null) =>
+                  fmtPctWhole(value).replace(/%$/, '');
                 const totalRow = (
                   <tr
                     key={`machine-total-${r.machineNo}`}
@@ -2224,10 +2190,18 @@ export const QualityReport: React.FC<{
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.shiftUnits[2] ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmtUnits(mt?.actualUnits ?? 0)}</td>
                     <td style={{ ...td, fontWeight: 700 }}>{fmt3(mt?.actualDraw ?? 0)}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[0] ?? null)}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[1] ?? null)}</td>
-                    <td style={{ ...td, fontWeight: 700 }}>{fmtEff(mt?.shiftEff[2] ?? null)}</td>
-                    <td style={{ ...tdLast, fontWeight: 700 }}>{fmtEff(mt?.overallEff ?? null)}</td>
+                    <td style={{ ...td, fontWeight: 700 }}>
+                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[0]) : fmtEff(mt?.shiftEff[0] ?? null)}
+                    </td>
+                    <td style={{ ...td, fontWeight: 700 }}>
+                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[1]) : fmtEff(mt?.shiftEff[1] ?? null)}
+                    </td>
+                    <td style={{ ...td, fontWeight: 700 }}>
+                      {shiftEffRow ? shiftEffText(shiftEffRow.efficiency[2]) : fmtEff(mt?.shiftEff[2] ?? null)}
+                    </td>
+                    <td style={{ ...tdLast, fontWeight: 700 }}>
+                      {shiftEffRow ? shiftEffText(shiftEffRow.overallEff) : fmtEff(mt?.overallEff ?? null)}
+                    </td>
                   </tr>
                 );
                 return [
@@ -2346,8 +2320,7 @@ export const QualityReport: React.FC<{
                     <th style={{ ...thStyle(), width: '180px', borderBottom: `2px solid ${C.border}` }}>Bottle Name</th>
                     <th style={{ ...thStyle(), width: '130px', borderBottom: `2px solid ${C.border}` }}>Date of Starting</th>
                     <th style={{ ...thStyle(), width: '120px', borderBottom: `2px solid ${C.border}` }}>Time of Starting</th>
-                    <th style={{ ...thStyle(), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
-                    <th style={{ ...thStyle(true), borderBottom: `2px solid ${C.border}` }}>Remark</th>
+                    <th style={{ ...thStyle(true), width: '150px', borderBottom: `2px solid ${C.border}` }}>Production to Date</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2359,26 +2332,7 @@ export const QualityReport: React.FC<{
                       </td>
                       <td style={td}>{r.dateText}</td>
                       <td style={td}>{r.timeText}</td>
-                      <td style={{ ...td, fontWeight: 600 }}>{fmtUnits(r.units)}</td>
-                      <td style={{ ...tdLast, textAlign: 'left', whiteSpace: 'normal' }}>
-                        {r.remark ? (
-                          <span
-                            className="dppr-remark-text"
-                            onMouseEnter={(e) => setRemarkTip({ text: r.remark, x: e.clientX, y: e.clientY })}
-                            onMouseMove={(e) => setRemarkTip({ text: r.remark, x: e.clientX, y: e.clientY })}
-                            onMouseLeave={() => setRemarkTip(null)}
-                          >
-                            {r.remark.split('\n').map((line, i) => (
-                              <React.Fragment key={i}>
-                                {i > 0 && <br />}
-                                {line}
-                              </React.Fragment>
-                            ))}
-                          </span>
-                        ) : (
-                          r.remark
-                        )}
-                      </td>
+                      <td style={{ ...tdLast, fontWeight: 600 }}>{fmtUnits(r.units)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2394,32 +2348,6 @@ export const QualityReport: React.FC<{
         </div>
       </div>
 
-      {/* Remark hover tooltip — fixed to the viewport on the LEFT side of the
-          cursor (its right edge sits 12px left of the cursor) and follows the
-          cursor while a remark is hovered; flips above the cursor when there
-          is no room below. Screen only: the print stylesheet hides it. */}
-      {remarkTip && (
-        <div
-          className="dppr-remark-tip"
-          role="tooltip"
-          style={{
-            position: 'fixed',
-            left: remarkTip.x,
-            top: remarkTip.y + (remarkTipFlip ? -12 : 14),
-            transform: remarkTipFlip
-              ? 'translate(calc(-100% - 12px), -100%)'
-              : 'translateX(calc(-100% - 12px))',
-            display: 'block',
-            bottom: 'auto',
-            right: 'auto',
-            margin: 0,
-            whiteSpace: 'pre-line',
-            zIndex: 9999,
-          }}
-        >
-          {remarkTip.text}
-        </div>
-      )}
     </div>
   );
 };
