@@ -1122,21 +1122,20 @@ const CellEmployeeSelect: React.FC<{
  * Custom 12-hour time picker for the TIME column.
  * Opens as a dropdown popover (portal to document.body) anchored to the trigger
  * cell, so opening/closing never shifts row height or column widths.
- * Three separate selectors: Hour, Minute, AM/PM. Hours are restricted to the
- * cell's selected shift (Shift 1: 7 AM-3 PM · Shift 2: 4 PM-11 PM · Shift 3:
- * 12 AM-6 AM), so an out-of-shift time can never be assembled. Confirm writes
- * the time back to the cell's editable value; no time is hardcoded as a default.
+ * Three separate selectors: Hour, Minute, AM/PM. The available hours come only
+ * from the cell's selected SHIFT (Shift 1: 7 AM-3 PM · Shift 2: 3 PM-11 PM ·
+ * Shift 3: 11 PM-7 AM), so every hour of that shift is always selectable and an
+ * out-of-shift time can never be assembled. Confirm writes the time back to the
+ * cell's editable value; no time is hardcoded as a default.
  */
 const CellTimePicker: React.FC<{
   isOpen: boolean;
   onToggle: (open: boolean) => void;
   value: string;
   shift: string;
-  /** When a job is selected, only the hours that job actually ran are offered. */
-  allowedHours?: number[];
   onConfirm: (time: string) => void;
   disabled?: boolean;
-}> = ({ isOpen, onToggle, value, shift, allowedHours, onConfirm, disabled = false }) => {
+}> = ({ isOpen, onToggle, value, shift, onConfirm, disabled = false }) => {
   const triggerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{
@@ -1148,14 +1147,12 @@ const CellTimePicker: React.FC<{
     flip: boolean;
   }>({ left: 0, width: 210, maxHeight: 220, flip: false });
 
-  const shiftAllowed = SHIFT_TIME_RANGES[shift ?? '1'] ?? SHIFT_TIME_RANGES['1'];
-  // Intersect the shift's hours with the selected job's active hours. An empty
-  // list means no job restriction (e.g. manual rows with no production data).
+  // Only the SHIFT decides which hours are offered. Job-specific hourly rows
+  // must never hide a shift hour (e.g. a newly merged job with no matching
+  // production hour), and this recomputes as soon as the row's shift changes.
   const allowed = useMemo(
-    () => (allowedHours && allowedHours.length > 0
-      ? shiftAllowed.filter((slot) => allowedHours.includes(slot.hour))
-      : shiftAllowed),
-    [shiftAllowed, allowedHours]
+    () => SHIFT_TIME_RANGES[String(shift ?? '1')] ?? SHIFT_TIME_RANGES['1'],
+    [shift]
   );
   const distinctHours = useMemo(() => {
     const seen = new Set<number>();
@@ -1246,9 +1243,9 @@ const CellTimePicker: React.FC<{
     };
   }, [isOpen, value, allowed, updatePosition, onToggle]);
 
-  // Keep the hour and AM/PM consistent with the shift AND the selected job's
-  // active hours. A time that is outside the job's window is replaced by the
-  // first hour that job actually ran.
+  // Keep the hour and AM/PM consistent with the selected shift. A time outside
+  // the new shift (after the user changes the SHIFT cell) is replaced by that
+  // shift's first hour/period, so the dropdowns are never blank.
   useEffect(() => {
     if (distinctHours.length === 0) return;
     if (hour === null || !distinctHours.includes(hour)) {
@@ -1288,9 +1285,7 @@ const CellTimePicker: React.FC<{
     onToggle(false);
   };
 
-  const rangeLabel = allowed.length > 0
-    ? `${allowed[0].hour}:00 ${allowed[0].period} - ${allowed[allowed.length - 1].hour}:00 ${allowed[allowed.length - 1].period}`
-    : 'No hours for the selected job';
+  const rangeLabel = `${allowed[0].hour}:00 ${allowed[0].period} - ${allowed[allowed.length - 1].hour}:00 ${allowed[allowed.length - 1].period}`;
 
   const pickerSelectStyle: React.CSSProperties = {
     width: 52,
@@ -2346,14 +2341,6 @@ const RePackingReport: React.FC<{
     [isBottleName, jobIdForRow]
   );
 
-  /** Only the hours where the row's job actually ran. */
-  const allowedHoursForRow = (machineNo: number, row: OrderedRow, vals: CellValues): number[] => {
-    const key = (vals.jobKey ?? jobKeyForRow(machineNo, row)).trim();
-    const option = (jobsByMachine[machineNo] ?? []).find((o) => o.key === key);
-    if (!option) return [];
-    return option.hours.map(timeHourOf).filter((hour): hour is number => hour !== null);
-  };
-
   /** Pack size of the row's selected time/job, falling back to the old
    *  job/machine-wide lookup so existing manual values keep working. */
   const packSizeForRow = (machineNo: number, row: OrderedRow, vals: CellValues): string => {
@@ -3240,9 +3227,6 @@ const RePackingReport: React.FC<{
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // The row's job is tracked internally by Job ID; TIME
-                        // options are limited to that job's active hours.
-                        const allowedHours = allowedHoursForRow(machineNo, row, rowVals);
                         // Pack Type options and Pack Size come from the exact
                         // production hour/job selected on this row.
                         const jobPackTypes = packTypesForRow(machineNo, row, rowVals);
@@ -3359,7 +3343,7 @@ const RePackingReport: React.FC<{
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|num|${key}` : null)}
                                 value={cellValue(numberingValues, key, 'time', '')}
                                 shift={cellValue(numberingValues, key, 'shift', shiftFallback)}
-                                allowedHours={allowedHours} disabled={!canEdit}
+                                disabled={!canEdit}
                                 onConfirm={(t) =>
                                   applyTimeSelection('numbering', key, t, rowVals, machineNo, row)
                                 }
@@ -3570,9 +3554,6 @@ const RePackingReport: React.FC<{
                             : isDbRow
                             ? String(row.dbEntry.shift || 1)
                             : runShift(row.run);
-                        // The row's job is tracked internally by Job ID; TIME
-                        // options are limited to that job's active hours.
-                        const allowedHours = allowedHoursForRow(machineNo, row, rowVals);
                         // Pack Type options and Pack Size come from the exact
                         // production hour/job selected on this row.
                         const jobPackTypes = packTypesForRow(machineNo, row, rowVals);
@@ -3663,7 +3644,7 @@ const RePackingReport: React.FC<{
                                 onToggle={(open) => setOpenTimeCellKey(open ? `time|sqc|${key}` : null)}
                                 value={cellValue(sqcValues, key, 'time', '')}
                                 shift={cellValue(sqcValues, key, 'shift', shiftFallback)}
-                                allowedHours={allowedHours} disabled={!canEdit}
+                                disabled={!canEdit}
                                 onConfirm={(t) =>
                                   applyTimeSelection('sqc', key, t, rowVals, machineNo, row)
                                 }
