@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Download, Printer, Save } from 'lucide-react';
+import { ChevronDown, ChevronUp, Download, Printer, Save } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import {
   repackingRepository,
+  RepackingNumberingEntry,
   RepackingSqcQcHoldEntry,
   BottleNameItem,
 } from '../../services/repackingRepository';
@@ -16,22 +17,19 @@ import {
 } from '../../utils/defectCategories';
 
 /**
- * Resorting Module — classic, print-friendly report sheets.
+ * Resorting Module — classic, print-friendly SQC / QC HOLD / NUMBERING sheets.
  *
- *   • Numbering Report   — static 17-column pallet-sorting register shell
- *   • SQC / QC HOLD (QA-F-10) — LIVE report built from the same saved entries
- *     the Quality Module's SQC/QC HOLD tab uses, via repackingRepository.
- *
- * The left-hand resorting logs act as a master list: a bottle must be selected
- * before its detail sheet is shown. All progress is tracked in packs.
+ * The view opens directly on the LIVE report built from the same saved entries
+ * the Quality Module uses, via repackingRepository. The three left-hand
+ * resorting logs act as a master list: a bottle must be selected before its
+ * detail sheet is shown. All progress is tracked in packs.
  */
 
 const MACHINE_NUMBERS = [1, 2, 3, 4] as const;
 type MachineNo = (typeof MACHINE_NUMBERS)[number];
-type MachineFilter = 'all' | MachineNo;
+type ResortingKind = 'sqc' | 'qc' | 'numbering';
+type RepackingEntry = RepackingSqcQcHoldEntry | RepackingNumberingEntry;
 
-const NUMBERING_BOTTLE_ROWS = [0, 1, 2, 3, 4];
-const NUMBERING_SHIFT_ROWS = ['1st Shift', '2nd Shift', '3rd Shift'];
 const RESORTING_LOG_STORAGE_KEY = 'vitrum-sqc-qc-resorting-log-v2';
 
 const ROMAN_SHIFT: Record<number, string> = { 1: 'I', 2: 'II', 3: 'III' };
@@ -48,11 +46,13 @@ const STATUS_FILTER_CAPTION: Record<StatusFilter, string> = {
   completed: 'Showing Completed entries across all dates',
   all: 'Showing All entries across all dates',
 };
-/** Independent pagination for each of the four SQC / QC HOLD tables. */
+/** Independent screen pagination for the three left-hand resorting logs. */
 const PAGE_SIZE = 20;
-type PageKey = 'sqcLog' | 'qcLog' | 'sqc' | 'qc';
+type PageKey = 'sqcLog' | 'qcLog' | 'numberingLog' | 'sqc' | 'qc' | 'numbering';
 type PageState = Record<PageKey, number>;
-const INITIAL_PAGE_STATE: PageState = { sqcLog: 1, qcLog: 1, sqc: 1, qc: 1 };
+const INITIAL_PAGE_STATE: PageState = {
+  sqcLog: 1, qcLog: 1, numberingLog: 1, sqc: 1, qc: 1, numbering: 1,
+};
 const matchesStatus = (balance: number, status: StatusFilter): boolean =>
   status === 'all' || (status === 'pending' ? balance > 0 : balance === 0);
 const pageSlice = <T,>(rows: T[], page: number): T[] =>
@@ -82,22 +82,10 @@ const DETAIL_TABLE_COL_WIDTHS = [
   '4.5%', // Balance
   '14.5%', // Remarks
 ] as const;
-/** Tailwind classes on the M/c. <th>/<td> in both sheets (width comes from <colgroup>). */
+/** Classes on the M/c. <th> header only; data cells stay plain like every other cell. */
 const MC_CELL_CLASS = 'prm-mc-cell prm-mc-cell--sqc px-1 text-center whitespace-nowrap';
 
-// ─── Date helpers (local calendar date, no timezone drift) ──────────────────
-const pad2 = (n: number) => String(n).padStart(2, '0');
-const toIso = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const fromIso = (iso: string): Date => {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, (m || 1) - 1, d || 1);
-};
-const shiftIso = (iso: string, days: number): string => {
-  const d = fromIso(iso);
-  d.setDate(d.getDate() + days);
-  return toIso(d);
-};
-/** YYYY-MM-DD → DD.MM.YYYY (the format printed in the QA-F-10 header). */
+/** YYYY-MM-DD → DD.MM.YYYY (the format printed in the SQC / QC HOLD header). */
 const toDisplayDate = (iso: string): string => {
   const [y, m, d] = iso.split('-');
   return `${d || '00'}.${m || '00'}.${y || '0000'}`;
@@ -111,9 +99,9 @@ const asNum = (v: unknown): number => {
 };
 const asText = (v: unknown): string => (v == null ? '' : String(v).trim());
 /** Pack type is optional on older saved rows, so keep the fallback clean. */
-const packTypeOf = (entry: RepackingSqcQcHoldEntry): string =>
+const packTypeOf = (entry: RepackingEntry): string =>
   asText(entry.pack_type) ||
-  asText((entry as RepackingSqcQcHoldEntry & { packing_type?: unknown }).packing_type);
+  asText((entry as RepackingEntry & { packing_type?: unknown }).packing_type);
 /** Entry date for the new Date column; blank when a legacy row has no date. */
 const formatEntryDate = (iso: string): string =>
   isValidIso(iso) ? toDisplayDate(iso) : asText(iso);
@@ -131,7 +119,7 @@ const dedupe = (values: string[]): string => {
   return out.join(', ');
 };
 /** DEFECTS are saved as defect_ids and returned by the backend as names. */
-const defectNamesOf = (entry: RepackingSqcQcHoldEntry): string[] => {
+const defectNamesOf = (entry: RepackingEntry): string[] => {
   if (Array.isArray(entry.defect_names) && entry.defect_names.length > 0) {
     return entry.defect_names.map((n) => asText(n)).filter(Boolean);
   }
@@ -168,13 +156,14 @@ const isSqcEntry = (entry: RepackingSqcQcHoldEntry): boolean => {
   return Number.isFinite(lot) && lot > 0;
 };
 /** Qty is always derived per entry, never copied from raw cartons/packs. */
-const entryQty = (entry: RepackingSqcQcHoldEntry): number =>
-  asNum(entry.cartons) * asNum(entry.pcs_per_pack) + asNum(entry.defective_bottles);
+const entryQty = (entry: RepackingEntry): number =>
+  asNum(entry.cartons) * asNum(entry.pcs_per_pack) +
+  asNum((entry as RepackingSqcQcHoldEntry).defective_bottles);
 
 // ─── Aggregated report row ──────────────────────────────────────────────────
-interface SqcGroupRow {
+interface MergedGroupRow {
   key: string;
-  /** localStorage key: exact merged-row key plus the SQC kind prefix. */
+  /** localStorage key: exact merged-row key plus the matrix kind prefix. */
   sourceKey: string;
   /** The report date the source entry was saved on (the batch's origin date). */
   productionDate: string;
@@ -234,7 +223,7 @@ interface ResortingEntry {
 interface ResortingBatch {
   id: string;
   /** Which tracking matrix this batch belongs to. */
-  kind: 'sqc' | 'qc';
+  kind: ResortingKind;
   /** Exact merged-row identity; one batch per visible detail line. */
   sourceKey: string;
   /** First source job ID (display only; never part of the grouping key). */
@@ -254,7 +243,7 @@ interface ResortingBatch {
 /** One (Date + Bottle Name) line in the left-side pending queue (packs). */
 interface ResortingLogRow {
   id: string;
-  kind: 'sqc' | 'qc';
+  kind: ResortingKind;
   /** Exact ISO production date shared by every entry behind this row. */
   date: string;
   bottleName: string;
@@ -264,7 +253,7 @@ interface ResortingLogRow {
 
 /** The left table only supplies the exact Date + Bottle Name to the detail pane. */
 interface ResortingSelection {
-  kind: 'sqc' | 'qc';
+  kind: ResortingKind;
   date: string;
   bottleName: string;
 }
@@ -273,11 +262,11 @@ let logSeq = 0;
 const logId = (prefix: string) =>
   `${prefix}-${Date.now().toString(36)}-${(logSeq += 1).toString(36)}`;
 /** Normalized key fragments shared by aggregation and progress tracking. */
-const normalizedPackType = (entry: RepackingSqcQcHoldEntry): string =>
-  asText((entry as any).pack_type || (entry as any).packing_type).toLowerCase();
-const normalizedReasonKey = (entry: RepackingSqcQcHoldEntry): string =>
+const normalizedPackType = (entry: RepackingEntry): string =>
+  packTypeOf(entry).toLowerCase();
+const normalizedReasonKey = (entry: RepackingEntry): string =>
   defectNamesOf(entry).map((d) => asText(d).toLowerCase()).sort().join('|');
-const normalizedCavKey = (entry: RepackingSqcQcHoldEntry): string =>
+const normalizedCavKey = (entry: RepackingEntry): string =>
   asText(entry.mould).toLowerCase();
 
 /** Exact merged-row key requested for the right-hand detail table. */
@@ -323,6 +312,19 @@ const qcBatchSourceKey = (
   mouldKey: string
 ): string =>
   `qc|${mergedRowKey(originDate, machineNo, bottleName, shift, lotNo, packType, defectsKey, mouldKey)}`;
+
+/** Equivalent identity for Numbering rows from the Quality Module's tab. */
+const numberingBatchSourceKey = (
+  originDate: string,
+  machineNo: MachineNo,
+  bottleName: string,
+  shift: number,
+  lotNo: string,
+  packType: string,
+  reasonKey: string,
+  cavKey: string
+): string =>
+  `numbering|${mergedRowKey(originDate, machineNo, bottleName, shift, lotNo, packType, reasonKey, cavKey)}`;
 
 /** Read the stable leading fields of any cached key, including legacy keys. */
 const legacyBatchFields = (sourceKey: string) => {
@@ -389,7 +391,7 @@ const groupLogRows = (batches: ResortingBatch[]): ResortingLogRow[] => {
   );
 };
 
-/** Sorting progress lives on one entry per batch, edited from the QA-F-10 row. */
+/** Sorting progress lives on one entry per batch, edited from the detail row. */
 const setBatchProgress = (
   batch: ResortingBatch,
   hold: number,
@@ -429,11 +431,14 @@ const loadStoredBatches = (): ResortingBatch[] => {
         Array.isArray(b.entries)
       )
       .map((b) => {
-        const kind: 'sqc' | 'qc' = b.kind === 'qc' ? 'qc' : 'sqc';
+        const kind: ResortingKind =
+          b.kind === 'qc' || b.kind === 'numbering' ? b.kind : 'sqc';
         // Batches saved before the split were SQC log entries; prefix their old
         // source keys so revisiting a date does not seed a duplicate batch.
         const sourceKey =
-          b.kind === 'sqc' || b.kind === 'qc' ? b.sourceKey : `sqc|${b.sourceKey}`;
+          b.kind === 'sqc' || b.kind === 'qc' || b.kind === 'numbering'
+            ? b.sourceKey
+            : `sqc|${b.sourceKey}`;
         const inferred = legacyBatchFields(sourceKey);
         const hold = Math.max(0, asNum(b.initialHold));
         const entries = b.entries
@@ -488,12 +493,6 @@ const PRM_STYLES = `
 }
 .prm-root *, .prm-root *::before, .prm-root *::after { box-sizing: border-box; }
 
-/* ── Tab state (CSS only — the report tabs are purely presentational) ───── */
-.prm-radio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.prm-view { display: none; }
-#prm-tab-numbering:checked ~ .prm-view--numbering { display: block; }
-#prm-tab-sqc:checked ~ .prm-view--sqc { display: block; }
-
 /* ── Toolbar ─────────────────────────────────────────────────────────────── */
 .prm-toolbar {
   display: flex;
@@ -507,23 +506,6 @@ const PRM_STYLES = `
   margin-bottom: 20px;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
-.prm-tab-labels { display: flex; gap: 4px; padding: 3px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 9px; }
-.prm-tab-label {
-  cursor: pointer; padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
-  font-size: 12.5px; font-weight: 600; line-height: 1.2; color: #475569;
-  white-space: nowrap; user-select: none;
-  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
-}
-.prm-tab-label:hover { color: #1d4ed8; background: #e2e8f0; }
-#prm-tab-numbering:checked ~ .prm-toolbar .prm-tab-label--numbering,
-#prm-tab-sqc:checked ~ .prm-toolbar .prm-tab-label--sqc {
-  background: #2563eb; border-color: #2563eb; color: #ffffff;
-  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.3);
-}
-#prm-tab-numbering:checked ~ .prm-toolbar .prm-tab-label--numbering:hover,
-#prm-tab-sqc:checked ~ .prm-toolbar .prm-tab-label--sqc:hover { color: #ffffff; }
-
-.prm-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
 .prm-control-group { display: flex; align-items: center; gap: 8px; }
 .prm-status-filter { margin-left: 4px; }
 .prm-status-options { display: flex; gap: 3px; padding: 3px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 9px; }
@@ -537,20 +519,6 @@ const PRM_STYLES = `
   background: #2563eb; border-color: #2563eb; color: #ffffff;
 }
 .prm-field-label { font-size: 11.5px; font-weight: 600; color: #475569; white-space: nowrap; }
-.prm-input, .prm-select {
-  height: 32px; padding: 0 9px; border: 1px solid #cbd5e1; border-radius: 7px;
-  background: #ffffff; color: #0f172a; font-size: 12px; font-family: inherit; outline: none;
-}
-.prm-input:focus, .prm-select:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13); }
-.prm-input[type="date"] { min-width: 152px; }
-.prm-select { min-width: 138px; cursor: pointer; }
-.prm-day-btn {
-  height: 32px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 7px;
-  background: #ffffff; color: #334155; font-size: 11.5px; font-weight: 600;
-  font-family: inherit; white-space: nowrap; cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-.prm-day-btn:hover { background: #f1f5f9; border-color: #94a3b8; }
 .prm-actions { margin-left: auto; display: flex; gap: 8px; }
 .prm-action-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -576,7 +544,6 @@ const PRM_STYLES = `
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline;
   gap: 8px 20px; margin-bottom: 9px; font-size: 12px; color: #1e293b;
 }
-.prm-sheet-caption-date { font-weight: 700; white-space: nowrap; }
 .prm-status {
   font-size: 11px; font-weight: 600; color: #64748b;
   margin: 0 0 8px; padding: 5px 9px; border-radius: 6px; background: #f8fafc;
@@ -598,8 +565,6 @@ const PRM_STYLES = `
 .prm-grid-group { font-weight: 700; }
 .prm-mc-cell { font-weight: 700; background: #f8fafc; white-space: nowrap; }
 .prm-name-cell { text-align: left !important; padding-left: 7px !important; }
-.prm-shift-row { background: #f8fafc; }
-.prm-shift-name { font-weight: 700; }
 .prm-total-row td { font-weight: 700; background: #f8fafc; }
 .prm-grid--sqc th { background: #d6e4ff; }
 .prm-grid--sqc .prm-grid-title, .prm-grid--sqc .prm-grid-subtitle { background: #d6e4ff !important; }
@@ -743,10 +708,8 @@ const PRM_STYLES = `
 @media print {
   @page { size: A4 landscape; margin: 8mm; }
   .prm-root { padding: 0 !important; max-width: none !important; margin: 0 !important; }
-  .prm-toolbar, .prm-radio, .prm-status, .prm-pager, .prm-sheet-caption,
+  .prm-toolbar, .prm-status, .prm-pager, .prm-sheet-caption,
   .prm-detail-empty, .prm-report-right { display: none !important; }
-  .prm-view--numbering { display: none !important; }
-  .prm-view--sqc { display: block !important; }
   .prm-sheet { border: 0 !important; border-radius: 0 !important; box-shadow: none !important; padding: 0 !important; }
   .prm-report-split { display: block !important; }
   .prm-report-left { display: block !important; width: 100% !important; max-width: 100% !important; }
@@ -767,15 +730,6 @@ const PRM_STYLES = `
 }
 `;
 
-/** Static placeholder tail of a Numbering data row (15 cells after M/c.). */
-const NumberingTailCells: React.FC = () => (
-  <>
-    <td /><td /><td /><td /><td />
-    <td /><td /><td /><td /><td />
-    <td /><td /><td /><td /><td />
-  </>
-);
-
 // ─── Aggregation helpers ────────────────────────────────────────────────────
 
 const bottleNameFor = (
@@ -792,8 +746,8 @@ const bottleNameFor = (
 const aggregateSqc = (
   entries: RepackingSqcQcHoldEntry[],
   lookup: Map<string, string>
-): Map<MachineNo, SqcGroupRow[]> => {
-  const byMachine = new Map<MachineNo, SqcGroupRow[]>();
+): Map<MachineNo, MergedGroupRow[]> => {
+  const byMachine = new Map<MachineNo, MergedGroupRow[]>();
   for (const m of MACHINE_NUMBERS) byMachine.set(m, []);
 
   for (const entry of entries) {
@@ -857,6 +811,93 @@ const aggregateSqc = (
     for (const row of rows) {
       // A zero-quantity entry is still a real saved line, but the report shows
       // it as an empty job row. Its grouping key remains intact for progress.
+      if (row.packs === 0 && row.qty === 0) {
+        row.isZero = true;
+        row.shift = 0;
+        row.lotNo = '';
+        row.pcsPerPack = 0;
+        row.reason = '';
+        row.cav = '';
+        row.sec = '';
+        row.remarks = '';
+      }
+    }
+  }
+  return byMachine;
+};
+
+/**
+ * Numbering entries come from the same combined repacking fetch as SQC / QC,
+ * but carry no lot number. They use the identical merged-row identity with an
+ * empty Lot slot and a distinct `numbering|` localStorage prefix.
+ */
+const aggregateNumbering = (
+  entries: RepackingNumberingEntry[],
+  lookup: Map<string, string>
+): Map<MachineNo, MergedGroupRow[]> => {
+  const byMachine = new Map<MachineNo, MergedGroupRow[]>();
+  for (const m of MACHINE_NUMBERS) byMachine.set(m, []);
+
+  for (const entry of entries) {
+    const machineNo = asNum(entry.machine_no) as MachineNo;
+    if (!byMachine.has(machineNo)) continue;
+
+    const productionDate = asText(entry.production_date);
+    const jobName = bottleNameFor(entry, lookup);
+    const shift = asNum(entry.shift) || 1;
+    // Numbering entries have no lot column; keep the slot empty so it never
+    // collides with a real SQC lot and still participates in the exact key.
+    const lotNo = '';
+    const packType = packTypeOf(entry);
+    const reasonKey = normalizedReasonKey(entry);
+    const cavKey = normalizedCavKey(entry);
+    const key = mergedRowKey(
+      productionDate, machineNo, jobName, shift, lotNo, packType, reasonKey, cavKey
+    );
+    const sourceKey = numberingBatchSourceKey(
+      productionDate, machineNo, jobName, shift, lotNo, packType, reasonKey, cavKey
+    );
+
+    const rows = byMachine.get(machineNo)!;
+    let group = rows.find((row) => row.key === key);
+    if (!group) {
+      group = {
+        key,
+        sourceKey,
+        productionDate,
+        machineNo,
+        jobId: asText(entry.job_id), // Reference only; never part of the key.
+        jobName,
+        shift,
+        lotNo,
+        pcsPerPack: asNum(entry.pcs_per_pack),
+        packType,
+        packs: 0,
+        looseBottles: 0,
+        qty: 0,
+        reason: dedupe(defectNamesOf(entry)),
+        cav: dedupe([asText(entry.mould), asText(entry.section_no)]),
+        sec: asText(entry.section_no),
+        // Checker / QA names stay in their own columns; only the saved free-text
+        // remark belongs in the detail sheet's Remarks cell.
+        remarks: asText(entry.remarks),
+        isZero: false,
+      };
+      rows.push(group);
+    }
+    group.packs += asNum(entry.cartons);
+    group.qty += entryQty(entry);
+    group.reason = dedupe([...group.reason.split(', '), ...defectNamesOf(entry)]);
+    group.cav = dedupe([
+      ...group.cav.split(', '), asText(entry.mould), asText(entry.section_no)
+    ]);
+    group.sec = dedupe([...group.sec.split(', '), asText(entry.section_no)]);
+    const remark = asText(entry.remarks);
+    if (remark) group.remarks = dedupe([...group.remarks.split(', '), remark]);
+  }
+
+  for (const rows of byMachine.values()) {
+    for (const row of rows) {
       if (row.packs === 0 && row.qty === 0) {
         row.isZero = true;
         row.shift = 0;
@@ -985,7 +1026,7 @@ const aggregateQcHolds = (
  */
 interface ResortingDetailRow {
   key: string;
-  kind: 'sqc' | 'qc';
+  kind: ResortingKind;
   sourceKey: string;
   machineNo: MachineNo;
   productionDate: string;
@@ -1001,7 +1042,7 @@ interface ResortingDetailRow {
   notes: string;
 }
 
-const detailRowFromSqcGroup = (group: SqcGroupRow): ResortingDetailRow => ({
+const detailRowFromSqcGroup = (group: MergedGroupRow): ResortingDetailRow => ({
   key: group.sourceKey,
   kind: 'sqc',
   sourceKey: group.sourceKey,
@@ -1037,6 +1078,24 @@ const detailRowFromQcGroup = (group: QcHoldGroupRow): ResortingDetailRow => ({
   notes: group.remarks,
 });
 
+const detailRowFromNumberingGroup = (group: MergedGroupRow): ResortingDetailRow => ({
+  key: group.sourceKey,
+  kind: 'numbering',
+  sourceKey: group.sourceKey,
+  machineNo: group.machineNo,
+  productionDate: group.productionDate,
+  bottleName: group.jobName,
+  shift: group.shift,
+  lotNo: group.lotNo,
+  pcsPerPack: group.pcsPerPack,
+  packType: group.packType,
+  packs: group.packs,
+  qty: group.qty,
+  reason: group.reason,
+  cav: group.cav,
+  notes: group.remarks,
+});
+
 /** One localStorage batch per merged detail row, clamped to its combined packs. */
 const makeDetailBatch = (
   detail: ResortingDetailRow,
@@ -1062,22 +1121,169 @@ const makeDetailBatch = (
     }],
   }, detail.packs, okQty, rejected);
 
+interface KindTotals {
+  qty: number;
+  ok: number;
+  rejected: number;
+  balance: number;
+}
+
+interface ProgressSnapshot {
+  okQty: number;
+  rejected: number;
+  balance: number;
+}
+
+/** Shared 15-column detail sheet for SQC, QC HOLD and NUMBERING selections. */
+const DetailTable: React.FC<{
+  kind: ResortingKind;
+  matrixLabel: string;
+  title: string;
+  subtitle: string;
+  rows: ResortingDetailRow[];
+  totals: KindTotals;
+  allMachines: MachineNo[];
+  defectCategoryByName: Map<string, string>;
+  canEdit: boolean;
+  progressFor: (sourceKey: string, holdPacks: number) => ProgressSnapshot;
+  onProgressChange: (
+    row: ResortingDetailRow,
+    field: 'okQty' | 'rejected',
+    value: string
+  ) => void;
+  emptyMessage: string;
+  note?: string;
+}> = ({
+  kind, matrixLabel, title, subtitle, rows, totals, allMachines,
+  defectCategoryByName, canEdit, progressFor, onProgressChange,
+  emptyMessage, note,
+}) => (
+  <table className="prm-grid prm-grid--sqc table-fixed w-full text-xs">
+    <colgroup>
+      {DETAIL_TABLE_COL_WIDTHS.map((width, i) => (
+        <col key={`${kind}-detail-col-${i}`} style={{ width }} />
+      ))}
+    </colgroup>
+    <thead>
+      <tr>
+        <th className="prm-grid-title bg-[#D6E4FF] text-black font-bold border-black" colSpan={15}>
+          {title}
+        </th>
+      </tr>
+      <tr>
+        <th className="prm-grid-subtitle bg-[#D6E4FF] text-black font-bold border-black" colSpan={15}>
+          {subtitle}
+        </th>
+      </tr>
+      <tr className="prm-grid-group">
+        {[
+          'M/c.', 'Date', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack',
+          'Pack Type', 'Packs', 'Qty', 'Reason', 'Cav.',
+          'OK Qty', 'Rejected', 'Balance', 'Remarks',
+        ].map((label) => (
+          <th
+            key={label}
+            className={`bg-[#D6E4FF] text-black font-bold border-black${label === 'M/c.' ? ` ${MC_CELL_CLASS}` : ''}`}
+          >
+            {label}
+          </th>
+        ))}
+      </tr>
+    </thead>
+    <tbody>
+      {rows.length === 0 ? (
+        <tr><td colSpan={15}>{emptyMessage}</td></tr>
+      ) : allMachines.map((machineNo) => {
+        const machineRows = rows.filter((row) => row.machineNo === machineNo);
+        if (machineRows.length === 0) return null;
+        return (
+          <React.Fragment key={`${kind}-mc-${machineNo}`}>
+            {machineRows.map((row) => {
+              const active = row.packs > 0;
+              const progress = active
+                ? progressFor(row.sourceKey, row.packs)
+                : { okQty: 0, rejected: 0, balance: 0 };
+              return (
+                <tr key={row.key}>
+                  <td className="px-1 text-center whitespace-nowrap">{machineNo}</td>
+                  <td>{formatEntryDate(row.productionDate)}</td>
+                  <td className="prm-name-cell">{row.bottleName}</td>
+                  <td>{row.shift ? ROMAN_SHIFT[row.shift] || String(row.shift) : ''}</td>
+                  <td>{blankOr(row.lotNo)}</td>
+                  <td>{row.pcsPerPack > 0 ? row.pcsPerPack : ''}</td>
+                  <td>{row.packType || '—'}</td>
+                  <td>{row.packs > 0 ? row.packs : ''}</td>
+                  <td>{row.qty > 0 ? row.qty : ''}</td>
+                  <td className="prm-reason-cell">
+                    <DefectTags value={row.reason} categoryByName={defectCategoryByName} />
+                  </td>
+                  <td>{row.cav}</td>
+                  <td className="prm-progress-cell">
+                    {active ? (
+                      <input
+                        type="number" min={0} max={row.packs} step={1}
+                        className="prm-grid-progress-input" readOnly={!canEdit}
+                        value={progress.okQty}
+                        aria-label={`${matrixLabel} OK Packs for ${row.bottleName} on ${row.productionDate}`}
+                        onChange={(e) => onProgressChange(row, 'okQty', e.target.value)}
+                      />
+                    ) : ''}
+                  </td>
+                  <td className="prm-progress-cell">
+                    {active ? (
+                      <input
+                        type="number" min={0} max={row.packs} step={1}
+                        className="prm-grid-progress-input" readOnly={!canEdit}
+                        value={progress.rejected}
+                        aria-label={`${matrixLabel} Rejected Packs for ${row.bottleName} on ${row.productionDate}`}
+                        onChange={(e) => onProgressChange(row, 'rejected', e.target.value)}
+                      />
+                    ) : ''}
+                  </td>
+                  <td>{active ? progress.balance : ''}</td>
+                  <td className="prm-remarks-cell prm-name-cell">{row.notes}</td>
+                </tr>
+              );
+            })}
+            <tr className="prm-mc-spacer" key={`${kind}-mc-${machineNo}-spacer`}>
+              <td colSpan={15}>&nbsp;</td>
+            </tr>
+          </React.Fragment>
+        );
+      })}
+      <tr className="prm-total-row">
+        <td className="prm-name-cell" colSpan={3}>Total</td>
+        <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
+        <td>{totals.qty > 0 ? totals.qty : ''}</td>
+        <td colSpan={2}>&nbsp;</td>
+        <td>{totals.ok > 0 ? totals.ok : ''}</td>
+        <td>{totals.rejected > 0 ? totals.rejected : ''}</td>
+        <td>{totals.balance > 0 ? totals.balance : ''}</td>
+        <td />
+      </tr>
+      {note && (
+        <tr className="prm-note-row border border-t-0 border-black">
+          <td colSpan={15} className="border border-t-0 border-black px-3 py-2 font-bold text-black">
+            {note}
+          </td>
+        </tr>
+      )}
+    </tbody>
+  </table>
+);
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export const ResortingModule: React.FC = () => {
   const { bottles } = useERP();
   const { hasPermission } = useAuth();
   const canEdit = hasPermission(MODULES.QUALITY_CONTROL, 'edit');
-  const [dateIso, setDateIso] = useState<string>(() => toIso(new Date()));
-  const [machineFilter, setMachineFilter] = useState<MachineFilter>('all');
-  /** Numbering tab still uses the CSS-only radio pair; this mirrors it for the
-   *  toolbar so date/machine controls can be hidden on the SQC tab only. */
-  const [reportMode, setReportMode] = useState<'numbering' | 'sqc'>('sqc');
   /** Sole visibility control for every SQC / QC HOLD table. */
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending');
   const [pages, setPages] = useState<PageState>(INITIAL_PAGE_STATE);
-  /** All saved SQC / QC HOLD entries across every production date. */
+  /** All saved SQC / QC HOLD / NUMBERING entries across every production date. */
   const [entries, setEntries] = useState<RepackingSqcQcHoldEntry[]>([]);
+  const [numberingEntries, setNumberingEntries] = useState<RepackingNumberingEntry[]>([]);
   const [bottleNames, setBottleNames] = useState<BottleNameItem[]>([]);
   const [allDataLoaded, setAllDataLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1087,6 +1293,7 @@ export const ResortingModule: React.FC = () => {
   const [resortingBatches, setResortingBatches] = useState<ResortingBatch[]>(loadStoredBatches);
   /** No detail table is shown until a bottle is picked from a left-hand log. */
   const [selectedLog, setSelectedLog] = useState<ResortingSelection | null>(null);
+  const [collapsedLogs, setCollapsedLogs] = useState<{ sqc: boolean; qc: boolean; numbering: boolean }>({ sqc: true, qc: true, numbering: true });
   /** Defect master is still used to colour the inline Reason badges. */
   const [defectGroups, setDefectGroups] = useState<DefectGroup[]>([]);
 
@@ -1104,9 +1311,9 @@ export const ResortingModule: React.FC = () => {
     };
   }, []);
 
-  // The SQC / QC HOLD report is date-independent: one fetch returns every saved
-  // entry on every date. The Status Filter is now the only visibility control,
-  // so changing the Numbering tab's report date can never hide history here.
+  // The report is date-independent: one combined fetch returns every saved
+  // numbering and SQC / QC HOLD entry on every date. The Status Filter is the
+  // only visibility control here.
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -1114,18 +1321,20 @@ export const ResortingModule: React.FC = () => {
     setAllDataLoaded(false);
 
     repackingRepository.getAllRepackingData()
-      .then(({ sqc, bottleNames: names }) => {
+      .then(({ numbering, sqc, bottleNames: names }) => {
         if (!active) return;
         setEntries(Array.isArray(sqc) ? sqc : []);
+        setNumberingEntries(Array.isArray(numbering) ? numbering : []);
         setBottleNames(Array.isArray(names) ? names : []);
         setAllDataLoaded(true);
         setLoading(false);
       })
       .catch((err) => {
         if (!active) return;
-        console.error('Failed to load SQC/QC HOLD report data:', err);
+        console.error('Failed to load resorting report data:', err);
         setEntries([]);
-        setLoadError('Could not load saved SQC / QC HOLD entries.');
+        setNumberingEntries([]);
+        setLoadError('Could not load saved NUMBERING / SQC / QC HOLD entries.');
         setLoading(false);
       });
 
@@ -1147,7 +1356,7 @@ export const ResortingModule: React.FC = () => {
     return map;
   }, [bottles, bottleNames]);
 
-  /** Merged SQC / QC HOLD group rows — the only rows the detail tables render. */
+  /** Merged SQC / QC HOLD / NUMBERING rows — the only rows the sheets render. */
   const sqcGroupsByMachine = useMemo(
     () => aggregateSqc(entries, bottleLookup),
     [entries, bottleLookup]
@@ -1156,14 +1365,21 @@ export const ResortingModule: React.FC = () => {
     () => aggregateQcHolds(entries, bottleLookup),
     [entries, bottleLookup]
   );
+  const numberingGroupsByMachine = useMemo(
+    () => aggregateNumbering(numberingEntries, bottleLookup),
+    [numberingEntries, bottleLookup]
+  );
   const allDetailRows = useMemo(() => {
     const rows: ResortingDetailRow[] = [];
     for (const groups of sqcGroupsByMachine.values()) {
       for (const group of groups) rows.push(detailRowFromSqcGroup(group));
     }
     for (const group of qcGroups) rows.push(detailRowFromQcGroup(group));
+    for (const groups of numberingGroupsByMachine.values()) {
+      for (const group of groups) rows.push(detailRowFromNumberingGroup(group));
+    }
     return rows;
-  }, [sqcGroupsByMachine, qcGroups]);
+  }, [sqcGroupsByMachine, qcGroups, numberingGroupsByMachine]);
 
   /** Exact merged-row lookup plus legacy identity indexes for cache migration. */
   const detailBySourceKey = useMemo(
@@ -1258,13 +1474,18 @@ export const ResortingModule: React.FC = () => {
     ),
     [resortingRows, statusFilter]
   );
+  const numberingLogRows = useMemo(
+    () => resortingRows.filter((row) =>
+      row.kind === 'numbering' && matchesStatus(row.balance, statusFilter)
+    ),
+    [resortingRows, statusFilter]
+  );
 
-  // Machine filter belongs to the Numbering toolbar only; every SQC table now
-  // shows all machines and is filtered solely by the Status Filter.
+  // Every sheet shows all machines and is filtered solely by the Status Filter.
   const allMachines = useMemo(() => [...MACHINE_NUMBERS] as MachineNo[], []);
   const statusCaption = STATUS_FILTER_CAPTION[statusFilter];
 
-  // Inline QA-F-10 inputs and the resorting logs share the same saved batches.
+  // Inline detail inputs and the resorting logs share the same saved batches.
   const reportBatchBySourceKey = useMemo(
     () => new Map(resortingBatches.map((batch) => [batch.sourceKey, batch])),
     [resortingBatches]
@@ -1295,6 +1516,13 @@ export const ResortingModule: React.FC = () => {
     ),
     [allDetailRows, reportBatchBySourceKey, statusFilter]
   );
+  const numberingReportRows = useMemo(
+    () => allDetailRows.filter((row) =>
+      row.kind === 'numbering' &&
+      matchesStatus(reportProgressFor(row.sourceKey, row.packs).balance, statusFilter)
+    ),
+    [allDetailRows, reportBatchBySourceKey, statusFilter]
+  );
 
   // Master / detail: the left row supplies ONLY kind + exact date + bottle.
   // Every merged row for that triple is shown, including different lots,
@@ -1311,40 +1539,36 @@ export const ResortingModule: React.FC = () => {
 
   const sqcDetailRows = selectedDetailRows.filter((row) => row.kind === 'sqc');
   const qcDetailRows = selectedDetailRows.filter((row) => row.kind === 'qc');
+  const numberingDetailRows = selectedDetailRows.filter((row) => row.kind === 'numbering');
 
   /** Pack-based totals for every merged row behind the selected log row. */
-  const detailTotals = useMemo(() => {
-    const totals = {
-      sqcQty: 0, qcQty: 0,
-      sqcOk: 0, sqcRejected: 0, sqcBalance: 0,
-      qcOk: 0, qcRejected: 0, qcBalance: 0,
-    };
-    for (const row of sqcDetailRows) {
-      totals.sqcQty += row.qty;
+  const totalsForRows = (rows: ResortingDetailRow[]): KindTotals => {
+    const totals: KindTotals = { qty: 0, ok: 0, rejected: 0, balance: 0 };
+    for (const row of rows) {
+      totals.qty += row.qty;
       if (row.packs <= 0) continue;
       const progress = reportProgressFor(row.sourceKey, row.packs);
-      totals.sqcOk += progress.okQty;
-      totals.sqcRejected += progress.rejected;
-      totals.sqcBalance += progress.balance;
-    }
-    for (const row of qcDetailRows) {
-      totals.qcQty += row.qty;
-      if (row.packs <= 0) continue;
-      const progress = reportProgressFor(row.sourceKey, row.packs);
-      totals.qcOk += progress.okQty;
-      totals.qcRejected += progress.rejected;
-      totals.qcBalance += progress.balance;
+      totals.ok += progress.okQty;
+      totals.rejected += progress.rejected;
+      totals.balance += progress.balance;
     }
     return totals;
-  }, [sqcDetailRows, qcDetailRows, reportBatchBySourceKey]);
+  };
+  const detailTotalsByKind = useMemo<Record<ResortingKind, KindTotals>>(() => ({
+    sqc: totalsForRows(sqcDetailRows),
+    qc: totalsForRows(qcDetailRows),
+    numbering: totalsForRows(numberingDetailRows),
+  }), [sqcDetailRows, qcDetailRows, numberingDetailRows, reportBatchBySourceKey]);
 
   const sqcRowCount = sqcReportRows.length;
   const qcRowCount = qcReportRows.length;
+  const numberingRowCount = numberingReportRows.length;
 
   // Screen-only pagination for the left logs; the detail sheet always shows all
   // merged rows for the selected date + bottle, and Excel uses un-paged arrays.
   const pagedSqcLogRows = pageSlice(sqcLogRows, pages.sqcLog);
   const pagedQcLogRows = pageSlice(qcLogRows, pages.qcLog);
+  const pagedNumberingLogRows = pageSlice(numberingLogRows, pages.numberingLog);
 
   // Keep pages in range when loaded data changes underneath an open view.
   useEffect(() => {
@@ -1352,13 +1576,21 @@ export const ResortingModule: React.FC = () => {
       const next: PageState = {
         sqcLog: Math.min(prev.sqcLog, pageTotal(sqcLogRows.length)),
         qcLog: Math.min(prev.qcLog, pageTotal(qcLogRows.length)),
+        numberingLog: Math.min(prev.numberingLog, pageTotal(numberingLogRows.length)),
         sqc: Math.min(prev.sqc, pageTotal(sqcRowCount)),
         qc: Math.min(prev.qc, pageTotal(qcRowCount)),
+        numbering: Math.min(prev.numbering, pageTotal(numberingRowCount)),
       };
-      return (next.sqcLog === prev.sqcLog && next.qcLog === prev.qcLog &&
-        next.sqc === prev.sqc && next.qc === prev.qc) ? prev : next;
+      return (
+        next.sqcLog === prev.sqcLog && next.qcLog === prev.qcLog &&
+        next.numberingLog === prev.numberingLog && next.sqc === prev.sqc &&
+        next.qc === prev.qc && next.numbering === prev.numbering
+      ) ? prev : next;
     });
-  }, [sqcLogRows.length, qcLogRows.length, sqcRowCount, qcRowCount]);
+  }, [
+    sqcLogRows.length, qcLogRows.length, numberingLogRows.length,
+    sqcRowCount, qcRowCount, numberingRowCount,
+  ]);
 
   /** Status is the only visibility control; changing it restarts every table. */
   const handleStatusFilterChange = (value: StatusFilter) => {
@@ -1399,7 +1631,7 @@ export const ResortingModule: React.FC = () => {
   };
 
   const updateReportProgress = (
-    kind: 'sqc' | 'qc',
+    kind: ResortingKind,
     sourceKey: string,
     originDate: string,
     bottleName: string,
@@ -1453,12 +1685,13 @@ export const ResortingModule: React.FC = () => {
       localStorage.setItem(RESORTING_LOG_STORAGE_KEY, JSON.stringify(resortingBatches));
       const sqcCount = resortingBatches.filter((batch) => batch.kind === 'sqc').length;
       const qcCount = resortingBatches.filter((batch) => batch.kind === 'qc').length;
+      const numberingCount = resortingBatches.filter((batch) => batch.kind === 'numbering').length;
       toast.success(
-        `Resorting logs saved — ${sqcCount} SQC / ${qcCount} QC hold batch${sqcCount + qcCount === 1 ? '' : 'es'}.`,
+        `Resorting logs saved — ${sqcCount} SQC / ${qcCount} QC hold / ${numberingCount} numbering batch${sqcCount + qcCount + numberingCount === 1 ? '' : 'es'}.`,
         { duration: 2500 }
       );
     } catch (err) {
-      console.error('Failed to save SQC / QC HOLD resorting log:', err);
+      console.error('Failed to save resorting log:', err);
       toast.error('Could not save the resorting log. Please try again.');
     }
   };
@@ -1495,33 +1728,47 @@ export const ResortingModule: React.FC = () => {
       const excelNumber = (value: number): number | '' => (value > 0 ? value : '');
 
       // Only the active right-hand matrix is exported; no sidebar log blocks.
-      const isQc = selectedLog?.kind === 'qc';
-      const rows = isQc ? qcDetailRows : sqcDetailRows;
-      const totals = isQc
-        ? {
-          qty: detailTotals.qcQty,
-          ok: detailTotals.qcOk,
-          rejected: detailTotals.qcRejected,
-          balance: detailTotals.qcBalance,
-        }
-        : {
-          qty: detailTotals.sqcQty,
-          ok: detailTotals.sqcOk,
-          rejected: detailTotals.sqcRejected,
-          balance: detailTotals.sqcBalance,
-        };
-      const sheet = workbook.addWorksheet(isQc ? 'QC HOLD' : 'SQC');
+      const activeKind: ResortingKind = selectedLog?.kind ?? 'sqc';
+      const sheetMeta: Record<ResortingKind, {
+        sheet: string;
+        title: string;
+        subtitle: string;
+        file: string;
+        rows: ResortingDetailRow[];
+      }> = {
+        sqc: {
+          sheet: 'SQC',
+          title: 'REPORT OF NON CONFORMING MATERIALS (SQC)',
+          subtitle: `Material kept aside for Resorting. ( SQC). ${statusCaption}`,
+          file: 'SQC',
+          rows: sqcDetailRows,
+        },
+        qc: {
+          sheet: 'QC HOLD',
+          title: 'REPORT OF QC HOLD MATERIALS (QC HOLD)',
+          subtitle: `Material kept aside for QC Hold. (QC HOLD). ${statusCaption}`,
+          file: 'QC_HOLD',
+          rows: qcDetailRows,
+        },
+        numbering: {
+          sheet: 'NUMBERING',
+          title: 'REPORT OF NUMBERING MATERIALS (NUMBERING)',
+          subtitle: `Material kept aside for Pallet Sorting. (NUMBERING). ${statusCaption}`,
+          file: 'NUMBERING',
+          rows: numberingDetailRows,
+        },
+      };
+      const meta = sheetMeta[activeKind];
+      const rows = meta.rows;
+      const totals = detailTotalsByKind[activeKind];
+      const sheet = workbook.addWorksheet(meta.sheet);
       sheet.mergeCells('A1:O1');
-      sheet.getCell('A1').value = isQc
-        ? 'REPORT OF QC HOLD MATERIALS (QC HOLD)'
-        : 'REPORT OF NON CONFORMING MATERIALS (SQC)';
+      sheet.getCell('A1').value = meta.title;
       sheet.getCell('A1').font = { bold: true, size: 14, name: 'Times New Roman' };
       sheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
 
       sheet.mergeCells('A2:O2');
-      sheet.getCell('A2').value = isQc
-        ? `Material kept aside for QC Hold. (QC HOLD). ${statusCaption}`
-        : `Material kept aside for Resorting. ( SQC). ${statusCaption}`;
+      sheet.getCell('A2').value = meta.subtitle;
       sheet.getCell('A2').font = { ...tableFont };
 
       styleHeader(sheet.addRow([
@@ -1531,13 +1778,13 @@ export const ResortingModule: React.FC = () => {
       for (const machineNo of allMachines) {
         const machineRows = rows.filter((row) => row.machineNo === machineNo);
         if (machineRows.length === 0) continue;
-        machineRows.forEach((row, idx) => {
+        machineRows.forEach((row) => {
           const isActive = row.packs > 0;
           const progress = isActive
             ? reportProgressFor(row.sourceKey, row.packs)
             : { okQty: 0, rejected: 0, balance: 0 };
           styleData(sheet.addRow([
-            idx === 0 ? `M/c. ${machineNo}` : '',
+            machineNo,
             formatEntryDate(row.productionDate),
             row.bottleName,
             row.shift ? ROMAN_SHIFT[row.shift] || String(row.shift) : '',
@@ -1567,7 +1814,7 @@ export const ResortingModule: React.FC = () => {
         excelNumber(totals.balance),
         '',
       ]));
-      if (isQc) {
+      if (activeKind === 'qc') {
         // Note is a bordered row attached directly to the bottom of the table.
         const noteRowNumber = sheet.rowCount + 1;
         sheet.mergeCells(`A${noteRowNumber}:O${noteRowNumber}`);
@@ -1591,13 +1838,13 @@ export const ResortingModule: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Resorting_${isQc ? 'QC_HOLD' : 'SQC'}_${(selectedLog?.date || 'all').replace(/-/g, '')}.xlsx`;
+      a.download = `Resorting_${meta.file}_${(selectedLog?.date || 'all').replace(/-/g, '')}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error('Failed to export SQC / QC HOLD report:', err);
+      console.error('Failed to export resorting report:', err);
     } finally {
       setExporting(false);
     }
@@ -1612,9 +1859,27 @@ export const ResortingModule: React.FC = () => {
     });
   };
 
-  const renderResortingLog = (kind: 'sqc' | 'qc', title: string) => {
-    const rows = kind === 'sqc' ? pagedSqcLogRows : pagedQcLogRows;
-    const rowCount = kind === 'sqc' ? sqcLogRows.length : qcLogRows.length;
+  const toggleLogCollapse = (kind: 'sqc' | 'qc' | 'numbering') => setCollapsedLogs((prev) => ({ ...prev, [kind]: !prev[kind] }));
+
+  const renderResortingLog = (kind: ResortingKind, title: string) => {
+    const isCollapsed = collapsedLogs[kind];
+    const pagedRows: Record<ResortingKind, ResortingLogRow[]> = {
+      sqc: pagedSqcLogRows,
+      qc: pagedQcLogRows,
+      numbering: pagedNumberingLogRows,
+    };
+    const rowCounts: Record<ResortingKind, number> = {
+      sqc: sqcLogRows.length,
+      qc: qcLogRows.length,
+      numbering: numberingLogRows.length,
+    };
+    const pageKey: Record<ResortingKind, PageKey> = {
+      sqc: 'sqcLog',
+      qc: 'qcLog',
+      numbering: 'numberingLog',
+    };
+    const rows = pagedRows[kind];
+    const rowCount = rowCounts[kind];
     const displayDate = (row: ResortingLogRow): string =>
       isValidIso(row.date) ? toDisplayDate(row.date) : row.date || '—';
 
@@ -1627,43 +1892,62 @@ export const ResortingModule: React.FC = () => {
             <col style={{ width: '28%' }} />
           </colgroup>
           <thead>
-            <tr><th className="prm-log-title" colSpan={3}>{title}</th></tr>
-            <tr><th>Date</th><th>Bottle Name</th><th>Pending Qty</th></tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr><td colSpan={3}>No balances for the selected status.</td></tr>
-            ) : (
-              rows.map((row) => {
-                const selected = selectedLog?.kind === row.kind &&
-                  selectedLog.date === row.date &&
-                  selectedLog.bottleName.toLowerCase() === row.bottleName.toLowerCase();
-                return (
-                  <tr
-                    key={row.id}
-                    className={`prm-log-row--selectable${selected ? ' prm-log-row--selected' : ''}`}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selected}
-                    title={`View details for ${row.bottleName}`}
-                    onClick={() => selectLogRow(row)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        selectLogRow(row);
-                      }
-                    }}
+            <tr>
+              <th className="prm-log-title" colSpan={3}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                  <span className="flex-1 text-center">{title}</span>
+                  <button
+                    type="button"
+                    className="rounded p-0.5 cursor-pointer hover:bg-blue-200/60"
+                    aria-expanded={!isCollapsed}
+                    aria-label={`Toggle ${title}`}
+                    onClick={() => toggleLogCollapse(kind)}
                   >
-                    <td>{displayDate(row)}</td>
-                    <td className="prm-log-name">{row.bottleName}</td>
-                    <td>{row.balance}</td>
-                  </tr>
-                );
-              })
+                    {isCollapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+                  </button>
+                </div>
+              </th>
+            </tr>
+            {!isCollapsed && (
+              <tr><th>Date</th><th>Bottle Name</th><th>Pending Qty</th></tr>
             )}
-          </tbody>
+          </thead>
+          {!isCollapsed && (
+            <tbody>
+              {rows.length === 0 ? (
+                <tr><td colSpan={3}>No balances for the selected status.</td></tr>
+              ) : (
+                rows.map((row) => {
+                  const selected = selectedLog?.kind === row.kind &&
+                    selectedLog.date === row.date &&
+                    selectedLog.bottleName.toLowerCase() === row.bottleName.toLowerCase();
+                  return (
+                    <tr
+                      key={row.id}
+                      className={`prm-log-row--selectable${selected ? ' prm-log-row--selected' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selected}
+                      title={`View details for ${row.bottleName}`}
+                      onClick={() => selectLogRow(row)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          selectLogRow(row);
+                        }
+                      }}
+                    >
+                      <td>{displayDate(row)}</td>
+                      <td className="prm-log-name">{row.bottleName}</td>
+                      <td>{row.balance}</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          )}
         </table>
-        {renderPager(kind === 'sqc' ? 'sqcLog' : 'qcLog', rowCount)}
+        {!isCollapsed && renderPager(pageKey[kind], rowCount)}
       </section>
     );
   };
@@ -1673,94 +1957,24 @@ export const ResortingModule: React.FC = () => {
       <style>{PRM_STYLES}</style>
       <Toaster position="bottom-right" richColors />
 
-      <input
-        className="prm-radio"
-        type="radio"
-        name="prm-report-view"
-        id="prm-tab-numbering"
-        checked={reportMode === 'numbering'}
-        onChange={() => setReportMode('numbering')}
-      />
-      <input
-        className="prm-radio"
-        type="radio"
-        name="prm-report-view"
-        id="prm-tab-sqc"
-        checked={reportMode === 'sqc'}
-        onChange={() => setReportMode('sqc')}
-      />
-
       {/* ── Top control & filter bar ─────────────────────────────────────── */}
       <div className="prm-toolbar">
-        <div className="prm-tab-labels" role="tablist" aria-label="Report view">
-          <label className="prm-tab-label prm-tab-label--numbering" htmlFor="prm-tab-numbering">
-            Numbering Report
-          </label>
-          <label className="prm-tab-label prm-tab-label--sqc" htmlFor="prm-tab-sqc">
-            SQC / QC HOLD Report
-          </label>
-        </div>
-
-        {reportMode === 'sqc' && (
-          <div className="prm-control-group prm-status-filter">
-            <span className="prm-field-label" id="prm-status-filter-label">Status Filter</span>
-            <div className="prm-status-options" role="group" aria-labelledby="prm-status-filter-label">
-              {(['pending', 'completed', 'all'] as StatusFilter[]).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={`prm-status-option${statusFilter === value ? ' prm-status-option--active' : ''}`}
-                  aria-pressed={statusFilter === value}
-                  onClick={() => handleStatusFilterChange(value)}
-                >
-                  {STATUS_FILTER_LABEL[value]}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {reportMode === 'numbering' && (
-          <div className="prm-controls">
-            <div className="prm-control-group">
-              <label className="prm-field-label" htmlFor="prm-report-date">Report Date</label>
-              <input
-                className="prm-input"
-                id="prm-report-date"
-                type="date"
-                value={dateIso}
-                onChange={(e) => {
-                  if (isValidIso(e.target.value)) setDateIso(e.target.value);
-                }}
-              />
-            </div>
-            <div className="prm-control-group">
-              <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, -1))}>
-                &lt; Previous Day
-              </button>
-              <button className="prm-day-btn" type="button" onClick={() => setDateIso(toIso(new Date()))}>
-                Today
-              </button>
-              <button className="prm-day-btn" type="button" onClick={() => setDateIso((p) => shiftIso(p, 1))}>
-                Next Day &gt;
-              </button>
-            </div>
-            <div className="prm-control-group">
-              <label className="prm-field-label" htmlFor="prm-machine">Machine</label>
-              <select
-                className="prm-select"
-                id="prm-machine"
-                value={machineFilter}
-                onChange={(e) => setMachineFilter(e.target.value as MachineFilter)}
+        <div className="prm-control-group prm-status-filter">
+          <span className="prm-field-label" id="prm-status-filter-label">Status Filter</span>
+          <div className="prm-status-options" role="group" aria-labelledby="prm-status-filter-label">
+            {(['pending', 'completed', 'all'] as StatusFilter[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`prm-status-option${statusFilter === value ? ' prm-status-option--active' : ''}`}
+                aria-pressed={statusFilter === value}
+                onClick={() => handleStatusFilterChange(value)}
               >
-                <option value="all">All Machines</option>
-                {MACHINE_NUMBERS.map((m) => (
-                  <option key={m} value={m}>Machine {m}</option>
-                ))}
-              </select>
-            </div>
+                {STATUS_FILTER_LABEL[value]}
+              </button>
+            ))}
           </div>
-        )}
+        </div>
 
         <div className="prm-actions">
           <button
@@ -1780,83 +1994,23 @@ export const ResortingModule: React.FC = () => {
         </div>
       </div>
 
-      {/* ── Layout 1 : Numbering Report (static shell) ───────────────────── */}
-      <div className="prm-view prm-view--numbering">
-        <div className="prm-sheet">
-          <div className="prm-sheet-caption">
-            <span>Please find below the Daily Report of Bottles kept aside for Pallet Sorting. ( Numbering).</span>
-            <span className="prm-sheet-caption-date">Date : DD.MM.YYYY</span>
-          </div>
-
-          <table className="prm-grid">
-            <colgroup>
-              <col style={{ width: '5%' }} /><col style={{ width: '14%' }} /><col style={{ width: '5%' }} />
-              <col style={{ width: '6%' }} /><col style={{ width: '6%' }} /><col style={{ width: '6%' }} />
-              <col style={{ width: '6%' }} /><col style={{ width: '6%' }} /><col style={{ width: '6%' }} />
-              <col style={{ width: '5%' }} /><col style={{ width: '6%' }} /><col style={{ width: '5%' }} />
-              <col style={{ width: '5%' }} /><col style={{ width: '5%' }} /><col style={{ width: '5%' }} />
-              <col style={{ width: '4%' }} /><col style={{ width: '5%' }} />
-            </colgroup>
-            <thead>
-              <tr><th className="prm-grid-title" colSpan={17}>NUMBERING REPORT</th></tr>
-              <tr className="prm-grid-group">
-                <th rowSpan={3}>M/c.</th><th rowSpan={3}>Bottle Name</th><th rowSpan={3}>Pcs</th>
-                <th colSpan={6}>Shift wise ( Packets and Qty.)</th>
-                <th rowSpan={3}>Total Qty.</th><th rowSpan={3}>Previous Balance Qty.</th>
-                <th rowSpan={3}>Today OK Pack</th><th rowSpan={3}>Today OK Qty.</th>
-                <th rowSpan={3}>Today Rej. Pack</th><th rowSpan={3}>Today Rej. Qty.</th>
-                <th rowSpan={3}>%</th><th rowSpan={3}>Cumm. Balance Qty.</th>
-              </tr>
-              <tr className="prm-grid-group">
-                <th colSpan={2}>I</th><th colSpan={2}>II</th><th colSpan={2}>III</th>
-              </tr>
-              <tr className="prm-grid-group">
-                <th>Pack</th><th>Qty.</th><th>Pack</th><th>Qty.</th><th>Pack</th><th>Qty.</th>
-              </tr>
-            </thead>
-            <tbody>
-              {MACHINE_NUMBERS.map((machine) => (
-                <React.Fragment key={`numbering-mc-${machine}`}>
-                  {NUMBERING_BOTTLE_ROWS.map((row) => (
-                    <tr key={`numbering-mc-${machine}-bottle-${row}`}>
-                      {row === 0 ? <td className="prm-mc-cell" rowSpan={8}>M/c. {machine}</td> : null}
-                      <td className="prm-name-cell">&nbsp;</td>
-                      <NumberingTailCells />
-                    </tr>
-                  ))}
-                  {NUMBERING_SHIFT_ROWS.map((shift) => (
-                    <tr className="prm-shift-row" key={`numbering-mc-${machine}-${shift}`}>
-                      <td className="prm-name-cell prm-shift-name">{shift}</td>
-                      <NumberingTailCells />
-                    </tr>
-                  ))}
-                </React.Fragment>
-              ))}
-              <tr className="prm-total-row">
-                <td>&nbsp;</td><td className="prm-name-cell">Total</td><NumberingTailCells />
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ── Layout 2 : SQC + QC HOLD matrices and their resorting logs ────── */}
-      <div className="prm-view prm-view--sqc">
-        <div className="prm-sheet">
+      {/* ── NUMBERING / SQC / QC HOLD sheets and their resorting logs ────── */}
+      <div className="prm-sheet">
           <div className="prm-sheet-caption">
             <span>{statusCaption}</span>
           </div>
 
           {loading ? (
-            <p className="prm-status">Loading saved SQC / QC HOLD entries…</p>
+            <p className="prm-status">Loading saved NUMBERING / SQC / QC HOLD entries…</p>
           ) : loadError ? (
             <p className="prm-status prm-status--error">{loadError}</p>
-          ) : sqcRowCount === 0 && qcRowCount === 0 && sqcLogRows.length === 0 && qcLogRows.length === 0 ? (
-            <p className="prm-status">No SQC / QC HOLD entries for the selected status.</p>
+          ) : sqcRowCount === 0 && qcRowCount === 0 && numberingRowCount === 0 &&
+              sqcLogRows.length === 0 && qcLogRows.length === 0 && numberingLogRows.length === 0 ? (
+            <p className="prm-status">No NUMBERING / SQC / QC HOLD entries for the selected status.</p>
           ) : null}
 
           <div className="prm-report-split flex flex-col lg:flex-row gap-4 items-start">
-            {/* ── 25% sidebar: two independent, carry-forward resorting logs ─ */}
+            {/* ── 25% sidebar: three independent, carry-forward resorting logs ─ */}
             <div className="prm-report-right w-full lg:w-1/4 lg:max-w-[25%] min-w-0">
               <div className="prm-log-caption">
                 {statusCaption} · balances carry forward across all dates
@@ -1864,6 +2018,7 @@ export const ResortingModule: React.FC = () => {
               <div className="prm-log-stack">
                 {renderResortingLog('sqc', 'SQC - RESORTING LOG')}
                 {renderResortingLog('qc', 'QC HOLD - RESORTING LOG')}
+                {renderResortingLog('numbering', 'NUMBERING - RESORTING LOG')}
               </div>
             </div>
 
@@ -1875,245 +2030,67 @@ export const ResortingModule: React.FC = () => {
                 </div>
               )}
               {selectedLog?.kind === 'sqc' && (
-                <>
-                  {/* TOP TABLE — SQC: only the selected bottle's batch. */}
-                  <table className="prm-grid prm-grid--sqc table-fixed w-full text-xs">
-                <colgroup>
-                  {DETAIL_TABLE_COL_WIDTHS.map((width, i) => (
-                    <col key={`sqc-detail-col-${i}`} style={{ width }} />
-                  ))}
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th className="prm-grid-title bg-[#D6E4FF]" colSpan={15}>REPORT OF NON CONFORMING MATERIALS (SQC)</th>
-                  </tr>
-                  <tr>
-                    <th className="prm-grid-subtitle bg-[#D6E4FF]" colSpan={15}>
-                      Material kept aside for Resorting. ( SQC). {statusCaption}
-                    </th>
-                  </tr>
-                  <tr className="prm-grid-group">
-                    <th className={MC_CELL_CLASS}>M/c.</th><th>Date</th><th>Bottle Name</th><th>Shift</th><th>Lot</th>
-                    <th>Pcs / Pack</th><th>Pack Type</th><th>Packs</th><th>Qty</th><th>Reason</th><th>Cav.</th>
-                    <th>OK Qty</th><th>Rejected</th><th>Balance</th><th>Remarks</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sqcDetailRows.length === 0 ? (
-                    <tr><td colSpan={15}>No SQC database records found for this date and bottle.</td></tr>
-                  ) : allMachines.map((machineNo) => {
-                    // Rows are merged by the exact visible identity, so two
-                    // entries with matching Shift/Lot/Pack/Reason/Cav are one.
-                    const rows = sqcDetailRows.filter((row) => row.machineNo === machineNo);
-                    if (rows.length === 0) return null;
-                    return (
-                      <React.Fragment key={`sqc-mc-${machineNo}`}>
-                        {rows.map((row, idx) => {
-                          const active = row.packs > 0;
-                          const progress = active
-                            ? reportProgressFor(row.sourceKey, row.packs)
-                            : { okQty: 0, rejected: 0, balance: 0 };
-                          return (
-                            <tr key={row.key}>
-                              {idx === 0 ? (
-                                <td className={MC_CELL_CLASS} rowSpan={rows.length}>M/c. {machineNo}</td>
-                              ) : null}
-                              <td>{formatEntryDate(row.productionDate)}</td>
-                              <td className="prm-name-cell">{row.bottleName}</td>
-                              <td>{row.shift ? ROMAN_SHIFT[row.shift] || String(row.shift) : ''}</td>
-                              <td>{blankOr(row.lotNo)}</td>
-                              <td>{row.pcsPerPack > 0 ? row.pcsPerPack : ''}</td>
-                              <td>{row.packType || '—'}</td>
-                              <td>{row.packs > 0 ? row.packs : ''}</td>
-                              <td>{row.qty > 0 ? row.qty : ''}</td>
-                              <td className="prm-reason-cell">
-                                <DefectTags value={row.reason} categoryByName={defectCategoryByName} />
-                              </td>
-                              <td>{row.cav}</td>
-                              <td className="prm-progress-cell">
-                                {active ? (
-                                  <input
-                                    type="number" min={0} max={row.packs} step={1}
-                                    className="prm-grid-progress-input" readOnly={!canEdit}
-                                    value={progress.okQty}
-                                    aria-label={`SQC OK Packs for ${row.bottleName} on ${row.productionDate}`}
-                                    onChange={(e) => updateReportProgress(
-                                      'sqc', row.sourceKey, row.productionDate, row.bottleName,
-                                      row.lotNo, row.packs, 'okQty', e.target.value
-                                    )}
-                                  />
-                                ) : ''}
-                              </td>
-                              <td className="prm-progress-cell">
-                                {active ? (
-                                  <input
-                                    type="number" min={0} max={row.packs} step={1}
-                                    className="prm-grid-progress-input" readOnly={!canEdit}
-                                    value={progress.rejected}
-                                    aria-label={`SQC Rejected Packs for ${row.bottleName} on ${row.productionDate}`}
-                                    onChange={(e) => updateReportProgress(
-                                      'sqc', row.sourceKey, row.productionDate, row.bottleName,
-                                      row.lotNo, row.packs, 'rejected', e.target.value
-                                    )}
-                                  />
-                                ) : ''}
-                              </td>
-                              <td>{active ? progress.balance : ''}</td>
-                              <td className="prm-remarks-cell prm-name-cell">{row.notes}</td>
-                            </tr>
-                          );
-                        })}
-                        <tr className="prm-mc-spacer" key={`sqc-mc-${machineNo}-spacer`}>
-                          <td colSpan={15}>&nbsp;</td>
-                        </tr>
-                      </React.Fragment>
-                    );
-                  })}
-                  <tr className="prm-total-row">
-                    <td className="prm-name-cell" colSpan={3}>Total</td>
-                    <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
-                    <td>{detailTotals.sqcQty > 0 ? detailTotals.sqcQty : ''}</td>
-                    <td colSpan={2}>&nbsp;</td>
-                    <td>{detailTotals.sqcOk > 0 ? detailTotals.sqcOk : ''}</td>
-                    <td>{detailTotals.sqcRejected > 0 ? detailTotals.sqcRejected : ''}</td>
-                    <td>{detailTotals.sqcBalance > 0 ? detailTotals.sqcBalance : ''}</td>
-                    <td />
-                  </tr>
-                </tbody>
-              </table>
-
-                </>
+                <DetailTable
+                  kind="sqc"
+                  matrixLabel="SQC"
+                  title="REPORT OF NON CONFORMING MATERIALS (SQC)"
+                  subtitle={`Material kept aside for Resorting. ( SQC). ${statusCaption}`}
+                  rows={sqcDetailRows}
+                  totals={detailTotalsByKind.sqc}
+                  allMachines={allMachines}
+                  defectCategoryByName={defectCategoryByName}
+                  canEdit={canEdit}
+                  progressFor={reportProgressFor}
+                  onProgressChange={(row, field, value) => updateReportProgress(
+                    'sqc', row.sourceKey, row.productionDate, row.bottleName,
+                    row.lotNo, row.packs, field, value
+                  )}
+                  emptyMessage="No SQC database records found for this date and bottle."
+                />
               )}
               {selectedLog?.kind === 'qc' && (
-                <>
-                  {/* BOTTOM TABLE — QC HOLD: only the selected bottle's batch. */}
-                  <table className="prm-grid prm-grid--sqc table-fixed w-full text-xs">
-                <colgroup>
-                  {DETAIL_TABLE_COL_WIDTHS.map((width, i) => (
-                    <col key={`qc-detail-col-${i}`} style={{ width }} />
-                  ))}
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th className="prm-grid-title bg-[#D6E4FF] text-black font-bold border-black" colSpan={15}>
-                      REPORT OF QC HOLD MATERIALS (QC HOLD)
-                    </th>
-                  </tr>
-                  <tr>
-                    <th className="prm-grid-subtitle bg-[#D6E4FF] text-black font-bold border-black" colSpan={15}>
-                      Material kept aside for QC Hold. (QC HOLD). {statusCaption}
-                    </th>
-                  </tr>
-                  <tr className="prm-grid-group">
-                    {[
-                      'M/c.', 'Date', 'Bottle Name', 'Shift', 'Lot', 'Pcs / Pack',
-                      'Pack Type', 'Packs', 'Qty', 'Reason', 'Cav.',
-                      'OK Qty', 'Rejected', 'Balance', 'Remarks',
-                    ].map((label) => (
-                      <th
-                        key={label}
-                        className={`bg-[#D6E4FF] text-black font-bold border-black${label === 'M/c.' ? ` ${MC_CELL_CLASS}` : ''}`}
-                      >
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {qcDetailRows.length === 0 ? (
-                    <tr><td colSpan={15}>No QC HOLD database records found for this date and bottle.</td></tr>
-                  ) : allMachines.map((machineNo) => {
-                    // Merged QC HOLD rows for the clicked date + bottle.
-                    // Defect names fill Reason and mould/section fill Cav.
-                    const rows = qcDetailRows.filter((row) => row.machineNo === machineNo);
-                    if (rows.length === 0) return null;
-                    return (
-                      <React.Fragment key={`qc-mc-${machineNo}`}>
-                        {rows.map((row, idx) => {
-                          const active = row.packs > 0;
-                          const progress = active
-                            ? reportProgressFor(row.sourceKey, row.packs)
-                            : { okQty: 0, rejected: 0, balance: 0 };
-                          return (
-                            <tr key={row.key}>
-                              {idx === 0 ? (
-                                <td className={MC_CELL_CLASS} rowSpan={rows.length}>M/c. {machineNo}</td>
-                              ) : null}
-                              <td>{formatEntryDate(row.productionDate)}</td>
-                              <td className="prm-name-cell">{row.bottleName}</td>
-                              <td>{row.shift ? ROMAN_SHIFT[row.shift] || String(row.shift) : ''}</td>
-                              <td>{blankOr(row.lotNo)}</td>
-                              <td>{row.pcsPerPack > 0 ? row.pcsPerPack : ''}</td>
-                              <td>{row.packType || '—'}</td>
-                              <td>{row.packs > 0 ? row.packs : ''}</td>
-                              <td>{row.qty > 0 ? row.qty : ''}</td>
-                              <td className="prm-reason-cell">
-                                <DefectTags value={row.reason} categoryByName={defectCategoryByName} />
-                              </td>
-                              <td>{row.cav}</td>
-                              <td className="prm-progress-cell">
-                                {active ? (
-                                  <input
-                                    type="number" min={0} max={row.packs} step={1}
-                                    className="prm-grid-progress-input" readOnly={!canEdit}
-                                    value={progress.okQty}
-                                    aria-label={`QC HOLD OK Packs for ${row.bottleName} on ${row.productionDate}`}
-                                    onChange={(e) => updateReportProgress(
-                                      'qc', row.sourceKey, row.productionDate, row.bottleName,
-                                      row.lotNo, row.packs, 'okQty', e.target.value
-                                    )}
-                                  />
-                                ) : ''}
-                              </td>
-                              <td className="prm-progress-cell">
-                                {active ? (
-                                  <input
-                                    type="number" min={0} max={row.packs} step={1}
-                                    className="prm-grid-progress-input" readOnly={!canEdit}
-                                    value={progress.rejected}
-                                    aria-label={`QC HOLD Rejected Packs for ${row.bottleName} on ${row.productionDate}`}
-                                    onChange={(e) => updateReportProgress(
-                                      'qc', row.sourceKey, row.productionDate, row.bottleName,
-                                      row.lotNo, row.packs, 'rejected', e.target.value
-                                    )}
-                                  />
-                                ) : ''}
-                              </td>
-                              <td>{active ? progress.balance : ''}</td>
-                              <td className="prm-remarks-cell prm-name-cell">{row.notes}</td>
-                            </tr>
-                          );
-                        })}
-                        <tr className="prm-mc-spacer" key={`qc-mc-${machineNo}-spacer`}>
-                          <td colSpan={15}>&nbsp;</td>
-                        </tr>
-                      </React.Fragment>
-                    );
-                  })}
-                  <tr className="prm-total-row">
-                    <td className="prm-name-cell" colSpan={3}>Total</td>
-                    <td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td>
-                    <td>{detailTotals.qcQty > 0 ? detailTotals.qcQty : ''}</td>
-                    <td colSpan={2}>&nbsp;</td>
-                    <td>{detailTotals.qcOk > 0 ? detailTotals.qcOk : ''}</td>
-                    <td>{detailTotals.qcRejected > 0 ? detailTotals.qcRejected : ''}</td>
-                    <td>{detailTotals.qcBalance > 0 ? detailTotals.qcBalance : ''}</td>
-                    <td />
-                  </tr>
-                  <tr className="prm-note-row border border-t-0 border-black">
-                    <td colSpan={15} className="border border-t-0 border-black px-3 py-2 font-bold text-black">
-                      Note : Amber colour of the bottle is within specification.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-                </>
+                <DetailTable
+                  kind="qc"
+                  matrixLabel="QC HOLD"
+                  title="REPORT OF QC HOLD MATERIALS (QC HOLD)"
+                  subtitle={`Material kept aside for QC Hold. (QC HOLD). ${statusCaption}`}
+                  rows={qcDetailRows}
+                  totals={detailTotalsByKind.qc}
+                  allMachines={allMachines}
+                  defectCategoryByName={defectCategoryByName}
+                  canEdit={canEdit}
+                  progressFor={reportProgressFor}
+                  onProgressChange={(row, field, value) => updateReportProgress(
+                    'qc', row.sourceKey, row.productionDate, row.bottleName,
+                    row.lotNo, row.packs, field, value
+                  )}
+                  emptyMessage="No QC HOLD database records found for this date and bottle."
+                  note="Note : Amber colour of the bottle is within specification."
+                />
+              )}
+              {selectedLog?.kind === 'numbering' && (
+                <DetailTable
+                  kind="numbering"
+                  matrixLabel="NUMBERING"
+                  title="REPORT OF NUMBERING MATERIALS (NUMBERING)"
+                  subtitle={`Material kept aside for Pallet Sorting. (NUMBERING). ${statusCaption}`}
+                  rows={numberingDetailRows}
+                  totals={detailTotalsByKind.numbering}
+                  allMachines={allMachines}
+                  defectCategoryByName={defectCategoryByName}
+                  canEdit={canEdit}
+                  progressFor={reportProgressFor}
+                  onProgressChange={(row, field, value) => updateReportProgress(
+                    'numbering', row.sourceKey, row.productionDate, row.bottleName,
+                    row.lotNo, row.packs, field, value
+                  )}
+                  emptyMessage="No NUMBERING database records found for this date and bottle."
+                />
               )}
             </div>
 
           </div>
         </div>
-      </div>
     </div>
   );
 };

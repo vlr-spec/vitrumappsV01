@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Printer, Download, CalendarDays, ChevronUp, ChevronDown, Eye, EyeOff } from 'lucide-react';
+import { Printer, Download, CalendarDays, ChevronDown, Eye, EyeOff } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { useERP } from '../../context/ERPContext';
 import { useAuth, MODULES } from '../../context/AuthContext';
@@ -15,7 +15,7 @@ import {
 import QualityReport from './QualityReport';
 import AllMachineReport from './AllMachineReport';
 import DailyMcSpeedWeightReport from './DailyMcSpeedWeightReport';
-import RePackingReport from './numbering-SQC-QC-Hold';
+import RePackingReport, { type RePackingExportData } from './numbering-SQC-QC-Hold';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shift master — mirrors the production.shift_master table
@@ -2605,14 +2605,21 @@ export const QualityControlModule: React.FC = () => {
   // Production Timeline column visibility — UI-only, shared by all four
   // machine tabs for the whole session (default hidden). No data is changed.
   const [showProductionTimeline, setShowProductionTimeline] = useState(false);
-  // Re-Packing Report layout (NUMBERING ↔ SQC/QC HOLD). Controlled from the
-  // main navigation bar so both views are directly reachable from the top
-  // nav — purely UI navigation state, no data logic affected.
-  const [repLayout, setRepLayout] = useState<'numbering' | 'sqc'>('numbering');
+  // Re-Packing Report layout (SQC/QC HOLD ↔ NUMBERING). Shared by the top-right
+  // report selector and the navigation-bar report tabs so both views stay in
+  // sync — purely UI navigation state, no data logic affected.
+  const [selectedReportType, setSelectedReportType] = useState<'sqc' | 'numbering'>('sqc');
   const [navDate, setNavDate] = useState<Date>(() => new Date());
-  // Collapses the stable navigation bar (same Hide/Show pattern as the
-  // planning module's Filters card). Layout only — no data logic affected.
-  const [showNavbar, setShowNavbar] = useState(true);
+  // The navigation bar is always visible; only the print flow changes what is
+  // rendered on paper. The scope tells @media print which single view to show:
+  // the selected report, or the Speed & Weight / Monthly Draw view.
+  const [printScope, setPrintScope] = useState<'report' | 'other' | null>(null);
+  // Latest UI-only snapshot of the report rows, supplied by RePackingReport.
+  // Kept in a ref so handing it over never triggers a re-render.
+  const reportDataRef = useRef<RePackingExportData | null>(null);
+  const handleReportDataReady = useCallback((data: RePackingExportData) => {
+    reportDataRef.current = data;
+  }, []);
 
   const isToday = toIso(navDate) === toIso(new Date());
   const dateKey = toIso(navDate);
@@ -4864,6 +4871,172 @@ export const QualityControlModule: React.FC = () => {
     }
   };
 
+  // Report-specific Excel export (SQC/QC HOLD or Numbering), driven by the
+  // top-right selector. Styling follows the same exceljs pattern as the
+  // production export: centred company heading, date/report subtitle, navy
+  // header row, thin borders, one worksheet per machine, A4 landscape.
+  const handleExportReport = async () => {
+    const data = reportDataRef.current;
+    if (!data || data.layout !== selectedReportType) {
+      toast.error('Report data is still loading. Please try again in a moment.');
+      return;
+    }
+    try {
+      const exceljsModule: any = await import('exceljs');
+      const ExcelJS = exceljsModule.Workbook ? exceljsModule : exceljsModule.default;
+
+      const isSqc = selectedReportType === 'sqc';
+      const reportName = isSqc ? 'SQC/QC HOLD Report' : 'Numbering Report';
+      const fileName = isSqc
+        ? `SQC_QC_HOLD_Report_${dateKey}.xlsx`
+        : `Numbering_Report_${dateKey}.xlsx`;
+      const columns = data.columns;
+      const colCount = columns.length;
+
+      // Keep real numbers as numbers so Excel can format/sort them; text stays
+      // untouched (same approach as handleExport).
+      const numeric = (value: string): any => {
+        const text = (value ?? '').trim();
+        if (!text) return '';
+        if (/^-?(?:\d+|\d*\.\d+)$/.test(text)) return Number(text);
+        return value;
+      };
+      const toArgb = (hex: string) => `FF${hex.replace('#', '').toUpperCase()}`;
+      const HEADER_FILL = 'FF1E293B';
+      const BORDER_COLOR = 'FFCBD5E1';
+      const ALT_FILL = toArgb('#f8fafc');
+      const widths = isSqc
+        ? [24, 8, 12, 13, 13, 10, 10, 12, 30, 10, 10, 16, 20]
+        : [24, 13, 8, 12, 10, 10, 30, 10, 10, 16, 20];
+
+      const workbook = new ExcelJS.Workbook();
+      for (const machine of data.machines) {
+        const worksheet = workbook.addWorksheet(`Machine ${machine.machineNo}`);
+        worksheet.views = [{ showGridLines: false }];
+        widths.forEach((width, i) => {
+          worksheet.getColumn(i + 1).width = width;
+        });
+
+        let rowNumber = 1;
+        worksheet.getRow(rowNumber).getCell(1).value = reportHeader.company;
+        worksheet.mergeCells(rowNumber, 1, rowNumber, colCount);
+        const titleRow = worksheet.getRow(rowNumber);
+        titleRow.height = 26;
+        titleRow.getCell(1).font = { bold: true, size: 14, color: { argb: 'FF1E293B' } };
+        titleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+        rowNumber++;
+
+        worksheet.getRow(rowNumber).getCell(1).value = `Date: ${dateLabel} — ${reportName}`;
+        worksheet.mergeCells(rowNumber, 1, rowNumber, colCount);
+        const subtitleRow = worksheet.getRow(rowNumber);
+        subtitleRow.height = 20;
+        subtitleRow.getCell(1).font = { bold: true, size: 10.5, color: { argb: 'FF1E293B' } };
+        subtitleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
+        rowNumber++;
+
+        const headerRow = worksheet.getRow(rowNumber);
+        headerRow.values = columns;
+        headerRow.height = 32;
+        for (let c = 1; c <= colCount; c++) {
+          const cell = headerRow.getCell(c);
+          cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+          cell.border = {
+            top: { style: 'thin', color: { argb: BORDER_COLOR } },
+            left: { style: 'thin', color: { argb: BORDER_COLOR } },
+            bottom: { style: 'thin', color: { argb: BORDER_COLOR } },
+            right: { style: 'thin', color: { argb: BORDER_COLOR } },
+          };
+        }
+        rowNumber++;
+
+        for (const row of machine.rows) {
+          const excelRow = worksheet.getRow(rowNumber);
+          excelRow.height = 18;
+          const fill = rowNumber % 2 === 0 ? ALT_FILL : 'FFFFFFFF';
+          for (let c = 1; c <= colCount; c++) {
+            const cell = excelRow.getCell(c);
+            cell.value = numeric(row[c - 1] ?? '');
+            cell.font = { size: 9, color: { argb: 'FF1E293B' } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+            cell.alignment = {
+              horizontal: c === 1 || c === colCount ? 'left' : 'center',
+              vertical: 'middle',
+              wrapText: true,
+            };
+            cell.border = {
+              top: { style: 'thin', color: { argb: BORDER_COLOR } },
+              left: { style: 'thin', color: { argb: BORDER_COLOR } },
+              bottom: { style: 'thin', color: { argb: BORDER_COLOR } },
+              right: { style: 'thin', color: { argb: BORDER_COLOR } },
+            };
+          }
+          rowNumber++;
+        }
+
+        worksheet.pageSetup = {
+          paperSize: 9, // A4
+          orientation: 'landscape',
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          horizontalCentered: true,
+          margins: {
+            left: 0.25,
+            right: 0.25,
+            top: 0.5,
+            bottom: 0.6,
+            header: 0.2,
+            footer: 0.25,
+          },
+        };
+        const footerText =
+          `&L&"Calibri,Regular"&8${reportName} — Machine ${machine.machineNo} — ${dateLabel}` +
+          '&R&"Calibri,Regular"&8Page &P of &N';
+        worksheet.headerFooter.oddFooter = footerText;
+        worksheet.headerFooter.evenFooter = footerText;
+      }
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${reportName} — ${dateLabel} to Excel`);
+    } catch (error) {
+      console.error(error);
+      toast.error('Failed to export the report to Excel. Please try again.');
+    }
+  };
+
+  // Report Print: mark the print as report-scoped, then let @media print show
+  // only the selected RePackingReport. The browser dialog also offers PDF.
+  const handlePrintReport = () => setPrintScope('report');
+
+  // Speed & Weight / Monthly Draw: open the native print dialog for the active
+  // view; @media print hides every other tab and uses the matching header.
+  const handlePrintOther = () => setPrintScope('other');
+
+  useEffect(() => {
+    if (!printScope) return;
+    // Wait for the print-scope class to reach the DOM before opening the dialog.
+    const timer = window.setTimeout(() => window.print(), 0);
+    const clear = () => setPrintScope(null);
+    window.addEventListener('afterprint', clear);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('afterprint', clear);
+    };
+  }, [printScope]);
+
   const [isPrinting, setIsPrinting] = useState(false);
 
   // Generates ONE landscape PDF containing all four machine reports — one
@@ -5147,8 +5320,19 @@ export const QualityControlModule: React.FC = () => {
         doc.text(`Page ${i} of ${pageCount}`, pageW - 10, pageH - FOOTER_Y_FROM_BOTTOM, { align: 'right' });
       }
 
-      doc.save(`Production_Quality_Monitor_All_Machines_${dateKey}.pdf`);
-      toast.success('Generated PDF for all 4 machines successfully.');
+      // Machine Production Print: open the generated landscape PDF in a new
+      // tab so the browser's PDF viewer offers Print / Save as PDF directly.
+      // The unchanged production PDF is kept as the download fallback when a
+      // pop-up blocker refuses the preview window.
+      const pdfUrl = doc.output('bloburl') as string;
+      const previewWindow = window.open(pdfUrl, '_blank');
+      if (previewWindow) {
+        toast.success('Production PDF opened — use Print / Save as PDF in the preview.');
+        window.setTimeout(() => URL.revokeObjectURL(pdfUrl), 60_000);
+      } else {
+        doc.save(`Production_Quality_Monitor_All_Machines_${dateKey}.pdf`);
+        toast.success('Generated PDF for all 4 machines successfully.');
+      }
     } catch (error) {
       console.error(error);
       toast.error('Failed to generate PDF. Please try again.');
@@ -5216,9 +5400,39 @@ export const QualityControlModule: React.FC = () => {
     transition: 'border-color 0.15s',
   };
 
+  // Shared action-bar button styles — only the visible controls change per tab.
+  const actionPrintStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 14px',
+    fontSize: '12.5px', fontWeight: 500, color: '#1e293b', backgroundColor: '#ffffff',
+    border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
+    transition: 'background-color 0.15s',
+  };
+  const actionExportStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 14px',
+    fontSize: '12.5px', fontWeight: 500, color: '#ffffff', backgroundColor: '#2563eb',
+    border: 'none', borderRadius: '6px', cursor: 'pointer', transition: 'background-color 0.15s',
+  };
+  const actionSelectorStyle: React.CSSProperties = {
+    height: '30px', padding: '0 8px', fontSize: '12.5px', fontWeight: 500,
+    color: '#1e293b', backgroundColor: '#ffffff', border: '1px solid #d1d5db',
+    borderRadius: '6px', cursor: 'pointer', outline: 'none',
+  };
+
+  // The print header follows the view actually on paper.
+  const printHeaderDetail =
+    printScope === 'report' || activeMachine === 6
+      ? selectedReportType === 'sqc'
+        ? 'SQC/QC HOLD Report'
+        : 'Numbering Report'
+      : activeMachine === 5
+        ? 'Speed & Weight Report'
+        : activeMachine === 0
+          ? 'Monthly Draw Report'
+          : `Machine: No. ${activeMachine}`;
+
   return (
     <div
-      className="print-container p-4 md:p-5 max-w-[1920px] mx-auto animate-in fade-in duration-200"
+      className={`print-container p-4 md:p-5 max-w-[1920px] mx-auto animate-in fade-in duration-200${printScope ? ` printing-${printScope}` : ''}`}
       style={{
         // Stable app-like shell: header + navbar are fixed-size siblings and
         // only the content area below scrolls, so switching Machine 1-4 /
@@ -5238,6 +5452,10 @@ export const QualityControlModule: React.FC = () => {
         .qm-navbar-scroll > button, .qm-navbar-scroll > label, .qm-navbar-scroll > div { flex-shrink: 0; }
         .qm-content-scroll { scrollbar-gutter: stable; }
         .qm-table-scroll { scrollbar-gutter: stable; }
+        /* One mounted report serves the selector's export + print flows. On
+           screen it is only shown on the report tab; print shows it on demand. */
+        .report-print-container { display: none !important; }
+        .report-print-container.report-visible { display: block !important; }
         @media print {
           @page { size: A4 landscape; margin: 6mm 7.5mm; }
           body { margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -5251,11 +5469,18 @@ export const QualityControlModule: React.FC = () => {
           .print-header { display: block !important; margin-bottom: 3px !important; padding-bottom: 3px !important; }
           .print-header h2 { font-size: 11px !important; margin: 0 !important; }
           .print-header p { font-size: 9px !important; margin: 0 !important; }
+          /* Report print: only the selected RePackingReport reaches the page. */
+          .printing-report .qm-content-scroll > *:not(.report-print-container) { display: none !important; }
+          .printing-report .report-print-container { display: block !important; }
+          /* Every other print (machine production, Speed & Weight, Monthly
+             Draw, or Ctrl+P) prints only the currently active view. */
+          .print-container:not(.printing-report) .qm-content-scroll > *:not(.qm-active-view) { display: none !important; }
           table { font-size: 7px !important; width: 100% !important; min-width: 0 !important; table-layout: fixed !important; border-collapse: collapse !important; page-break-inside: avoid !important; break-inside: avoid !important; }
           th, td { padding: 1px 2px !important; font-size: 7px !important; line-height: 1.1 !important; }
           thead tr th { font-size: 6.5px !important; }
-          input, select, textarea { border: none !important; background: transparent !important; padding: 0 !important; font-size: 7px !important; color: #1e293b !important; -webkit-appearance: none !important; appearance: none !important; }
-          tbody button { display: none !important; }
+          input, select, textarea { border: none !important; background: transparent !important; padding: 0 !important; font-size: 7px !important; color: #1e293b !important; -webkit-appearance: none !important; appearance: none !important; box-shadow: none !important; outline: none !important; }
+          select::-ms-expand { display: none !important; }
+          tbody button, td button { display: none !important; }
           tr { page-break-inside: avoid !important; break-inside: avoid !important; page-break-after: auto; }
           thead { display: table-header-group; }
           table, tbody { page-break-inside: avoid !important; break-inside: avoid !important; }
@@ -5268,7 +5493,7 @@ export const QualityControlModule: React.FC = () => {
           {COMPANY_NAME}
         </h2>
         <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#64748b' }}>
-          Date: {dateLabel} — Machine: No. {activeMachine}
+          Date: {dateLabel} — {printHeaderDetail}
         </p>
       </div>
       {/* Page title row — stable Quality Module header (never scrolls away) */}
@@ -5289,40 +5514,77 @@ export const QualityControlModule: React.FC = () => {
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button
-            type="button"
-            onClick={() => setShowNavbar((v) => !v)}
-            className="flex items-center gap-1.5 h-7 px-2.5 text-xs font-medium text-[#6B7280] border border-[#E5E7EB] rounded bg-white hover:bg-[#F8FAFC] transition-colors"
-            title={showNavbar ? 'Hide navigation bar' : 'Show navigation bar'}
-          >
-            {showNavbar ? 'Hide Navbar' : 'Show Navbar'}
-            {showNavbar ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          </button>
-          <button
-            onClick={handlePrint}
-            style={{
-              display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 14px',
-              fontSize: '12.5px', fontWeight: 500, color: '#1e293b', backgroundColor: '#ffffff',
-              border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
-              transition: 'background-color 0.15s',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
-          >
-            <Printer className="w-3.5 h-3.5" /> Print
-          </button>
-          <button
-            onClick={handleExport}
-            style={{
-              display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 14px',
-              fontSize: '12.5px', fontWeight: 500, color: '#ffffff', backgroundColor: '#2563eb',
-              border: 'none', borderRadius: '6px', cursor: 'pointer', transition: 'background-color 0.15s',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; }}
-          >
-            <Download className="w-3.5 h-3.5" /> Export
-          </button>
+          {/* Re-Packing Report tab: selector + report Print / Export only. */}
+          {activeMachine === 6 && (
+            <>
+              <select
+                aria-label="Select report for print and export"
+                value={selectedReportType}
+                onChange={(e) => setSelectedReportType(e.target.value as 'sqc' | 'numbering')}
+                title="Select report for Print and Export"
+                style={actionSelectorStyle}
+              >
+                <option value="sqc">SQC/QC HOLD Report</option>
+                <option value="numbering">Numbering Report</option>
+              </select>
+              <button
+                onClick={handlePrintReport}
+                title={`Print ${selectedReportType === 'sqc' ? 'SQC/QC HOLD' : 'Numbering'} Report`}
+                style={actionPrintStyle}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+              >
+                <Printer className="w-3.5 h-3.5" /> Print
+              </button>
+              <button
+                onClick={handleExportReport}
+                title={`Export ${selectedReportType === 'sqc' ? 'SQC/QC HOLD' : 'Numbering'} Report to Excel`}
+                style={actionExportStyle}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; }}
+              >
+                <Download className="w-3.5 h-3.5" /> Export
+              </button>
+            </>
+          )}
+
+          {/* Machine 1–4 tabs: production Print / Export only. */}
+          {activeMachine >= 1 && activeMachine <= 4 && (
+            <>
+              <button
+                onClick={handlePrint}
+                disabled={isPrinting}
+                title="Print / Save the machine production PDF"
+                style={{ ...actionPrintStyle, cursor: isPrinting ? 'wait' : 'pointer' }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+              >
+                <Printer className="w-3.5 h-3.5" /> {isPrinting ? 'Preparing PDF…' : 'Print'}
+              </button>
+              <button
+                onClick={handleExport}
+                title="Export all 4 machines to Excel"
+                style={actionExportStyle}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1d4ed8'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; }}
+              >
+                <Download className="w-3.5 h-3.5" /> Export
+              </button>
+            </>
+          )}
+
+          {/* Speed & Weight / Monthly Draw: native print only. */}
+          {(activeMachine === 5 || activeMachine === 0) && (
+            <button
+              onClick={handlePrintOther}
+              title={`Print ${activeMachine === 5 ? 'Speed & Weight' : 'Monthly Draw'} Report`}
+              style={actionPrintStyle}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f8fafc'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+            >
+              <Printer className="w-3.5 h-3.5" /> Print
+            </button>
+          )}
         </div>
       </div>
 
@@ -5393,8 +5655,7 @@ export const QualityControlModule: React.FC = () => {
         })}
       </div> */}
 
-      {/* Stable navigation bar — fixed-size sibling, never affected by content height */}
-      {showNavbar && (
+      {/* Stable navigation bar — always visible, fixed-size sibling, never affected by content height */}
       <div className="no-print qm-navbar-stable" style={{ flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'hidden' }}>
         {/* Machine tabs + date navigation (constant height regardless of selection) */}
         <div className="no-print qm-navbar-scroll" style={{ display: 'flex', alignItems: 'center', padding: '0 8px', backgroundColor: '#f8fafc', gap: '2px', flexShrink: 0, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', minHeight: '57px', flexWrap: 'nowrap', overflowX: 'auto', overflowY: 'hidden' }}>
@@ -5430,44 +5691,44 @@ export const QualityControlModule: React.FC = () => {
                other nav buttons). Both open the Re-Packing Report (machine
                view 6) and select its layout. */}
            <button
-            onClick={() => { setRepLayout('sqc'); setActiveMachine(6); }}
+            onClick={() => { setSelectedReportType('sqc'); setActiveMachine(6); }}
             style={{
               padding: '7px 18px',
               margin: '8px 4px',
               fontSize: '13px',
-              fontWeight: activeMachine === 6 && repLayout === 'sqc' ? 600 : 400,
-              color: activeMachine === 6 && repLayout === 'sqc' ? '#ffffff' : C.textMuted,
-              backgroundColor: activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : 'transparent',
-              border: `1px solid ${activeMachine === 6 && repLayout === 'sqc' ? '#2563eb' : C.border}`,
+              fontWeight: activeMachine === 6 && selectedReportType === 'sqc' ? 600 : 400,
+              color: activeMachine === 6 && selectedReportType === 'sqc' ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 && selectedReportType === 'sqc' ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 && selectedReportType === 'sqc' ? '#2563eb' : C.border}`,
               borderRadius: '6px',
               cursor: 'pointer',
               transition: 'all 0.15s',
               outline: 'none',
               whiteSpace: 'nowrap',
             }}
-            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'sqc')) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            onMouseEnter={(e) => { if (!(activeMachine === 6 && selectedReportType === 'sqc')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (!(activeMachine === 6 && selectedReportType === 'sqc')) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
             SQC/QC HOLD
           </button>
            <button
-            onClick={() => { setRepLayout('numbering'); setActiveMachine(6); }}
+            onClick={() => { setSelectedReportType('numbering'); setActiveMachine(6); }}
             style={{
               padding: '7px 18px',
               margin: '8px 4px',
               fontSize: '13px',
-              fontWeight: activeMachine === 6 && repLayout === 'numbering' ? 600 : 400,
-              color: activeMachine === 6 && repLayout === 'numbering' ? '#ffffff' : C.textMuted,
-              backgroundColor: activeMachine === 6 && repLayout === 'numbering' ? '#2563eb' : 'transparent',
-              border: `1px solid ${activeMachine === 6 && repLayout === 'numbering' ? '#2563eb' : C.border}`,
+              fontWeight: activeMachine === 6 && selectedReportType === 'numbering' ? 600 : 400,
+              color: activeMachine === 6 && selectedReportType === 'numbering' ? '#ffffff' : C.textMuted,
+              backgroundColor: activeMachine === 6 && selectedReportType === 'numbering' ? '#2563eb' : 'transparent',
+              border: `1px solid ${activeMachine === 6 && selectedReportType === 'numbering' ? '#2563eb' : C.border}`,
               borderRadius: '6px',
               cursor: 'pointer',
               transition: 'all 0.15s',
               outline: 'none',
               whiteSpace: 'nowrap',
             }}
-            onMouseEnter={(e) => { if (!(activeMachine === 6 && repLayout === 'numbering')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
-            onMouseLeave={(e) => { if (!(activeMachine === 6 && repLayout === 'numbering')) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            onMouseEnter={(e) => { if (!(activeMachine === 6 && selectedReportType === 'numbering')) e.currentTarget.style.backgroundColor = '#f1f5f9'; }}
+            onMouseLeave={(e) => { if (!(activeMachine === 6 && selectedReportType === 'numbering')) e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
             NUMBERING
           </button>
@@ -5606,13 +5867,12 @@ export const QualityControlModule: React.FC = () => {
           </div>
         </div>
       </div>
-      )}
 
       {/* Scrollable / dynamic content area — only this region changes size/scrolls */}
-      <div className="qm-content-scroll" style={{ flex: 1, minHeight: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', overflow: 'auto', marginTop: showNavbar ? '12px' : '0', display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
+      <div className="qm-content-scroll" style={{ flex: 1, minHeight: 0, minWidth: 0, width: '100%', maxWidth: '100%', boxSizing: 'border-box', overflow: 'auto', marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '4px' }}>
 
         {activeMachine >= 1 && activeMachine <= 4 && (
-        <div className="qm-table-card" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1278px' : '1218px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
+        <div className="qm-table-card qm-production-print-target qm-active-view" style={{ backgroundColor: C.white, border: `1px solid ${C.border}`, borderRadius: '10px', boxShadow: '0 1px 4px rgba(0,0,0,0.05)', overflow: 'clip', flexShrink: 0, minWidth: hasM ? '1278px' : '1218px', width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
         {/* Table — no scroll container in this chain: the sticky header must
             resolve against .qm-content-scroll (the module's single scrollport),
             so it stays pinned for the whole 24-hour table and only disappears
@@ -5850,11 +6110,29 @@ export const QualityControlModule: React.FC = () => {
           <QualityReport date={navDate} />
         )}
 
-        {activeMachine === 5 && <DailyMcSpeedWeightReport date={navDate} />}
+        {activeMachine === 5 && (
+          <div className="qm-active-view">
+            <DailyMcSpeedWeightReport date={navDate} />
+          </div>
+        )}
 
-        {activeMachine === 6 && <RePackingReport date={navDate} layout={repLayout} canEdit={canEdit} />}
+        {activeMachine === 0 && (
+          <div className="qm-active-view">
+            <AllMachineReport date={navDate} />
+          </div>
+        )}
 
-        {activeMachine === 0 && <AllMachineReport date={navDate} />}
+        {/* One report instance serves all three flows: the report tab shows it
+            normally, the selector's export reads its on-screen rows, and a
+            report print shows only this container via @media print. */}
+        <div className={`report-print-container qm-active-view${activeMachine === 6 ? ' report-visible' : ''}`}>
+          <RePackingReport
+            date={navDate}
+            layout={selectedReportType}
+            canEdit={canEdit}
+            onExportDataReady={handleReportDataReady}
+          />
+        </div>
 
       </div>
 

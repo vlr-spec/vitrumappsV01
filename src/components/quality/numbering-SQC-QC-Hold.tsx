@@ -1692,10 +1692,56 @@ type OrderedRow =
   | { kind: 'extra'; extra: ExtraRow; visualIdx: number; rowKey: string };
 
 /**
+ * Job ID used only for matching a saved row against a live production run.
+ * Legacy repacking rows may carry the bottle NAME in job_id; that value is not
+ * a job identity and must fall back to bottle_id for the comparison.
+ */
+const jobIdForRowMatch = (value: string, bottleName?: string | null): string => {
+  const id = String(value ?? '').trim();
+  if (!id) return '';
+  const name = String(bottleName ?? '').trim().toLowerCase();
+  if (name && id.toLowerCase() === name) return '';
+  return id;
+};
+
+/**
+ * True when a saved row already represents a live production run. The real Job
+ * ID is authoritative when both sides carry one (two jobs may share a bottle in
+ * the same shift), with bottle_id as the fallback for legacy rows. The shift is
+ * part of the match as well, so a job added in a different shift still gets its
+ * own blank row.
+ */
+const savedRowCoversRun = (
+  entry: RepackingNumberingEntry | RepackingSqcQcHoldEntry,
+  run: JobRun
+): boolean => {
+  const runJob = jobIdForRowMatch(run.jobId);
+  const savedJob = jobIdForRowMatch(String(entry.job_id ?? ''), entry.bottle_name);
+  const runBottle = String(run.bottleId ?? '').trim();
+  const savedBottle = String(entry.bottle_id ?? '').trim();
+
+  if (runJob && savedJob) {
+    if (runJob !== savedJob) return false;
+  } else if (runBottle && savedBottle) {
+    if (runBottle !== savedBottle) return false;
+  } else {
+    return false;
+  }
+
+  const runShifts = new Set(
+    run.points.map((p) => p.slot.shift_id).filter((s) => Number.isFinite(s))
+  );
+  if (runShifts.size === 0) return true;
+  return runShifts.has(Number(entry.shift) || 1);
+};
+
+/**
  * Interleaves base rows with manually added rows: every added row renders
- * directly beneath the row its (+) button was clicked on. If saved database
- * records exist, they form the base rows; otherwise detected production runs
- * form the base rows.
+ * directly beneath the row its (+) button was clicked on. Saved database
+ * records are always kept as the base rows; any live production run that is not
+ * already represented by one of them (same Job ID / Bottle ID and shift) is
+ * appended as a default blank row so mid-shift job changes stay visible. When
+ * there are no saved records, detected production runs form the base rows.
  */
 const buildOrderedRows = (
   dbEntries: (RepackingNumberingEntry | RepackingSqcQcHoldEntry)[],
@@ -1730,6 +1776,24 @@ const buildOrderedRows = (
       });
       for (const extra of childrenOf(anchor)) pushExtraWithChildren(extra);
     });
+
+    // Saved rows stay intact, but they must not hide jobs added to the Machine
+    // tab later in the same shift. Append one default blank row per live run
+    // that no saved row covers (job/bottle identity + shift), using the run's
+    // own index so existing added-row anchors and value keys remain stable.
+    rowRuns.forEach((run, rowIdx) => {
+      if (!run || run.points.length === 0) return;
+      if (dbEntries.some((entry) => savedRowCoversRun(entry, run))) return;
+      const anchor = `run:${rowIdx}`;
+      out.push({
+        kind: 'run',
+        run,
+        rowIdx,
+        visualIdx: out.length,
+        rowKey: `${dateKey}|${machineNo}|${rowIdx}|${run.bottleId || 'job'}|${run.runKey}`,
+      });
+      for (const extra of childrenOf(anchor)) pushExtraWithChildren(extra);
+    });
   } else {
     rowRuns.forEach((run, rowIdx) => {
       const anchor = `run:${rowIdx}`;
@@ -1757,7 +1821,22 @@ const buildOrderedRows = (
   return out;
 };
 
-const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc'; canEdit: boolean }> = ({ date, layout = 'numbering', canEdit }) => {
+/**
+ * UI-only snapshot of the rows currently on screen. The parent uses it for the
+ * report-specific Excel export; it never reads or writes any saved data.
+ */
+export interface RePackingExportData {
+  layout: 'numbering' | 'sqc';
+  columns: string[];
+  machines: { machineNo: number; rows: string[][] }[];
+}
+
+const RePackingReport: React.FC<{
+  date: Date;
+  layout?: 'numbering' | 'sqc';
+  canEdit: boolean;
+  onExportDataReady?: (data: RePackingExportData) => void;
+}> = ({ date, layout = 'numbering', canEdit, onExportDataReady }) => {
   const { bottles } = useERP();
   const machineNos = MACHINE_NOS;
 
@@ -2340,6 +2419,135 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc'; canE
   const extraRowKey = (machineNo: number, extraId: number): string =>
     `${dateKey}|${machineNo}|x|${extraId}`;
 
+  // Read-only snapshot of what the active layout renders, used by the parent's
+  // report-specific Excel export. It reuses the exact values/fallbacks of the
+  // table cells above — no repository call and no change to any stored data.
+  const buildExportData = useCallback((): RePackingExportData => {
+    const isNum = layout === 'numbering';
+    const values = isNum ? numberingValues : sqcValues;
+    const extrasStore = isNum ? numberingExtras : sqcExtras;
+    const savedStore = isNum ? savedNumbering : savedSqc;
+    const columns = isNum ? NUMBERING_COLUMNS : SQC_COLUMNS;
+
+    const machines = MACHINE_NOS.map((machineNo) => {
+      const rowRuns = (machineRuns[machineNo] ?? []).filter((run) => run.points.length > 0);
+      const extras = extrasStore[extraRowsKey(machineNo)] ?? [];
+      const dbEntries = savedStore[machineNo] ?? [];
+      const rows = buildOrderedRows(dbEntries, rowRuns, extras, machineNo, dateKey).map((row) => {
+        const key = row.rowKey;
+        const isDbRow = row.kind === 'db';
+        const jobNameFallback =
+          row.kind === 'extra'
+            ? row.extra.jobName
+            : isDbRow
+              ? row.dbEntry.bottle_name || ''
+              : runJobName(row.run);
+        const shiftFallback =
+          row.kind === 'extra'
+            ? row.extra.shift
+            : isDbRow
+              ? String(row.dbEntry.shift || 1)
+              : runShift(row.run);
+        const packTypeFallback = isDbRow
+          ? row.dbEntry.pack_type || ''
+          : row.kind === 'extra'
+            ? row.extra.packType
+            : '';
+        const packSizeFallback =
+          isDbRow && row.dbEntry.pcs_per_pack != null
+            ? String(row.dbEntry.pcs_per_pack)
+            : row.kind === 'extra'
+              ? row.extra.pcsPack
+              : '';
+        const jobName = cellValue(values, key, 'jobName', jobNameFallback);
+        const shift = cellValue(values, key, 'shift', shiftFallback);
+        const time = cellValue(values, key, 'time', '');
+        const packType = cellValue(values, key, 'packType', packTypeFallback);
+        const packSize = cellValue(values, key, 'pcsPack', packSizeFallback);
+        const cartons = cellValue(
+          values,
+          key,
+          'cartons',
+          isDbRow && row.dbEntry.cartons != null ? String(row.dbEntry.cartons) : ''
+        );
+        const defects = cellValue(values, key, 'defects', isDbRow ? row.dbEntry.defect_name || '' : '');
+        const mould = cellValue(values, key, 'mould', isDbRow ? row.dbEntry.mould || '' : '');
+        const checkerName = cellValue(
+          values,
+          key,
+          'checkerName',
+          isDbRow ? row.dbEntry.checker_name || '' : ''
+        );
+        const remarks = cellValue(
+          values,
+          key,
+          'qaShiftEx',
+          isDbRow ? row.dbEntry.remarks || row.dbEntry.qa_shift_ex_name || '' : ''
+        );
+
+        if (isNum) {
+          return [
+            jobName,
+            packType,
+            shift,
+            time,
+            packSize,
+            cartons,
+            defects,
+            mould,
+            cellValue(values, key, 'sectionNo', isDbRow ? row.dbEntry.section_no || '' : ''),
+            checkerName,
+            remarks,
+          ];
+        }
+        return [
+          jobName,
+          shift,
+          time,
+          packType,
+          cellValue(
+            values,
+            key,
+            'lotNo',
+            isDbRow && 'lot_no' in row.dbEntry ? row.dbEntry.lot_no || '' : ''
+          ),
+          packSize,
+          cartons,
+          cellValue(
+            values,
+            key,
+            'noOfBottle',
+            isDbRow && 'defective_bottles' in row.dbEntry && row.dbEntry.defective_bottles != null
+              ? String(row.dbEntry.defective_bottles)
+              : ''
+          ),
+          defects,
+          mould,
+          cellValue(values, key, 'section', isDbRow ? row.dbEntry.section_no || '' : ''),
+          checkerName,
+          remarks,
+        ];
+      });
+      return { machineNo, rows };
+    });
+
+    return { layout, columns, machines };
+  }, [
+    layout,
+    numberingValues,
+    sqcValues,
+    numberingExtras,
+    sqcExtras,
+    savedNumbering,
+    savedSqc,
+    machineRuns,
+    dateKey,
+  ]);
+
+  useEffect(() => {
+    onExportDataReady?.(buildExportData());
+  }, [buildExportData, onExportDataReady]);
+
   const addExtraRow = (
     target: 'numbering' | 'sqc',
     machineNo: number,
@@ -2865,6 +3073,7 @@ const RePackingReport: React.FC<{ date: Date; layout?: 'numbering' | 'sqc'; canE
     >
       {/* Save Button — Fixed/sticky at top-right so it stays visible while scrolling */}
       <div
+        className="no-print"
         style={{
           display: 'flex',
           justifyContent: 'flex-end',
