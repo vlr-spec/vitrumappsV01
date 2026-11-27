@@ -30,11 +30,11 @@ export const MODULES = {
 
 /**
  * Screen names that are not module_master rows but still belong to one.
- * Reports owns Numbering, SQC/QC HOLD and Resorting Logs, so it follows
- * Quality Control (module_id = 2) -- there is no separate Reports module.
+ * Resorting owns Numbering, SQC/QC HOLD and Resorting Logs, so it follows
+ * Quality Control (module_id = 2) -- there is no separate Resorting module.
  */
 export const SCREEN_MODULE_ALIASES: Record<string, string> = {
-  Reports: MODULES.QUALITY_CONTROL,
+  Resorting: MODULES.QUALITY_CONTROL,
 };
 
 const resolveModuleName = (module: string): string => SCREEN_MODULE_ALIASES[module] ?? module;

@@ -37,13 +37,13 @@ const NAV_ITEMS: MenuNavItem[] = [
   { id: 'Production Planning', label: 'Production Planning', icon: CalendarDays, module: 'Production Planning'},
   { id: 'Master Management', label: 'Master Management', icon: Cpu, module: 'Master Management' },
   { id: 'Quality Control', label: 'Hourly Production', icon: ClipboardCheck, module: 'Quality Control' },
-  { id: 'Reports', label: 'Reports', icon: FileBarChart, module: 'Quality Control' },
+  { id: 'Resorting', label: 'Resorting', icon: FileBarChart, module: 'Quality Control' },
   { id: 'Settings', label: 'Settings', icon: Sliders },
   { id: 'Profile', label: 'Profile', icon: User },
 ];
 
 /** module_master rows already represented by a dedicated nav entry above. */
-const STATIC_MODULE_NAMES = new Set(['Production Planning', 'Master Management', 'Quality Control', 'Reports']);
+const STATIC_MODULE_NAMES = new Set(['Production Planning', 'Master Management', 'Quality Control', 'Resorting']);
 
 export const Sidebar: React.FC = () => {
   const { activeModule, setActiveModule } = useERP();

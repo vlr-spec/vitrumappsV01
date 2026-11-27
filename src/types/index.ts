@@ -118,7 +118,7 @@ export type ActiveModule =
   | 'Production Planning'
   | 'Master Management'
   | 'Quality Control'
-  | 'Reports'
+  | 'Resorting'
   | 'Settings'
   | 'Profile'
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
